@@ -171,7 +171,16 @@
         ombBox.appendChild(badge(`在线 v${omb.version || '?'}`, 'ok'));
         addLine(ombBox, '地址', omb.url || '-');
         addLine(ombBox, '模式', omb.desktopManaged ? (omb.paired ? '桌面端（已配对）' : '桌面端（未配对）') : 'CLI 模式');
-        addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}`);
+        const chief = (omb.bots || []).find((b) => b.chiefOfStaff) || (omb.bots || [])[0];
+        const waitCount = (omb.bots || []).filter((b) => b.waitingForTeammates).length;
+        addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}${waitCount ? `（${waitCount} 个等待队友）` : ''}`);
+        if (chief?.approvalMode) {
+          addLine(ombBox, '主 Bot 审批模式', `${chief.name} · ${chief.approvalMode}`);
+        }
+        if (omb.doctor) {
+          const docErrs = Array.isArray(omb.doctor.problems) ? omb.doctor.problems.length : 0;
+          addLine(ombBox, 'Doctor 自检', docErrs ? `异常 ${docErrs} 项` : `正常（已检 ${omb.doctor.checked ?? 0} 项）`);
+        }
       } else {
         ombBox.appendChild(badge('OpenMausBot 离线', 'err'));
         if (omb?.error) addLine(ombBox, '错误', omb.error);
@@ -183,6 +192,11 @@
         addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : `无（缓存 ${st.bridge.privateDraftsCount ?? 0}）`);
         addLine(ombBox, '在途续接 / 断线缓冲', `${st.bridge.inFlightTurns ?? 0} / ${st.bridge.outboundBuffered ?? 0}（补发 ${st.bridge.outboundReplayed ?? 0}）`);
         addLine(ombBox, '出站失败 / 状态自愈', `${st.bridge.outboundFailures ?? 0} / ${st.bridge.stateCorruptRecoveries ?? 0}`);
+        if (st.bridge.runtimePrefs) {
+          const rp = st.bridge.runtimePrefs;
+          const qText = rp.quietHours?.enabled ? `${rp.quietHours.start}-${rp.quietHours.end}` : '关闭';
+          addLine(ombBox, '运行期热偏好', `免打扰:${qText} · 接单提示:${rp.externalAckInSelf ? '开' : '关'} · 脱敏:${rp.externalSanitizeMentions || 'all'}`);
+        }
       }
       if (st.runtime) {
         addLine(ombBox, '进程内存 / 运行时长', `${st.runtime.memoryRssMB} MB / ${st.runtime.uptimeSec}s`);

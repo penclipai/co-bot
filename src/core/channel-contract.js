@@ -6,6 +6,49 @@ import { redactSecrets } from './chat-context.js';
 
 const CHAT_TYPES = new Set(['self', 'direct', 'group', 'system']);
 const DEVICE_TYPES = new Set(['mobile', 'desktop', 'pad', 'web', 'unknown']);
+const AUDIO_EXT_RE = /\.(mp3|wav|m4a|ogg|opus|amr|aac|flac|webm)$/i;
+
+/** 判断附件是否为语音/音频消息。 */
+export function isAudioAttachment(att) {
+  if (!att || typeof att !== 'object') return false;
+  if (att.kind === 'audio' || att.kind === 'voice') return true;
+  if (typeof att.mime === 'string' && att.mime.toLowerCase().startsWith('audio/')) return true;
+  if (typeof att.name === 'string' && AUDIO_EXT_RE.test(att.name)) return true;
+  return false;
+}
+
+/** 格式化微信/飞书等 IM 的链接卡片 / 转发摘要。 */
+export function formatLinkCardSnippet(card) {
+  if (!card || typeof card !== 'object') return '';
+  const title = redactSecrets(card.title || '').replace(/\s+/g, ' ').trim();
+  const desc = redactSecrets(card.description || '').replace(/\s+/g, ' ').trim();
+  const url = redactSecrets(card.url || '').trim();
+  const source = redactSecrets(card.source || '').replace(/\s+/g, ' ').trim();
+  if (!title && !url && !desc) return '';
+  const parts = [];
+  if (title) parts.push(`标题：${title}`);
+  if (source) parts.push(`来源：${source}`);
+  if (desc) parts.push(`摘要：${desc.length > 160 ? `${desc.slice(0, 160)}…` : desc}`);
+  if (url) parts.push(`链接：${url}`);
+  return `[转发卡片] ${parts.join(' | ')}`;
+}
+
+function normalizeLinkCard(rawCard) {
+  if (!rawCard || typeof rawCard !== 'object') return null;
+  const title = rawCard.title ? String(rawCard.title).trim() : '';
+  const url = rawCard.url || rawCard.href ? String(rawCard.url || rawCard.href).trim() : '';
+  const description = rawCard.description || rawCard.summary || rawCard.digest
+    ? String(rawCard.description || rawCard.summary || rawCard.digest).trim()
+    : '';
+  const source = rawCard.source || rawCard.appName ? String(rawCard.source || rawCard.appName).trim() : '';
+  if (!title && !url) return null;
+  return {
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(url ? { url } : {}),
+    ...(source ? { source } : {}),
+  };
+}
 
 export const DEFAULT_CAPABILITIES = Object.freeze({
   markdown: true,
@@ -265,6 +308,7 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
     const dev = raw.device;
     const mentions = normalizeMentions(raw.mentions, { selfId });
     const derivedMentionMe = mentions.some((m) => m.isSelf || (selfStr && m.id === selfStr) || (m.isAll && atAllCountsAsMention));
+    const linkCard = normalizeLinkCard(raw.linkCard ?? raw.card);
     const ev = {
       id: String(raw.id),
       ts: Number(raw.ts) || Date.now(),
@@ -286,6 +330,7 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
         },
       } : {}),
       text: String(raw.text ?? ''),
+      ...(linkCard ? { linkCard } : {}),
       ...(raw.mentionsMe !== undefined ? { mentionsMe: Boolean(raw.mentionsMe) } : (derivedMentionMe ? { mentionsMe: true } : {})),
       ...(mentions.length ? { mentions } : {}),
       ...(raw.replyTo != null ? { replyTo: String(raw.replyTo) } : {}),
@@ -298,6 +343,9 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
             name: String(a.name ?? a.id),
             ...(Number(a.size) ? { size: Number(a.size) } : {}),
             ...(a.mime ? { mime: String(a.mime) } : {}),
+            ...(a.kind ? { kind: String(a.kind) } : {}),
+            ...(Number(a.durationSec) > 0 ? { durationSec: Number(a.durationSec) } : {}),
+            ...(a.transcript ? { transcript: String(a.transcript) } : {}),
           })),
       } : {}),
     };
@@ -316,6 +364,7 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
   const d = raw.fromDevice;
   const senderId = String(raw.fromId ?? '');
   const mentions = normalizeMentions(raw.mentions, { atUserIds: at, atAll: Boolean(raw.atAll), selfId });
+  const linkCard = normalizeLinkCard(raw.linkCard ?? raw.card);
   const ev = {
     id: String(raw.msgId),
     ts: Number(raw.time) || Date.now(),
@@ -329,6 +378,7 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
       ? { id: String(d.id ?? ''), type: DEVICE_TYPES.has(d.type) ? d.type : 'unknown', name: d.name ? String(d.name) : undefined }
       : undefined,
     text: String(raw.text ?? ''),
+    ...(linkCard ? { linkCard } : {}),
     mentionsMe: Boolean((selfStr && at.includes(selfStr)) || (raw.atAll && atAllCountsAsMention) || mentions.some((m) => m.isSelf)),
     ...(mentions.length ? { mentions } : {}),
     replyTo: raw.quoteMsgId != null ? String(raw.quoteMsgId) : undefined,
@@ -339,6 +389,9 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
         name: String(f.name ?? f.fileId),
         size: Number(f.size) || undefined,
         mime: f.mime ? String(f.mime) : undefined,
+        ...(f.kind ? { kind: String(f.kind) } : {}),
+        ...(Number(f.durationSec) > 0 ? { durationSec: Number(f.durationSec) } : {}),
+        ...(f.transcript ? { transcript: String(f.transcript) } : {}),
       })),
     } : {}),
   };

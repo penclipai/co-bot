@@ -19,6 +19,7 @@ const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
 const applyStyle = argv.includes('--apply-style');
 const forceStyle = argv.includes('--force');
+const checkUpdate = argv.includes('--check-update');
 const cfgIdx = argv.indexOf('--config');
 const explicitCfg = cfgIdx >= 0 && argv[cfgIdx + 1] ? argv[cfgIdx + 1] : null;
 const rawCfgPath = explicitCfg ?? (fs.existsSync('config.json') ? 'config.json' : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null));
@@ -95,6 +96,27 @@ if (probe) {
   } else {
     const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
     console.log(`✓ OpenMausBot v${ombHealth.version ?? '?'} 已就绪（${cfg.openmausbot.url}，可见 Bot ${visible.length} 个，主 Bot：${chief?.name ?? '无'}）`);
+    const doc = ombHealth?.doctor;
+    if (doc) {
+      if (Array.isArray(doc.problems) && doc.problems.length) {
+        console.log(`⚠ OpenMausBot doctor 发现 ${doc.problems.length} 个问题：${doc.problems.join('；')}`);
+      } else {
+        console.log(`✓ OpenMausBot doctor 自检正常（已检 ${doc.checked ?? 0} 项${doc.fixed?.length ? `，自动修复 ${doc.fixed.length} 项` : ''}）`);
+      }
+    }
+    if (checkUpdate && ombHealth.version) {
+      const npmCmd = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+      const npmArgs = process.platform === 'win32'
+        ? ['/d', '/s', '/c', 'npm view openmausbot version']
+        : ['view', 'openmausbot', 'version'];
+      const upRes = spawnSync(npmCmd, npmArgs, { timeout: 3500, encoding: 'utf8' });
+      const latestVer = upRes.status === 0 ? String(upRes.stdout || '').trim().split(/\r?\n/)[0].trim() : '';
+      if (latestVer && latestVer !== ombHealth.version) {
+        console.log(`⬆ 发现 OpenMausBot 新版本 v${latestVer}（当前 v${ombHealth.version}），可运行 \`npm run omb -- upgrade\` 平滑升级。`);
+      } else if (latestVer) {
+        console.log(`✓ OpenMausBot 已是最新版 v${ombHealth.version}`);
+      }
+    }
     const scopes = Array.isArray(sess?.scopes) ? sess.scopes.join(', ') : '';
     const getPatchClient = () => (!desktopManaged && paired && !sess?.scopes?.includes('admin'))
       ? new OpenMausBotClient({ baseUrl: cfg.openmausbot.url, timeoutMs: 5000 })

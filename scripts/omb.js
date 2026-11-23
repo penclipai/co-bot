@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, APP_ROOT } from '../src/config.js';
 import { OpenMausBotClient } from '../src/openmausbot/client.js';
 
-const ACTIONS = new Set(['ensure', 'start', 'stop', 'restart', 'status', 'logs']);
-const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--transport']);
+const ACTIONS = new Set(['ensure', 'start', 'stop', 'restart', 'status', 'logs', 'upgrade']);
+const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--transport', '--version']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 export function isLoopbackUrl(rawUrl) {
@@ -297,13 +297,128 @@ export function stopOpenMausBot(cfg, { log = console.log } = {}) {
   });
 }
 
+function defaultFetchLatestOmbVersion() {
+  const npmCmd = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+  const npmArgs = process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'npm view openmausbot version']
+    : ['view', 'openmausbot', 'version'];
+  const res = spawnSync(npmCmd, npmArgs, { timeout: 6000, encoding: 'utf8' });
+  if (res.status !== 0) {
+    throw new Error(String(res.stderr || res.stdout || 'npm view openmausbot version 失败').trim());
+  }
+  return String(res.stdout || '').trim().split(/\r?\n/)[0].trim();
+}
+
+function defaultRunNpmInstall(cwd = APP_ROOT) {
+  const npmCmd = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+  const npmArgs = process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'npm install --no-audit --no-fund']
+    : ['install', '--no-audit', '--no-fund'];
+  const res = spawnSync(npmCmd, npmArgs, { cwd, timeout: 120_000, encoding: 'utf8' });
+  if (res.status !== 0) {
+    throw new Error(String(res.stderr || res.stdout || 'npm install 失败').trim());
+  }
+}
+
+/** 平滑升级本地 OpenMausBot 依赖：检查最新版本 -> 停进程释放锁 -> 更新 package.json & npm install -> 按需重启。 */
+export async function upgradeOpenMausBot(cfg, {
+  dry = false,
+  version = 'latest',
+  force = false,
+  pkgPath = path.join(APP_ROOT, 'package.json'),
+  log = console.log,
+  fetchLatestVersion = defaultFetchLatestOmbVersion,
+  runNpmInstall = defaultRunNpmInstall,
+  stopCobot = null,
+  startCobot = null,
+  ensureOmb = (c) => ensureOpenMausBot(c, { log }),
+  stopOmb = (c) => stopOpenMausBot(c, { log }),
+} = {}) {
+  let current = 'unknown';
+  try {
+    const installedPkg = path.join(path.dirname(pkgPath), 'node_modules', 'openmausbot', 'package.json');
+    if (fs.existsSync(installedPkg)) {
+      current = JSON.parse(fs.readFileSync(installedPkg, 'utf8'))?.version || current;
+    } else if (fs.existsSync(pkgPath)) {
+      current = String(JSON.parse(fs.readFileSync(pkgPath, 'utf8'))?.dependencies?.openmausbot || current).replace(/^[\^~]/, '');
+    }
+  } catch { /* ignore */ }
+
+  const target = !version || version === 'latest'
+    ? String(await fetchLatestVersion()).trim().replace(/^v/, '')
+    : String(version).trim().replace(/^v/, '');
+  if (!target) throw new Error('未能解析目标 openmausbot 版本号');
+
+  const upToDate = current === target && !force;
+  if (dry) {
+    log(upToDate
+      ? `✓ OpenMausBot 已是最新版本 v${current}（目标 v${target}）`
+      : `[dry-run] 发现可升级版本：OpenMausBot v${current} -> v${target}（将停止托管进程、更新 package.json 并运行 npm install）`);
+    return { dry: true, upgraded: false, current, target, upToDate };
+  }
+
+  if (upToDate) {
+    log(`✓ OpenMausBot 已是最新版本 v${current}`);
+    return { dry: false, upgraded: false, current, target, upToDate: true };
+  }
+
+  const cobotPidFile = path.join(cfg.dataDir, 'cobot.pid');
+  const cobotPid = readPidFile(cobotPidFile);
+  const cobotWasRunning = Boolean(cobotPid && isPidAlive(cobotPid));
+
+  if (cobotWasRunning) {
+    if (typeof stopCobot === 'function') await stopCobot();
+    else await stopManagedProcess({ name: 'co-bot', pidFile: cobotPidFile, log });
+  }
+  await stopOmb(cfg);
+
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  pkg.dependencies = pkg.dependencies || {};
+  pkg.dependencies.openmausbot = `^${target}`;
+  fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
+
+  await runNpmInstall(path.dirname(pkgPath));
+  log(`✓ 已升级 openmausbot：v${current} -> v${target}`);
+
+  await ensureOmb(cfg);
+  if (cobotWasRunning) {
+    if (typeof startCobot === 'function') {
+      await startCobot();
+    } else {
+      await spawnManagedProcess({
+        name: 'co-bot',
+        cmd: process.execPath,
+        args: ['--no-deprecation', path.join(APP_ROOT, 'src', 'index.js')],
+        cwd: APP_ROOT,
+        pidFile: cobotPidFile,
+        logFile: path.join(cfg.dataDir, 'cobot.log'),
+        errFile: path.join(cfg.dataDir, 'cobot.err.log'),
+        healthUrl: `http://${cfg.web.host}:${cfg.web.port}/api/health`,
+        timeoutMs: 8000,
+        pollIntervalMs: 120,
+      });
+      log('✓ 已自动重启 co-bot 守护进程');
+    }
+  }
+  return { dry: false, upgraded: true, current, target, restartedCobot: cobotWasRunning };
+}
+
 function parseCliArgs(argv) {
   let action = '';
   let help = false;
+  let dry = false;
+  let force = false;
+  let targetVersion = 'latest';
   const extraArgs = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') { help = true; continue; }
+    if (a === '--dry' || a === '--dry-run') { dry = true; continue; }
+    if (a === '--force') { force = true; continue; }
+    if (a === '--version' && argv[i + 1] !== undefined) {
+      targetVersion = String(argv[++i]);
+      continue;
+    }
     if (VALUE_FLAGS.has(a) && argv[i + 1] !== undefined) {
       extraArgs.push(a, argv[++i]);
       continue;
@@ -314,15 +429,16 @@ function parseCliArgs(argv) {
     }
     extraArgs.push(a);
   }
-  return { action: action || 'status', help, extraArgs };
+  return { action: action || 'status', help, dry, force, targetVersion, extraArgs };
 }
 
 function usage() {
   console.log([
-    '用法：npm run omb -- <ensure|start|stop|restart|status|logs> [--config <path>] [--omb <url>]',
+    '用法：npm run omb -- <ensure|start|stop|restart|status|logs|upgrade> [--config <path>] [--omb <url>]',
     '  ensure / start  检查本机 OpenMausBot，未运行则按本机依赖自动拉起并对齐 CLI computer=off',
     '  stop            停止由 co-bot 托管拉起的 OpenMausBot CLI（data/openmausbot.pid）',
     '  restart         重启 OpenMausBot CLI',
+    '  upgrade         检查并升级 openmausbot 至 npm 最新版（支持 --dry / --version <x.y.z>）',
     '  status          查看 OpenMausBot 连通、运行模式与主 Bot 状态',
     '  logs            查看 data/openmausbot.log 最近日志',
   ].join('\n'));
@@ -344,7 +460,9 @@ async function statusOpenMausBot(cfg) {
     const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
     const mode = desktopManaged ? '桌面端' : 'CLI 模式';
     const managedText = alive ? `托管 PID ${pid}` : '外部启动';
-    console.log(`🟢 OpenMausBot v${h.version ?? '?'} 在线（${cfg.openmausbot.url}，${mode}，${managedText}${chief ? `，主 Bot ${chief.name} computer=${chief.computer ?? 'auto'}` : ''}）`);
+    const doc = h?.doctor;
+    const docText = doc ? `，doctor=${doc.problems?.length ? `异常(${doc.problems.length})` : `正常(${doc.checked ?? 0}项)`}` : '';
+    console.log(`🟢 OpenMausBot v${h.version ?? '?'} 在线（${cfg.openmausbot.url}，${mode}，${managedText}${chief ? `，主 Bot ${chief.name} computer=${chief.computer ?? 'auto'}` : ''}${docText}）`);
   } catch {
     if (pid && !alive) fs.rmSync(pidFile, { force: true });
     console.log(`⚪ OpenMausBot 未运行（${cfg.openmausbot.url}）`);
@@ -353,7 +471,7 @@ async function statusOpenMausBot(cfg) {
 }
 
 async function main() {
-  const { action, help, extraArgs } = parseCliArgs(process.argv.slice(2));
+  const { action, help, dry, force, targetVersion, extraArgs } = parseCliArgs(process.argv.slice(2));
   if (help) {
     usage();
     return;
@@ -367,6 +485,8 @@ async function main() {
   } else if (action === 'restart') {
     await stopOpenMausBot(cfg);
     await ensureOpenMausBot(cfg);
+  } else if (action === 'upgrade') {
+    await upgradeOpenMausBot(cfg, { dry, force, version: targetVersion });
   } else if (action === 'ensure' || action === 'start') {
     const res = await ensureOpenMausBot(cfg);
     if (res.skipped) {

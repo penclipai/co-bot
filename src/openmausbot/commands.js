@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { clip, mdClip, safeAttachmentName } from '../format.js';
 import { fmtTokens, usageBar, fmtSchedule, formatOmbError, parseChoiceIndex } from './cards.js';
-import { levenshtein } from './mentions.js';
+import { levenshtein, parseHHMM } from './mentions.js';
 import { GROK_MOBILE_PROFILE } from './persona.js';
 
 const TASK_PICK_TTL = 2 * 60 * 1000;
@@ -54,6 +54,7 @@ const CANONICAL_COMMANDS = [
   'help', 'bots', 'groups', 'status', 'stop', 'steer', 'cancel', 'digest',
   'chats', 'chat', 'summary', 'schedule', 'sendback', 'find', 'search',
   'routines', 'context', 'export', 'model', 'memory', 'tasks', 'task', 'style', 'compact',
+  'approval', 'quiet', 'prefs',
 ];
 const COMMAND_SET = new Set(CANONICAL_COMMANDS);
 const SAFE_ENGLISH_WORDS = new Set([
@@ -129,7 +130,8 @@ export function buildHelpText(bridge, topic = '') {
     model: [
       `🤖 **Bot 协同、模型与控制**`,
       `- \`@<Bot名>\` / \`@<群名>\`：点名其他 Bot 或多 Bot 协作群组；引用气泡续聊`,
-      `- \`${t} bots\` / \`status\` / \`model [关键词|high]\` / \`context [群名]\` / \`memory\` / \`style grok\``,
+      `- \`${t} bots\` / \`status\` / \`model [关键词|high]\` / \`approval [ask|auto|full]\` / \`context [群名]\` / \`memory\` / \`style grok\``,
+      `- \`${t} quiet [on|off|HH:MM-HH:MM]\` / \`prefs [ack on|off | sanitize all|dangerous|none | stall <秒> | reset]\`：免重启热调参`,
       `- \`${t} steer\` / \`cancel\` / \`stop\`；卡片支持 \`ok / always / no / skip\` 与中文序数`,
     ],
   };
@@ -238,7 +240,9 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
         const role = b.chiefOfStaff ? '（主 Bot）' : '';
         const st = b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲';
         const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
-        return `- **${b.name}**${role} · ${st}${mod}`;
+        const apv = b.approvalMode ? ` · 审批:${b.approvalMode}` : '';
+        const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
+        return `- **${b.name}**${role} · ${st}${mod}${apv}${waitTm}`;
       });
       parts.push(`🤖 **OpenMausBot 在线 Bot（${visible.length}）**\n${lines.join('\n')}`);
     }
@@ -270,11 +274,102 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       : (sess?.kind === 'session' ? 'CLI 模式（已配对）' : 'CLI 模式（本地免配对）');
     const stickyNote = bridge.isStickyActive() ? ' · 连续对话激活中' : '';
     const groupNote = visibleGroups.length ? ` · 协作群组：${visibleGroups.length} 个` : '';
+    const doc = h?.doctor;
+    const docNote = doc ? ` · Doctor：${doc.problems?.length ? `⚠️ ${doc.problems.length} 个异常` : `正常（${doc.checked ?? 0}项）`}` : '';
     await sensSink.say(
-      `🟢 **OpenMausBot v${h.version ?? '?'}** · 隔离模式：${h.box ?? 'off'} · 认证：${authState}\n` +
-      `可见 Bot：${visible.length} 个${groupNote} · 默认主 Bot：**${chief?.name ?? '无'}**（风格：${chief?.replyStyle ?? 'default'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote}` +
+      `🟢 **OpenMausBot v${h.version ?? '?'}** · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
+      `可见 Bot：${visible.length} 个${groupNote} · 默认主 Bot：**${chief?.name ?? '无'}**（风格：${chief?.replyStyle ?? 'default'}，审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote}` +
       (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : ''),
     );
+    return true;
+  }
+
+  const quietM = raw.match(/^(?:quiet|quietHours|免打扰|勿扰)(?:\s+([\s\S]+))?$/i);
+  if (quietM) {
+    const arg = (quietM[1] ?? '').trim();
+    const cur = bridge.quietHours || {};
+    if (!arg || /^(show|查看|状态)$/i.test(arg)) {
+      await sensSink.say(
+        `🌙 **夜间免打扰**：${cur.enabled ? '已开启' : '未开启'}（时段 \`${cur.start || '22:00'}\` ~ \`${cur.end || '08:30'}\`）\n` +
+        `用法：\`${bridge.trigger} quiet on | off | 23:00-07:30\``,
+        null,
+        null,
+        [
+          cur.enabled
+            ? { label: '关闭免打扰', text: `${bridge.trigger} quiet off` }
+            : { label: '开启免打扰', text: `${bridge.trigger} quiet on`, kind: 'primary' },
+        ],
+      );
+      return true;
+    }
+    if (/^(on|enable|开启|打开)$/i.test(arg)) {
+      const next = bridge.setQuietHours({ enabled: true });
+      await sensSink.say(`🌙 已开启免打扰（\`${next.start}\` ~ \`${next.end}\`），期间主动通知将自动攒成汇总（\`${bridge.trigger} digest\` 可随时查看）。`);
+      return true;
+    }
+    if (/^(off|disable|关闭|取消)$/i.test(arg)) {
+      const next = bridge.setQuietHours({ enabled: false });
+      const flushed = bridge.quietQueue.length ? await bridge.flushQuietDigest() : 0;
+      await sensSink.say(`☀️ 已关闭免打扰（${next.start}~${next.end}）${flushed ? `，已顺带发出积压的 ${flushed} 条通知` : ''}。`);
+      return true;
+    }
+    const winM = arg.match(/^(\d{1,2}:\d{2})\s*[-~到至]\s*(\d{1,2}:\d{2})$/);
+    if (!winM || parseHHMM(winM[1]) == null || parseHHMM(winM[2]) == null) {
+      await sensSink.say(`无效时间格式「${arg}」，请使用 \`${bridge.trigger} quiet 23:00-07:30\`、\`on\` 或 \`off\`。`);
+      return true;
+    }
+    const fmtClock = (s) => {
+      const [h, m] = s.split(':');
+      return `${String(Number(h)).padStart(2, '0')}:${String(Number(m)).padStart(2, '0')}`;
+    };
+    const next = bridge.setQuietHours({ enabled: true, start: fmtClock(winM[1]), end: fmtClock(winM[2]) });
+    await sensSink.say(`🌙 已更新并开启免打扰时段：\`${next.start}\` ~ \`${next.end}\`（无需重启即时生效）。`);
+    return true;
+  }
+
+  const prefsM = raw.match(/^(?:prefs?|pref|偏好|设置)(?:\s+([\s\S]+))?$/i);
+  if (prefsM) {
+    const arg = (prefsM[1] ?? '').trim();
+    if (!arg || /^(show|查看|list)$/i.test(arg)) {
+      const p = bridge.getRuntimePrefs();
+      await sensSink.say(
+        `⚙️ **运行期热偏好（免重启持久化）**\n` +
+        `- 外群后台接单自聊轻提示（\`ack\`）：${p.externalAckInSelf ? '开启' : '关闭'}\n` +
+        `- 外群出站防误艾特（\`sanitize\`）：\`${p.externalSanitizeMentions}\`（all / dangerous / none）\n` +
+        `- 长任务停滞看门狗阈值（\`stall\`）：${p.turnStallMs > 0 ? `${Math.round(p.turnStallMs / 1000)} 秒` : '已关闭'}\n` +
+        `- 免打扰（\`quiet\`）：${p.quietHours?.enabled ? `开启（${p.quietHours.start}~${p.quietHours.end}）` : '关闭'}\n\n` +
+        `示例：\`${bridge.trigger} prefs ack on\`、\`prefs sanitize dangerous\`、\`prefs stall 120\`、\`prefs reset\``,
+      );
+      return true;
+    }
+    const lowArg = arg.toLowerCase();
+    if (/^(reset|重置)$/.test(lowArg)) {
+      bridge.setRuntimePref('reset');
+      await sensSink.say('🔄 已重置所有运行期热偏好，恢复为配置文件默认值。');
+      return true;
+    }
+    const ackM = arg.match(/^ack\s+(on|off|true|false|开启|关闭)$/i);
+    if (ackM) {
+      const enabled = /^(on|true|开启)$/i.test(ackM[1]);
+      bridge.setRuntimePref('externalAckInSelf', enabled);
+      await sensSink.say(`✅ 已${enabled ? '开启' : '关闭'}外群静默接单时的自聊轻提示。`);
+      return true;
+    }
+    const sanM = arg.match(/^sanitize\s+(all|dangerous|none)$/i);
+    if (sanM) {
+      const mode = sanM[1].toLowerCase();
+      bridge.setRuntimePref('externalSanitizeMentions', mode);
+      await sensSink.say(`✅ 已将外群出站防误艾特策略设为 \`${mode}\`。`);
+      return true;
+    }
+    const stallM = arg.match(/^stall\s+(\d+|off|关闭)$/i);
+    if (stallM) {
+      const sec = /^(off|关闭)$/i.test(stallM[1]) ? 0 : Number(stallM[1]);
+      bridge.setRuntimePref('turnStallMs', sec * 1000);
+      await sensSink.say(sec > 0 ? `✅ 已将长任务停滞提醒阈值设为 ${sec} 秒。` : '✅ 已关闭长任务停滞看门狗提醒。');
+      return true;
+    }
+    await sensSink.say(`用法：\`${bridge.trigger} prefs\`、\`prefs ack on|off\`、\`prefs sanitize all|dangerous|none\`、\`prefs stall <秒|off>\` 或 \`prefs reset\``);
     return true;
   }
 
@@ -1030,6 +1125,43 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
 
   const modelM = raw.match(/^(?:model|模型)(?:\s+([\s\S]+))?$/i);
   if (modelM) return isGroup ? singleBotOnlyHint() : handleModelCommand(bridge, activeTarget, (modelM[1] ?? '').trim(), sensSink);
+
+  const apvM = raw.match(/^(?:approval|审批模式|审批)(?:\s+([\s\S]+))?$/i);
+  if (apvM) {
+    if (isGroup) return singleBotOnlyHint();
+    const arg = (apvM[1] ?? '').trim().toLowerCase();
+    try {
+      const { bots = [] } = await bridge.client.listBots();
+      const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
+      const curMode = fresh.approvalMode ?? (fresh.autoApprove ? 'auto' : 'ask');
+      if (!arg || /^(show|查看|list)$/.test(arg)) {
+        await sensSink.say(
+          `🛡 **${fresh.name}** 当前审批模式：\`${curMode}\`（可选 \`ask\` 逐次询问 / \`auto\` 安全自动 / \`full\` 全自动）\n` +
+          `发送 \`${cmdTarget} approval ask | auto | full\` 即可切换。`,
+          { botId: fresh.id, botName: fresh.name, threadId: activeTarget.threadId },
+          null,
+          [
+            { label: 'ask（询问）', text: `${cmdTarget} approval ask`, ...(curMode === 'ask' ? { kind: 'primary' } : {}) },
+            { label: 'auto（自动）', text: `${cmdTarget} approval auto`, ...(curMode === 'auto' ? { kind: 'primary' } : {}) },
+            { label: 'full（放行）', text: `${cmdTarget} approval full`, ...(curMode === 'full' ? { kind: 'primary' } : {}) },
+          ],
+        );
+        return true;
+      }
+      const modeMap = { ask: 'ask', 询问: 'ask', auto: 'auto', 自动: 'auto', full: 'full', 放行: 'full', 全自动: 'full' };
+      const nextMode = modeMap[arg];
+      if (!nextMode) {
+        await sensSink.say(`不支持的审批模式「${arg}」，可选：\`ask\`、\`auto\` 或 \`full\`。`);
+        return true;
+      }
+      await bridge.withCliLoopbackFallback((c) => c.patchBot(fresh.id, { approvalMode: nextMode }));
+      await bridge.refreshMultiBot();
+      await sensSink.say(`🛡 已将 **${fresh.name}** 的审批模式设为 \`${nextMode}\`。`);
+    } catch (e) {
+      await sensSink.say(`❌ 切换审批模式失败：${formatOmbError(e)}`);
+    }
+    return true;
+  }
 
   const memDirectM = raw.match(/^记住[\s:：]+([\s\S]+)$/);
   const memCmdM = !memDirectM ? raw.match(/^(?:memory|记忆)(?:\s+([\s\S]+))?$/i) : null;

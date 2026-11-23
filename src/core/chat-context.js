@@ -60,6 +60,9 @@ function cloneAttachments(attachments, fallbackMsgId) {
       name: String(a.name ?? a.id),
       ...(a.size != null ? { size: Number(a.size) || undefined } : {}),
       ...(a.mime ? { mime: String(a.mime) } : {}),
+      ...(a.kind ? { kind: String(a.kind) } : {}),
+      ...(Number(a.durationSec) > 0 ? { durationSec: Number(a.durationSec) } : {}),
+      ...(a.transcript ? { transcript: clipText(a.transcript, 500) } : {}),
     }));
 }
 
@@ -187,6 +190,7 @@ export class ChatContextStore {
       mentionsMe: Boolean(ev.mentionsMe),
       ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
       text: clipText(ev.text ?? '', this.maxTextChars),
+      ...(ev.linkCard ? { linkCard: { ...ev.linkCard } } : {}),
       attachments: cloneAttachments(ev.attachments, ev.id),
     };
     return this.#upsertEntry(bucket, entry);
@@ -523,8 +527,19 @@ function formatMsgLine(entry, maxChars = 280) {
       .filter((label) => label && !body.includes(`@${label}`));
     if (extra.length) parts.push(`[提及: ${extra.map((x) => `@${x}`).join(', ')}]`);
   }
+  if (entry.linkCard) {
+    const t = clipText(entry.linkCard.title || entry.linkCard.description || '卡片', 80);
+    const u = entry.linkCard.url ? ` (${entry.linkCard.url})` : '';
+    parts.push(`[卡片: ${t}${u}]`);
+  }
   if (entry.attachments?.length) {
-    const names = entry.attachments.map((a) => a.name).join(', ');
+    const names = entry.attachments.map((a) => {
+      if (a.kind === 'audio' || a.kind === 'voice' || (typeof a.mime === 'string' && a.mime.startsWith('audio/'))) {
+        const dur = a.durationSec ? ` ${a.durationSec}s` : '';
+        return a.transcript ? `语音${dur}: ${clipText(a.transcript, 120)}` : `语音${dur}: ${a.name}`;
+      }
+      return a.name;
+    }).join(', ');
     parts.push(`[附件: ${names}]`);
   }
   const content = parts.join(' ') || '[空消息]';

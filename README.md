@@ -23,7 +23,8 @@
    npm run status         # 查看 co-bot 与 OpenMausBot 状态
    npm run restart        # 平滑重启 co-bot（不中断 OpenMausBot 里的进行中任务）
    npm run stop           # 仅停止 co-bot（加 -- --all 可一并停止托管的 OpenMausBot CLI）
-   npm run omb -- status  # 单独管理本机 OpenMausBot CLI（ensure|start|stop|restart|status|logs）
+   npm run omb -- status  # 单独管理本机 OpenMausBot CLI（ensure|start|stop|restart|status|logs|upgrade）
+   npm run omb -- upgrade --dry # 检查并一键平滑升级本地 OpenMausBot 至 npm 最新版（支持 --dry 预览）
    npm run daemon -- install-service --dry    # 预览开机自启服务配置（去掉 --dry 即写入 systemd / LaunchAgents / Windows 启动项）
    npm run daemon -- uninstall-service        # 卸载开机自启服务
    npm start              # 仅前台运行 co-bot（Web 自聊模拟器 http://127.0.0.1:8787/sim）
@@ -60,11 +61,12 @@
   - **权限审批卡**：支持 **`ok`** 允许、**`always`** 总是允许（传 `always` / `rememberCommand`）、**`no`** 拒绝；**选项/提问卡与列表**：支持数字 `1` / `2` 或中文口语序数（如 `第一个`、`选2`、`三号`）；**桌面端凭据/连接器/登录卡**：支持回复 **`skip` / `跳过`** 远程跳过继续执行（Web 模拟器 `/sim` 内可直接点快捷按钮）。
 - **忙时排队与插队**：前一条任务仍在执行时新消息自动提示排队状态，可发 **`@bot steer`**（或 **`插队`**）即时插队，或发 **`@bot cancel`** 取消排队；也可随时 `@bot stop` 中断执行。
 - **手机私聊人格预设**：发送 **`@bot style grok`**（或运行 `npm run check -- --apply-style`）可将主 Bot 设为 `conversational` 回复风格与移动端简洁人格（`@bot style default` 可恢复）。
-- **主动通知与免打扰**：OpenMausBot 定时 Routine / 异步推送以 `🔔` 回流；开启 `selfChat.quietHours` 后在夜间先攒成摘要，结束时自动发出或 `@bot digest` 立即汇总。
+- **主动通知与免打扰**：OpenMausBot 定时 Routine / 异步推送以 `🔔` 回流；可用 **`@bot quiet on|off|23:00-07:30`** 与 **`@bot prefs [ack|sanitize|stall|reset]`** 免重启热调整免打扰与偏好，并持久化保存；`@bot digest` 可随时汇总积压消息。
+- **审批模式与状态诊断**：`@bot status` 与 `@bot bots` 展示 OpenMausBot `doctor` 自检报告、`approvalMode`（`ask`/`auto`/`full`）与队友协作等待状态，可用 **`@bot approval [ask|auto|full]`** 切换审批策略。
 - **其他常用指令与防错**：`@bot bots`、`@bot status`、`@bot help [群聊|定时|会话|模型|全部]`；常见拼错指令自动给出纠错快捷按钮。
 - **稳定性保护**：支持长任务停滞看门狗（`selfChat.turnStallMs`，超时在自聊提醒并附 `stop` 按钮）、IM 断线出站缓冲重放与按会话串行发送队列。
-- **原生附件双向互通**：
-  - 手机发来的图片/日志（或 Web 模拟器 `Ctrl+V` 粘贴 / `+` 上传）自动上传至 OpenMausBot 并嵌入原生 `<attached-image>` / `<attached-file>` 标签；
+- **原生附件、语音与链接卡片互通**：
+  - 手机发来的图片/日志（或 Web 模拟器 `Ctrl+V` 粘贴 / `+` 上传）自动上传至 OpenMausBot 并嵌入原生 `<attached-image>` / `<attached-file>` 标签；支持音频/语音附件转写（入站 `transcript` 字段或自定义 `transcribeAudio` 钩子）与 `linkCard` 转发链接卡片摘要解析；
   - OpenMausBot 回复中产生的图片或文件会自动拉取并通过 `sendFile` 发回自聊；超长正文自动附带 `.md` 原文附件。
 
 ## 任意群 / 私聊 `@bot` 与会话上下文
@@ -147,13 +149,16 @@ src/openmausbot/client.js     OpenMausBot Harness HTTP + SSE（检索/导出/模
 src/openmausbot/cards.js      审批卡、选项提问卡与工具进展格式化纯函数
 src/openmausbot/mentions.js   @mention 解析、防误触掩码与日程/时间纯函数
 src/openmausbot/chat-manager.js 跨群策略、定时纪要、私密草稿确认回发与跨群检索管理器
-src/openmausbot/turn-tracker.js SSE/Job 单轮追踪、中间气泡合并与进度节流器
+src/openmausbot/state-store.js  Bridge 状态防抖持久化、损坏备份自愈与热偏好存储
+src/openmausbot/outbound-queue.js 按会话串行出站队列与断线消息缓冲重放器
+src/openmausbot/turn-tracker.js SSE/Job 单轮追踪、停滞看门狗与中间气泡合并器
 src/openmausbot/commands.js   @bot / @<Bot名> 指令分发与子命令处理器
 src/openmausbot/persona.js    手机 IM 端类 Grok Bot 私聊默认人格与回复风格预设
 src/openmausbot/bridge.js     极薄 IM <-> OpenMausBot 桥接器（按 channel.capabilities 自适应降级）
 public/                       /sim 自聊模拟页、/debug 只读诊断页与 .md 附件预览页（view.html、md.js）
 docs/TROUBLESHOOTING.md       真实 IM 接入上线 Checklist 与常见故障排查手册
-.github/workflows/ci.yml      GitHub Actions CI（单测 + 通道契约自检 + 自启配置预览）
+.github/workflows/ci.yml      GitHub Actions 跨平台矩阵 CI（Ubuntu/Windows/macOS）
+LICENSE                       MIT 开源许可证
 scripts/channel-test.js       通用 IM 通道契约测试与收发验证器（npm run channel:test）
 scripts/check.js              启动前配置合法性与 Node/openmausbot/opencode/通道插件自检
 scripts/setup.js              零依赖交互式初始化向导（npm run setup）

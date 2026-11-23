@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaults } from '../config.js';
+import { formatLinkCardSnippet, isAudioAttachment } from '../core/channel-contract.js';
 import { formatAttachmentTag, messageNeedsInput } from './client.js';
 import { assemblePromptContext, ChatContextStore, sanitizeExternalMentions } from '../core/chat-context.js';
 import { extractCardInfo, fmtTokens, formatCardPrompt, formatOmbError, parseChoiceIndex } from './cards.js';
@@ -10,14 +11,25 @@ import {
   compactChatCtx,
   hasNonBotMention,
   inQuietHours,
-  normalizeScheduleEntry,
-  parseHHMM,
   parseInlineTriggerMention,
   parseStartMention,
   parseStructuredBotMention,
   rememberBounded,
 } from './mentions.js';
 import { createTurnTracker } from './turn-tracker.js';
+import {
+  flushBridgeState,
+  loadBridgeState,
+  pruneBridgeMemoryCaches,
+  saveBridgeState,
+  writeBridgeStateNow,
+} from './state-store.js';
+import {
+  drainOutboundQueue,
+  flushOutboundBuffer as flushOutboundQueueBuffer,
+  isTransportDisconnected,
+  sendBridgeText,
+} from './outbound-queue.js';
 import {
   addScheduledSummary,
   buildExternalSummaryPrompt,
@@ -37,14 +49,12 @@ import {
   tickScheduledSummaries,
 } from './chat-manager.js';
 import {
-  clip, fileSafe, hardBreaks, mdClip, mdSplit, plain,
-  pruneExpiredFiles, safeAttachmentName, writeJsonAtomic,
+  clip, fileSafe, mdClip, mdSplit,
+  pruneExpiredFiles, safeAttachmentName,
 } from '../format.js';
 
 export { extractCardInfo, inQuietHours };
 
-const FILE_TTL = 10 * 60 * 1000;
-const ECHO_TTL = 3 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const APPROVE_RE = /^(ok|okay|yes|y|好|好的|可以|允许|同意|通过|执行|批准)$/i;
 const ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都允许)$/i;
@@ -99,6 +109,7 @@ export class OpenMausBotBridge {
     outPrefix = '',
     imContext = null,
     chats = {},
+    transcribeAudio = null,
     now = () => Date.now(),
   } = {}) {
     Object.assign(this, {
@@ -109,12 +120,19 @@ export class OpenMausBotBridge {
       resultChars, followUpWindowMs, hideChiefPrefix,
       imageBatchMs, fileRetentionDays, sendRetries, sendRetryDelayMs,
       autoHealOmb, autoHealCooldownMs, onTelemetry,
-      markdown, outPrefix, imContext, now,
+      markdown, outPrefix, imContext, transcribeAudio, now,
     });
     this.chats = {
       ...defaults.chats,
       ...(chats && typeof chats === 'object' ? chats : {}),
     };
+    this.basePrefs = {
+      quietHours: { ...(this.quietHours || defaults.selfChat.quietHours) },
+      externalAckInSelf: Boolean(this.chats.externalAckInSelf),
+      externalSanitizeMentions: this.chats.externalSanitizeMentions || 'all',
+      turnStallMs: this.turnStallMs,
+    };
+    this.runtimePrefs = {};
     this.localContextStore = imContext?.store ?? new ChatContextStore({
       maxPerChat: this.chats.contextMaxMessagesPerChat,
       ttlMs: this.chats.contextTtlMs,
@@ -195,172 +213,65 @@ export class OpenMausBotBridge {
     return this.transport?.selfChatId || this.learnedSelfChatId || '';
   }
 
-  #loadState() {
-    if (!this.stateFile) return;
-    let rawText;
-    try {
-      rawText = fs.readFileSync(this.stateFile, 'utf8');
-    } catch {
-      return; // 首次启动尚无状态文件
-    }
-    let raw;
-    try {
-      raw = JSON.parse(rawText);
-    } catch (e) {
-      this.stateCorruptRecoveries += 1;
-      try {
-        fs.renameSync(this.stateFile, `${this.stateFile}.corrupt.${this.now()}`);
-      } catch { /* ignore */ }
-      console.error(`[omb-bridge] 状态文件损坏，已自动备份并重置：${e.message}`);
-      this.emitTelemetry('state_corrupt', { summary: e.message });
-      return;
-    }
-    try {
-      if (typeof raw?.selfChatId === 'string' && raw.selfChatId) {
-        this.learnedSelfChatId = raw.selfChatId;
-        if (this.transport && !this.transport.selfChatId) this.transport.selfChatId = raw.selfChatId;
-      }
-      if (raw?.focus?.botId) this.focus = raw.focus;
-      if (Array.isArray(raw?.msgRoute)) {
-        for (const [k, v] of raw.msgRoute.slice(-500)) if (k && v?.botId) this.msgRoute.set(String(k), v);
-      }
-      if (Array.isArray(raw?.quietQueue)) {
-        this.quietQueue = raw.quietQueue.filter((it) => it && it.botId && it.threadId).slice(-100);
-      }
-      if (Array.isArray(raw?.pendingCards)) {
-        for (const [k, v] of raw.pendingCards.slice(-20)) {
-          if (k && v?.botId && v?.threadId) {
-            this.pendingCards.set(String(k), v);
-            rememberBounded(this.deliveredCards, v.requestId || v.ombMsgId);
-          }
+  #loadState() { loadBridgeState(this); }
+  #writeStateNow() { writeBridgeStateNow(this); }
+  saveState(opts) { saveBridgeState(this, opts); }
+  flushState() { flushBridgeState(this); }
+  #pruneMemoryCaches() { pruneBridgeMemoryCaches(this); }
+  #syncQuietTimer() {
+    clearInterval(this.quietTimer);
+    this.quietTimer = null;
+    if (this.quietHours?.enabled) {
+      this.quietTimer = setInterval(() => {
+        if (this.quietQueue.length && !inQuietHours(this.now(), this.quietHours)) {
+          this.flushQuietDigest().catch(() => {});
         }
-      }
-      if (Array.isArray(raw?.deliveredOmbIds)) {
-        for (const id of raw.deliveredOmbIds.slice(-200)) rememberBounded(this.deliveredOmbIds, id);
-      }
-      if (Array.isArray(raw?.externalThreadIds)) {
-        for (const tid of raw.externalThreadIds.slice(-500)) rememberBounded(this.externalThreadIds, tid, 500);
-      }
-      if (Array.isArray(raw?.chatThreads)) {
-        for (const [k, v] of raw.chatThreads.slice(-200)) {
-          if (k && v?.botId && v?.threadId) {
-            this.chatThreads.set(String(k), v);
-            rememberBounded(this.externalThreadIds, v.threadId, 500);
-          }
-        }
-      }
-      if (Array.isArray(raw?.selfThreads)) {
-        for (const [k, v] of raw.selfThreads.slice(-100)) {
-          if (k && v?.threadId && !this.externalThreadIds.has(String(v.threadId))) {
-            this.selfThreads.set(String(k), v);
-          }
-        }
-      }
-      if (raw?.chatPolicy && typeof raw.chatPolicy === 'object') {
-        if (raw.chatPolicy.mode === 'self_only' || raw.chatPolicy.mode === 'owner_everywhere') {
-          this.chatPolicyOverrides.mode = raw.chatPolicy.mode;
-        }
-        for (const id of raw.chatPolicy.muted ?? []) if (id) this.chatPolicyOverrides.muted.add(String(id));
-        for (const id of raw.chatPolicy.allowed ?? []) if (id) this.chatPolicyOverrides.allowed.add(String(id));
-      }
-      if (Array.isArray(raw?.scheduledSummaries)) {
-        const byId = new Map(this.scheduledSummaries.map((s) => [s.id, s]));
-        for (const s of raw.scheduledSummaries.slice(-30)) {
-          if (!s?.id || !s?.chatId || parseHHMM(s.time) == null) continue;
-          const existing = byId.get(String(s.id));
-          if (existing) {
-            if (typeof s.enabled === 'boolean') existing.enabled = s.enabled;
-            if (s.lastRunDate) existing.lastRunDate = String(s.lastRunDate);
-            if (Number(s.lastRunTs) > 0) existing.lastRunTs = Number(s.lastRunTs);
-          } else if (!s.fromConfig) {
-            const entry = normalizeScheduleEntry(s, { fromConfig: false, fallbackId: String(s.id) });
-            if (entry) this.scheduledSummaries.push(entry);
-          }
-        }
-      }
-      const turnCutoff = this.now() - 30 * 60_000;
-      if (Array.isArray(raw?.inFlightTurns)) {
-        for (const [k, v] of raw.inFlightTurns.slice(-20)) {
-          if (k && v?.botId && v?.threadId && (!v.startedAt || v.startedAt >= turnCutoff)) {
-            this.inFlightTurns.set(String(k), v);
-          }
-        }
-      }
-      const draftCutoff = this.now() - (Number(this.draftTtlMs) || 30 * 60_000);
-      if (Array.isArray(raw?.privateDrafts)) {
-        for (const d of raw.privateDrafts.slice(-40)) {
-          if (d?.id && d?.originChatId && (!d.createdAt || d.createdAt >= draftCutoff)) {
-            this.privateDrafts.set(d.id, d);
-            if (d.imMsgId) this.privateDrafts.set(d.imMsgId, d);
-          }
-        }
-        if (raw.lastPrivateDraftId && this.privateDrafts.has(String(raw.lastPrivateDraftId))) {
-          this.lastPrivateDraftId = String(raw.lastPrivateDraftId);
-        }
-      }
-      // 防止早期版本遗留的外部会话 threadId 污染自聊 focus
-      if (this.focus?.threadId && this.externalThreadIds.has(String(this.focus.threadId))) {
-        const recovered = this.selfThreads.get(String(this.focus.botId));
-        this.focus = recovered ? { ...recovered } : null;
-      }
-    } catch { /* 状态恢复兼容降级 */ }
-  }
-
-  #writeStateNow() {
-    clearTimeout(this.stateSaveTimer);
-    this.stateSaveTimer = null;
-    if (!this.stateFile) return;
-    try {
-      const seenDrafts = new Set();
-      const draftCutoff = this.now() - (Number(this.draftTtlMs) || 30 * 60_000);
-      const uniqueDrafts = [];
-      for (const d of this.privateDrafts.values()) {
-        if (!d?.id || seenDrafts.has(d.id)) continue;
-        if (d.createdAt && d.createdAt < draftCutoff) continue;
-        seenDrafts.add(d.id);
-        uniqueDrafts.push(d);
-      }
-      writeJsonAtomic(this.stateFile, {
-        selfChatId: this.selfChat,
-        focus: this.focus,
-        msgRoute: [...this.msgRoute.entries()].slice(-500),
-        quietQueue: this.quietQueue.slice(-100),
-        pendingCards: [...this.pendingCards.entries()].slice(-20),
-        deliveredOmbIds: [...this.deliveredOmbIds].slice(-200),
-        chatThreads: [...this.chatThreads.entries()].slice(-200),
-        selfThreads: [...this.selfThreads.entries()].slice(-100),
-        externalThreadIds: [...this.externalThreadIds].slice(-500),
-        chatPolicy: {
-          mode: this.chatPolicyOverrides.mode,
-          muted: [...this.chatPolicyOverrides.muted],
-          allowed: [...this.chatPolicyOverrides.allowed],
-        },
-        scheduledSummaries: this.scheduledSummaries.slice(-30),
-        inFlightTurns: [...this.inFlightTurns.entries()].slice(-20),
-        privateDrafts: uniqueDrafts.slice(-40),
-        lastPrivateDraftId: this.lastPrivateDraftId || null,
-      });
-    } catch (e) {
-      this.stateSaveErrors += 1;
-      console.error('[omb-bridge] 状态持久化失败：', e?.message || e);
-      this.emitTelemetry('state_save_error', { summary: e?.message || 'save failed' });
+      }, 60_000);
+      this.quietTimer.unref?.();
     }
   }
 
-  saveState({ immediate = false } = {}) {
-    if (!this.stateFile) return;
-    const delay = Number(this.stateSaveDebounceMs);
-    if (immediate || !(delay > 0)) {
-      this.#writeStateNow();
-      return;
-    }
-    if (this.stateSaveTimer) return;
-    this.stateSaveTimer = setTimeout(() => this.#writeStateNow(), delay);
-    this.stateSaveTimer.unref?.();
+  setQuietHours(patch = {}) {
+    const next = { ...(this.quietHours || defaults.selfChat.quietHours), ...patch };
+    this.quietHours = next;
+    this.runtimePrefs = { ...this.runtimePrefs, quietHours: { ...next } };
+    this.#syncQuietTimer();
+    this.saveState();
+    return { ...this.quietHours };
   }
 
-  flushState() {
-    this.saveState({ immediate: true });
+  setRuntimePref(key, value) {
+    if (key === 'reset') {
+      this.quietHours = { ...this.basePrefs.quietHours };
+      this.chats.externalAckInSelf = this.basePrefs.externalAckInSelf;
+      this.chats.externalSanitizeMentions = this.basePrefs.externalSanitizeMentions;
+      this.turnStallMs = this.basePrefs.turnStallMs;
+      this.runtimePrefs = {};
+      this.#syncQuietTimer();
+      this.saveState();
+      return { ...this.basePrefs };
+    }
+    if (key === 'externalAckInSelf') {
+      this.chats.externalAckInSelf = Boolean(value);
+      this.runtimePrefs.externalAckInSelf = this.chats.externalAckInSelf;
+    } else if (key === 'externalSanitizeMentions') {
+      this.chats.externalSanitizeMentions = value;
+      this.runtimePrefs.externalSanitizeMentions = value;
+    } else if (key === 'turnStallMs') {
+      this.turnStallMs = Math.max(0, Number(value) || 0);
+      this.runtimePrefs.turnStallMs = this.turnStallMs;
+    }
+    this.saveState();
+    return this.getRuntimePrefs();
+  }
+
+  getRuntimePrefs() {
+    return {
+      quietHours: { ...(this.quietHours || {}) },
+      externalAckInSelf: Boolean(this.chats.externalAckInSelf),
+      externalSanitizeMentions: this.chats.externalSanitizeMentions || 'all',
+      turnStallMs: this.turnStallMs,
+    };
   }
 
   rememberOwnId(id) {
@@ -428,25 +339,9 @@ export class OpenMausBotBridge {
       stateSaveErrors: this.stateSaveErrors,
       stateCorruptRecoveries: this.stateCorruptRecoveries,
       uptimeSec: Math.max(0, Math.round((this.now() - this.startedAt) / 1000)),
+      runtimePrefs: this.getRuntimePrefs(),
       context: this.imContext?.stats?.() ?? this.localContextStore.stats(),
     };
-  }
-
-  #pruneMemoryCaches() {
-    const now = this.now();
-    for (const [k, ent] of this.fileMsgs) {
-      if ((ent?.at || 0) + FILE_TTL < now) this.fileMsgs.delete(k);
-    }
-    for (const [k, exp] of this.pendingOutFiles) {
-      if (exp <= now) this.pendingOutFiles.delete(k);
-    }
-    for (const [k, at] of this.recent) {
-      if (now - at > ECHO_TTL) this.recent.delete(k);
-    }
-    const draftCutoff = now - (Number(this.draftTtlMs) || 30 * 60_000);
-    for (const [k, v] of this.privateDrafts) {
-      if ((v?.createdAt || 0) < draftCutoff) this.privateDrafts.delete(k);
-    }
   }
 
   #resumeInFlightTurns() {
@@ -502,14 +397,7 @@ export class OpenMausBotBridge {
         }
       },
     }).catch((e) => { if (!this.sseAc?.signal.aborted) console.error('[omb-sse]', e); });
-    if (this.quietHours?.enabled) {
-      this.quietTimer = setInterval(() => {
-        if (this.quietQueue.length && !inQuietHours(this.now(), this.quietHours)) {
-          this.flushQuietDigest().catch(() => {});
-        }
-      }, 60_000);
-      this.quietTimer.unref?.();
-    }
+    this.#syncQuietTimer();
     this.summaryTimer = setInterval(() => {
       this.tickScheduledSummaries().catch(() => {});
     }, 30_000);
@@ -575,19 +463,23 @@ export class OpenMausBotBridge {
     return this.botByThread.get(threadId) ?? this.groupByThread.get(threadId) ?? null;
   }
 
-  #remember(text) {
+  rememberEcho(text) {
     const key = norm(text);
     if (!key) return;
     const now = this.now();
     this.recent.set(key, now);
-    for (const [k, at] of this.recent) if (now - at > ECHO_TTL) this.recent.delete(k);
+    for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
   }
 
   #isEcho(text) {
     if (this.outPrefix && text.startsWith(this.outPrefix.trim())) return true;
     const now = this.now();
-    for (const [k, at] of this.recent) if (now - at > ECHO_TTL) this.recent.delete(k);
+    for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
     return this.recent.has(norm(text));
+  }
+
+  channelCaps() {
+    return this.#channelCaps();
   }
 
   #isPendingOutFile(att) {
@@ -891,137 +783,11 @@ export class OpenMausBotBridge {
     return fid;
   }
 
-  #isTransportDisconnected() {
-    return this.transport?.status?.()?.connected === false;
-  }
-
-  #bufferOutbound(item) {
-    const now = this.now();
-    this.disconnectedBuffer = this.disconnectedBuffer.filter((x) => x.expiresAt > now);
-    this.disconnectedBuffer.push(item);
-    const cap = Math.max(1, Number(this.outboundBufferMax) || 30);
-    while (this.disconnectedBuffer.length > cap) this.disconnectedBuffer.shift();
-    this.emitTelemetry('outbound_buffered', {
-      chatId: item.chatId,
-      summary: item.text,
-    });
-  }
-
-  #enqueueOutbound(chatId, fn) {
-    const key = String(chatId || '_default');
-    const prev = this.outboundQueue.get(key) ?? Promise.resolve();
-    const task = prev.then(fn, fn);
-    const tail = task.catch(() => {}).finally(() => {
-      if (this.outboundQueue.get(key) === tail) this.outboundQueue.delete(key);
-    });
-    this.outboundQueue.set(key, tail);
-    return task;
-  }
-
-  async drainOutbound(timeoutMs = 2000) {
-    const pending = [...this.outboundQueue.values()];
-    if (!pending.length) return;
-    let timer;
-    await Promise.race([
-      Promise.allSettled(pending),
-      new Promise((r) => { timer = setTimeout(r, timeoutMs); timer.unref?.(); }),
-    ]);
-    clearTimeout(timer);
-  }
-
-  async flushOutboundBuffer() {
-    if (this.#isTransportDisconnected() || !this.disconnectedBuffer.length) return 0;
-    const now = this.now();
-    const items = this.disconnectedBuffer.splice(0).filter((it) => it.expiresAt > now);
-    let replayed = 0;
-    for (let i = 0; i < items.length; i += 1) {
-      const it = items[i];
-      if (this.#isTransportDisconnected()) {
-        for (const rem of items.slice(i)) this.#bufferOutbound(rem);
-        break;
-      }
-      const sid = await this.say(it.text, it.route, it.replyTo, it.actions, { chatId: it.chatId, noBuffer: true });
-      if (sid != null) {
-        replayed += 1;
-        this.outboundReplayed += 1;
-      }
-    }
-    if (replayed > 0) {
-      this.emitTelemetry('outbound_replayed', { summary: `replayed=${replayed}` });
-    }
-    return replayed;
-  }
-
+  #isTransportDisconnected() { return isTransportDisconnected(this); }
+  async drainOutbound(timeoutMs = 2000) { return drainOutboundQueue(this, timeoutMs); }
+  async flushOutboundBuffer() { return flushOutboundQueueBuffer(this); }
   async say(text, route = null, replyTo = null, actions = null, extra = {}) {
-    const chatId = extra?.chatId || route?.targetChatId || this.selfChat;
-    if (!chatId) {
-      if (!this.warnedMissingSelfChat) {
-        this.warnedMissingSelfChat = true;
-        console.warn('[omb-send] 尚未获知目标会话 ID，请先在自聊发一条消息或在 config.json 配置 ipc.selfChatId');
-      }
-      return null;
-    }
-    const caps = this.#channelCaps();
-    const useMarkdown = Boolean(this.markdown && caps?.markdown !== false);
-    const body = this.outPrefix + (useMarkdown ? hardBreaks(text) : plain(text));
-    this.#remember(body);
-    const opts = {
-      ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
-      ...(Array.isArray(actions) && actions.length && caps?.actions !== false ? { actions } : {}),
-    };
-
-    return this.#enqueueOutbound(chatId, async () => {
-      if (!extra?.noBuffer && this.#isTransportDisconnected()) {
-        this.#bufferOutbound({
-          chatId,
-          text,
-          route,
-          replyTo,
-          actions,
-          expiresAt: this.now() + (Number(this.outboundBufferTtlMs) || 5 * 60_000),
-        });
-        return null;
-      }
-      const retries = Math.max(0, Number(this.sendRetries) || 0);
-      let lastErr = null;
-      for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-          const sentId = await this.transport.send(chatId, body, opts);
-          if (sentId != null) {
-            const sid = String(sentId);
-            rememberBounded(this.ownIds, sid, 2000);
-            if (route?.botId) {
-              this.msgRoute.set(sid, route);
-              if (this.msgRoute.size > 500) this.msgRoute.delete(this.msgRoute.keys().next().value);
-              this.saveState();
-            }
-            return sid;
-          }
-          return null;
-        } catch (e) {
-          lastErr = e;
-          if (attempt < retries) {
-            await new Promise((r) => setTimeout(r, (Number(this.sendRetryDelayMs) || 400) * (attempt + 1)));
-            continue;
-          }
-          this.outboundFailures += 1;
-          this.emitTelemetry('outbound_failed', { chatId, summary: e?.message || 'send failed' });
-          if (!extra?.noBuffer && (this.#isTransportDisconnected() || extra?.bufferOnFail)) {
-            this.#bufferOutbound({
-              chatId,
-              text,
-              route,
-              replyTo,
-              actions,
-              expiresAt: this.now() + (Number(this.outboundBufferTtlMs) || 5 * 60_000),
-            });
-          }
-          console.error('[omb-send]', e.message);
-        }
-      }
-      void lastErr;
-      return null;
-    });
+    return sendBridgeText(this, text, route, replyTo, actions, extra);
   }
 
   getKnownBotNames() {
@@ -1137,7 +903,8 @@ export class OpenMausBotBridge {
     const quotedRoute = quotedId ? this.msgRoute.get(quotedId) : null;
 
     if (!rawText) {
-      if (!atts.length) return;
+      if (!atts.length && !ev.linkCard) return;
+      const bareMsg = ev.linkCard && !atts.length ? '请查看并总结我转发的这张卡片。' : '请查看我发送的附件。';
       if (quotedRoute) {
         this.#clearPendingMedia();
         const chatCtx = this.#buildExternalChatCtx({
@@ -1156,34 +923,52 @@ export class OpenMausBotBridge {
             threadId: quotedRoute.threadId,
             isGroup: Boolean(quotedRoute.isGroup),
           },
-          '请查看我发送的附件。',
+          bareMsg,
           mid,
           quotedId,
           quotedRoute.ombMsgId,
           chatCtx,
         );
-      } else if (isSelfChat && this.isStickyActive() && this.imageBatchMs > 0) {
-        this.pendingMediaIds.push(mid);
-        this.pendingMediaTarget = {
-          id: this.focus.botId,
-          name: this.focus.botName,
-          threadId: this.focus.threadId,
-          isGroup: Boolean(this.focus.isGroup),
-        };
-        clearTimeout(this.pendingMediaTimer);
-        this.pendingMediaTimer = setTimeout(() => {
-          const target = this.pendingMediaTarget;
-          const ids = [...this.pendingMediaIds];
-          this.#clearPendingMedia();
-          const hasUnused = ids.some((id) => {
-            const ent = this.fileMsgs.get(id);
-            return ent && !ent.used;
-          });
-          if (target && hasUnused) {
-            this.dispatchToBot(target, '请查看我发送的图片/文件。', null, null, null).catch(() => {});
-          }
-        }, this.imageBatchMs);
-        this.pendingMediaTimer.unref?.();
+      } else if (isSelfChat && this.isStickyActive()) {
+        if (ev.linkCard && !atts.length) {
+          await this.dispatchToBot(
+            {
+              id: this.focus.botId,
+              name: this.focus.botName,
+              threadId: this.focus.threadId,
+              isGroup: Boolean(this.focus.isGroup),
+            },
+            bareMsg,
+            mid,
+            quotedId,
+            null,
+            this.#buildExternalChatCtx({ isSelfChat: true, chatId, chatType, chatName: ev.chat?.name, mid, privateReply: false, ev }),
+          );
+          return;
+        }
+        if (this.imageBatchMs > 0 && atts.length) {
+          this.pendingMediaIds.push(mid);
+          this.pendingMediaTarget = {
+            id: this.focus.botId,
+            name: this.focus.botName,
+            threadId: this.focus.threadId,
+            isGroup: Boolean(this.focus.isGroup),
+          };
+          clearTimeout(this.pendingMediaTimer);
+          this.pendingMediaTimer = setTimeout(() => {
+            const target = this.pendingMediaTarget;
+            const ids = [...this.pendingMediaIds];
+            this.#clearPendingMedia();
+            const hasUnused = ids.some((id) => {
+              const ent = this.fileMsgs.get(id);
+              return ent && !ent.used;
+            });
+            if (target && hasUnused) {
+              this.dispatchToBot(target, '请查看我发送的图片/文件。', null, null, null).catch(() => {});
+            }
+          }, this.imageBatchMs);
+          this.pendingMediaTimer.unref?.();
+        }
       }
       return;
     }
@@ -1739,23 +1524,41 @@ export class OpenMausBotBridge {
     if (!ids.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
       const now = this.now();
       for (const [id, entry] of this.fileMsgs) {
-        if (!entry.used && now - entry.at < FILE_TTL && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
+        if (!entry.used && now - entry.at < 10 * 60 * 1000 && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
           ids.push(id);
         }
       }
     }
     const uploaded = [];
+    const transcripts = [];
     const seenKeys = new Set();
     const processOne = async (attIdKey, msgIdForPath, a) => {
-      if (!a || a.id == null || typeof this.transport.download !== 'function') return;
+      if (!a || a.id == null) return;
       if (seenKeys.has(attIdKey)) return;
       seenKeys.add(attIdKey);
+      const isAudio = isAudioAttachment(a);
+      let directTranscript = a.transcript ? String(a.transcript).trim() : '';
+      if (typeof this.transport.download !== 'function') {
+        if (isAudio && directTranscript) {
+          transcripts.push({ name: a.name || '语音', durationSec: a.durationSec, text: directTranscript });
+        }
+        return;
+      }
       const safe = safeAttachmentName(a.name, 'file');
       const dest = path.join(this.inDir, fileSafe(msgIdForPath) || 'f', safe);
       try {
         if (!fs.existsSync(dest)) {
           fs.mkdirSync(path.dirname(dest), { recursive: true });
           await this.transport.download(a, dest);
+        }
+        if (isAudio && !directTranscript && typeof this.transcribeAudio === 'function') {
+          try {
+            const t = await this.transcribeAudio(dest, a);
+            if (typeof t === 'string' && t.trim()) directTranscript = t.trim();
+          } catch { /* 语音转写失败不阻断原音频附件上传 */ }
+        }
+        if (isAudio && directTranscript) {
+          transcripts.push({ name: a.name || safe, durationSec: a.durationSec, text: directTranscript });
         }
         const buf = fs.readFileSync(dest);
         const ext = path.extname(safe).toLowerCase();
@@ -1770,6 +1573,9 @@ export class OpenMausBotBridge {
           path: res?.path || res?.url || dest,
         });
       } catch (e) {
+        if (isAudio && directTranscript) {
+          transcripts.push({ name: a.name || safe, durationSec: a.durationSec, text: directTranscript });
+        }
         const failTarget = errChatId || this.selfChat;
         if (failTarget) {
           await this.say(`📎 附件 ${a.name} 上传失败：${formatOmbError(e)}`, { targetChatId: failTarget });
@@ -1791,7 +1597,7 @@ export class OpenMausBotBridge {
         await processOne(`${msgIdForPath}:${a.id}`, msgIdForPath, a);
       }
     }
-    return uploaded;
+    return { uploads: uploaded, transcripts };
   }
 
   async dispatchToBot(bot, text, imMsgId, quotedId, replyToOmbId, chatCtx = null) {
@@ -1812,14 +1618,23 @@ export class OpenMausBotBridge {
       : await this.#buildPromptContext(ctxInfo.ev, ctxInfo, {
           skipSelfQuote: Boolean(!isExternal && replyToOmbId),
         });
-    const uploads = await this.#claimUploads(
+    const { uploads, transcripts } = await this.#claimUploads(
       imMsgId,
       quotedId,
       ctxInfo.originChatId,
       promptCtx.contextAttachments ?? promptCtx.quotedAttachments,
       ctxInfo.controlChatId,
     );
-    let outboundText = `${promptCtx.header || ''}${text}`;
+    const extras = [];
+    const linkSnippet = formatLinkCardSnippet(ctxInfo.ev?.linkCard);
+    if (linkSnippet) extras.push(linkSnippet);
+    if (transcripts.length) {
+      for (const tr of transcripts) {
+        const dur = tr.durationSec ? `（${tr.durationSec}秒）` : '';
+        extras.push(`[语音转写 · ${tr.name}${dur}] ${tr.text}`);
+      }
+    }
+    let outboundText = `${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}${text}`;
     if (uploads.length) {
       const tags = uploads.map((u) => formatAttachmentTag(u));
       outboundText = `${outboundText}\n\n${tags.join('\n')}`;

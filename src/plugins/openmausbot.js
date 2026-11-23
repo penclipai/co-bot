@@ -104,6 +104,7 @@ export const openmausbotPlugin = {
             desktopManaged: p.desktopManaged,
             paired: p.paired,
             sessionLabel: p.sessionLabel,
+            doctor: p.health?.doctor ?? null,
             ...(p.authErr ? { authError: p.authErr.message } : {}),
             bots: p.visible.map((x) => ({
               id: x.id,
@@ -112,6 +113,8 @@ export const openmausbotPlugin = {
               busy: !!x.busy,
               activity: x.activity ?? 'idle',
               replyStyle: x.replyStyle ?? 'default',
+              approvalMode: x.approvalMode ?? (x.autoApprove ? 'auto' : 'ask'),
+              waitingForTeammates: Boolean(x.waitingForTeammates),
               model: x.modelSelection?.model ?? '',
             })),
             groups: p.visibleGroups.map((g) => ({
