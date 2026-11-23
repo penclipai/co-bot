@@ -130,7 +130,7 @@
 
 ### 本地诊断与运维台（`/debug`）与排障手册
 - 启动后访问 `http://127.0.0.1:8787/debug`（无头 IM 模式下访问 `/` 亦直达此页），可实时查看进程内存/运行时长、在途续接与断线缓冲指标、已加载插件列表、当前通道 `capabilities` 声明、各群/私聊策略（支持直接点**静音/允许**）与隔离 Thread 列表、**定时跨群纪要（Scheduled Summaries）**（支持直接**试跑 / 启停**）、待确认回发草稿状态、OpenMausBot 在线 Bot/群组状态、一键**导出脱敏诊断包 JSON**，以及按 `chatId` / `source` / **`type`**（含 `recall`、`sendback`、`turn_resumed`、`turn_stalled`、`outbound_buffered` 等）筛选的最近 80 条脱敏事件流；Web 模拟器 `/sim` 同步支持气泡一键 **撤回** 与跨群指令快捷提示。
-- 真实 IM 上线核对与常见问题速查见：[真实 IM 接入与常见排障手册](./docs/TROUBLESHOOTING.md)；多阶段协作网络演进蓝图见：[演进路线图（v0.5 ~ v0.8）](./docs/ROADMAP.md)。
+- 真实 IM 上线核对与常见问题速查见：[真实 IM 接入与常见排障手册](./docs/TROUBLESHOOTING.md)；精简三步演进蓝图见：[演进路线图（v0.5 ~ v0.7）](./docs/ROADMAP.md)。
 
 ## 目录结构
 
@@ -156,7 +156,7 @@ src/openmausbot/commands.js   @bot / @<Bot名> 指令分发与子命令处理器
 src/openmausbot/persona.js    手机 IM 端 co-bot（Coordinator Bot）默认人格与回复风格预设
 src/openmausbot/bridge.js     极薄 IM <-> OpenMausBot 桥接器（按 channel.capabilities 自适应降级）
 public/                       /sim 自聊模拟页、/debug 只读诊断页与 .md 附件预览页（view.html、md.js）
-docs/ROADMAP.md               v0.5 ~ v0.8 演进路线图（安全护栏、多 Agent 编排、C2C 协调者互联与共享上下文）
+docs/ROADMAP.md               精简三步演进路线图（v0.5 ~ v0.7：安全底线、真实 IM 闭环、共享目录与 2 态 C2C 委托）
 docs/TROUBLESHOOTING.md       真实 IM 接入上线 Checklist 与常见故障排查手册
 .github/workflows/ci.yml      GitHub Actions 跨平台矩阵 CI（Ubuntu/Windows/macOS）
 LICENSE                       MIT 开源许可证
