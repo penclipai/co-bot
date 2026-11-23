@@ -29,15 +29,20 @@
 <script src="/md.js"></script>
 <script>
   const id = new URLSearchParams(location.search).get('f');
-  const raw = `/files/${encodeURIComponent(id)}?raw=1`;
-  document.getElementById('raw').href = raw;
-  fetch(raw).then((r) => {
-    const cd = r.headers.get('content-disposition') || '';
-    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
-    if (m) document.title = document.getElementById('name').textContent = decodeURIComponent(m[1]);
-    return r.ok ? r.text() : Promise.reject(new Error('文件不存在或已过期'));
-  }).then((t) => { document.getElementById('out').innerHTML = renderMarkdown(t); })
-    .catch((e) => { document.getElementById('out').textContent = e.message; });
+  if (!id) {
+    document.getElementById('raw').hidden = true;
+    document.getElementById('out').textContent = '缺少文件参数（?f=<id>）';
+  } else {
+    const raw = `/files/${encodeURIComponent(id)}?raw=1`;
+    document.getElementById('raw').href = raw;
+    fetch(raw).then((r) => {
+      const cd = r.headers.get('content-disposition') || '';
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+      if (m) document.title = document.getElementById('name').textContent = decodeURIComponent(m[1]);
+      return r.ok ? r.text() : Promise.reject(new Error('文件不存在或已过期'));
+    }).then((t) => { document.getElementById('out').innerHTML = renderMarkdown(t); })
+      .catch((e) => { document.getElementById('out').textContent = e.message; });
+  }
 </script>
 </body>
 </html>

@@ -24,7 +24,12 @@ export class WebServer {
   asset(urlPath, file, type) {
     this.route('GET', urlPath, ({ req, res }) => {
       const buf = fs.readFileSync(path.join(this.publicDir, file));
-      res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'content-length': buf.length, 'cache-control': 'no-store' });
+      res.writeHead(200, {
+        'content-type': `${type}; charset=utf-8`,
+        'content-length': buf.length,
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      });
       res.end(req.method === 'HEAD' ? undefined : buf);
     });
   }
@@ -62,11 +67,15 @@ export class WebServer {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       const origin = req.headers.origin;
       const isDelete = req.method === 'DELETE';
-      const ct = String(req.headers['content-type'] ?? '');
-      if ((origin && origin !== `http://${req.headers.host}`) || (!isDelete && !ct.includes('application/json'))) {
+      const ct = String(req.headers['content-type'] ?? '').trim();
+      const isJsonCt = /^application\/(?:json|[\w.+-]+\+json)(?:\s*;|$)/i.test(ct);
+      if ((origin && origin !== `http://${req.headers.host}`) || (!isDelete && !isJsonCt)) {
         return send(res, 403, { error: 'forbidden' });
       }
-      try { body = JSON.parse(await read(req, r.limit)); } catch (e) { return send(res, e.message === 'too large' ? 413 : 400, { error: e.message === 'too large' ? '太大了' : '请求体不是合法的 JSON' }); }
+      try { body = JSON.parse(await read(req, r.limit, isDelete)); } catch (e) { return send(res, e.message === 'too large' ? 413 : 400, { error: e.message === 'too large' ? '太大了' : '请求体不是合法的 JSON' }); }
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return send(res, 400, { error: '请求体必须是 JSON 对象' });
+      }
     }
     try {
       const out = await r.handler({ req, res, url, params, body });
@@ -78,7 +87,7 @@ export class WebServer {
   }
 }
 
-function read(req, limit = 512 * 1024) {
+function read(req, limit = 512 * 1024, allowEmpty = false) {
   limit ??= 512 * 1024;
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -99,7 +108,7 @@ function read(req, limit = 512 * 1024) {
     req.on('end', () => {
       if (done) return;
       done = true;
-      resolve(chunks.length ? Buffer.concat(chunks, total).toString('utf8') : '{}');
+      resolve(chunks.length ? Buffer.concat(chunks, total).toString('utf8') : (allowEmpty ? '{}' : ''));
     });
     req.on('error', (e) => {
       if (done) return;

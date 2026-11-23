@@ -157,7 +157,8 @@ export async function claimUploads(bridge, mid, quotedId, originChatId = null, c
 export async function forwardBotMedia(bridge, threadId, msgs, { chatId = null, replyTo = null } = {}) {
   const canFiles = bridge.supportsFiles();
   const canImages = bridge.supportsImages();
-  if (!canFiles && !canImages) return;
+  if (!canFiles && !canImages) return 0;
+  let forwarded = 0;
   const outOpts = {
     ...(chatId ? { chatId } : {}),
     ...(replyTo ? { replyTo } : {}),
@@ -177,6 +178,7 @@ export async function forwardBotMedia(bridge, threadId, msgs, { chatId = null, r
           const dest = path.join(bridge.inDir, `out-${Date.now()}-${name}`);
           fs.writeFileSync(dest, buf);
           await sendOutboundFile(bridge, dest, name, outOpts);
+          forwarded += 1;
         } catch { /* 图片回传失败不阻断正文 */ }
       }
     }
@@ -194,9 +196,11 @@ export async function forwardBotMedia(bridge, threadId, msgs, { chatId = null, r
         const dest = path.join(bridge.inDir, `out-${Date.now()}-${safe}`);
         fs.writeFileSync(dest, res.buf);
         await sendOutboundFile(bridge, dest, safe, outOpts);
+        forwarded += 1;
       } catch { /* 附件回传失败不阻断正文 */ }
     }
   }
+  return forwarded;
 }
 
 /** 投递审批、选项/提问或阻塞类卡片至控制会话并记录 pendingCards。 */
@@ -275,14 +279,39 @@ export async function deliverBotReply(bridge, {
   const shownSpeaker = speakerName ? bridge.displayBotName(speakerBotId, speakerName) : '';
   const who = bridge.botPrefix(botId, botName, { proactive: false, isGroup, speakerName, speakerBotId });
   const originName = chatCtx?.chatName || chatCtx?.originChatId;
+  const isPrivDraft = Boolean(isExternal && chatCtx?.privateReply && !proactive && chatCtx?.originChatId);
+  const isPolishDraft = Boolean(!proactive && !isExternal && chatCtx?.polishDraft?.originChatId);
+  const draftMeta = isPrivDraft
+    ? {
+        originChatId: chatCtx.originChatId,
+        originName,
+        originChatType: chatCtx.chatType || 'group',
+        replyToImMsgId: chatCtx.originQuoteId ?? null,
+        addBotPrefix: Boolean(chatCtx?.collaborator || chatCtx?.draftFirst),
+        delegationRe: chatCtx?.delegationReq?.id || null,
+      }
+    : (isPolishDraft
+      ? {
+          originChatId: chatCtx.polishDraft.originChatId,
+          originName: chatCtx.polishDraft.originChatName || chatCtx.polishDraft.originChatId,
+          originChatType: chatCtx.polishDraft.originChatType || 'group',
+          replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
+          addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
+          delegationRe: chatCtx.polishDraft.delegationRe || null,
+        }
+      : null);
+  const draftKey = draftMeta ? `draft_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
   let privHead = '';
-  if (isExternal && chatCtx?.privateReply && !proactive) {
+  if (isPrivDraft && draftKey) {
     if (chatCtx?.collaborator) {
       const tagNote = chatCtx?.delegationReq ? `（委托 \`${chatCtx.delegationReq.id}\`）` : '';
-      privHead = `📩 **同事协作草稿 · 来自「${originName}」的 ${chatCtx.collaborator.name}**${tagNote}\n`;
+      const senderSuffix = originName && originName === chatCtx.collaborator.name ? '' : `的 ${chatCtx.collaborator.name}`;
+      privHead = `📩 **同事协作草稿 · 来自「${originName}」${senderSuffix}**${tagNote}（\`${draftKey}\`）\n`;
     } else {
-      privHead = `📩 **私密回复 · 来自「${originName}」**\n`;
+      privHead = `📩 **私密回复 · 来自「${originName}」**（\`${draftKey}\`）\n`;
     }
+  } else if (isPolishDraft && draftMeta && draftKey) {
+    privHead = `📩 **私密回复（润色） · 来自「${draftMeta.originName}」**（\`${draftKey}\`）\n`;
   }
   const originNote = proactive && isExternal ? `（来自「${originName}」）` : '';
   const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
@@ -322,31 +351,9 @@ export async function deliverBotReply(bridge, {
       privateReply: compactCtx.privateReply,
     } : {}),
   };
-  const isPrivDraft = Boolean(isExternal && chatCtx?.privateReply && !proactive && chatCtx?.originChatId);
-  const isPolishDraft = Boolean(!proactive && !isExternal && chatCtx?.polishDraft?.originChatId);
-  const draftMeta = isPrivDraft
-    ? {
-        originChatId: chatCtx.originChatId,
-        originName,
-        originChatType: chatCtx.chatType || 'group',
-        replyToImMsgId: chatCtx.originQuoteId ?? null,
-        addBotPrefix: Boolean(chatCtx?.collaborator || chatCtx?.draftFirst),
-        delegationRe: chatCtx?.delegationReq?.id || null,
-      }
-    : (isPolishDraft
-      ? {
-          originChatId: chatCtx.polishDraft.originChatId,
-          originName: chatCtx.polishDraft.originChatName || chatCtx.polishDraft.originChatId,
-          originChatType: chatCtx.polishDraft.originChatType || 'group',
-          replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
-          addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
-          delegationRe: chatCtx.polishDraft.delegationRe || null,
-        }
-      : null);
   const effResult = bridge.effectiveResultChars();
   const effSoftSplit = bridge.effectiveSoftSplitChars();
 
-  const draftKey = draftMeta ? `draft_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
   const draftActions = draftKey
     ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${bridge.trigger} sendback ${draftKey}` }]
     : null;

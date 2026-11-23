@@ -161,44 +161,99 @@ function claimQueuedUserMessage(bridge, threadId, msg) {
   return true;
 }
 
-/** 将最新一条排队消息插队注入正在执行的任务。 */
-export async function steerLatestQueue(bridge, preferredThreadId, targetChatId = null) {
-  const hit = pickQueuedEntry(bridge, preferredThreadId);
-  if (!hit) {
-    await bridge.say('当前没有排队中的消息。', targetChatId ? { targetChatId } : null);
-    return;
-  }
-  const q = hit.list.at(-1);
-  const outChatId = targetChatId || q.chatCtx?.controlChatId || bridge.selfChat;
+async function trySteerQueueItem(bridge, { botId, botName, threadId, isGroup, queueId, text, sendId, chatCtx }, { targetChatId, banner = '', onQueuedText } = {}) {
+  const outChatId = targetChatId || chatCtx?.controlChatId || bridge.selfChat;
   const route = {
-    botId: q.botId,
-    botName: q.botName,
-    threadId: q.threadId,
-    ...(q.isGroup ? { isGroup: true } : {}),
+    botId,
+    botName,
+    threadId,
+    ...(isGroup ? { isGroup: true } : {}),
     ...(outChatId ? { targetChatId: outChatId } : {}),
   };
   try {
-    const res = q.isGroup && typeof bridge.client.steerGroupQueued === 'function'
-      ? await bridge.client.steerGroupQueued(q.botId, q.queueId, q.threadId)
-      : await bridge.client.steerQueued(q.botId, q.queueId, q.threadId);
+    const res = isGroup && typeof bridge.client.steerGroupQueued === 'function'
+      ? await bridge.client.steerGroupQueued(botId, queueId, threadId)
+      : await bridge.client.steerQueued(botId, queueId, threadId);
     if (res?.queued) {
-      await bridge.say(`⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`, route);
-      return;
+      const msg = typeof onQueuedText === 'function'
+        ? onQueuedText(res)
+        : `${banner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`;
+      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${bridge.displayBotName(botId, botName, { isGroup })}` : bridge.trigger;
+      await bridge.say(msg, route, null, typeof onQueuedText === 'function'
+        ? [
+            { label: '立即插队', text: `${cmdTarget} steer`, kind: 'primary' },
+            { label: '取消排队', text: `${cmdTarget} cancel`, kind: 'danger' },
+          ]
+        : null);
+      return { steered: false, res };
     }
-    removeQueued(bridge, q.threadId, q.queueId);
-    bridge.steeredQueue.set(q.sendId, q);
+    bridge.steeredQueue.set(sendId, { queueId, botId, botName, threadId, isGroup, text, sendId, chatCtx });
     if (bridge.steeredQueue.size > 50) bridge.steeredQueue.delete(bridge.steeredQueue.keys().next().value);
-    await bridge.say(`⚡ 已插队注入当前任务：「${clip(q.text, 50)}」`, route);
+    await bridge.say(`${banner}⚡ 已插队注入当前任务：「${clip(text, 50)}」`, route);
+    return { steered: true, res };
   } catch (e) {
-    await bridge.say(`❌ 插队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
+    await bridge.say(`${banner}❌ 插队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
+    return { steered: false, error: e };
   }
 }
 
-/** 取消最近一条排队等待的消息。 */
-export async function cancelLatestQueue(bridge, preferredThreadId, targetChatId = null) {
+/** 取消并清空指定 Thread 中尚未执行的全部排队消息（例如 @bot stop 时调用）。 */
+export async function cancelThreadQueue(bridge, threadId) {
+  if (!threadId) return 0;
+  const list = bridge.queuedByThread.get(threadId);
+  if (!list?.length) return 0;
+  bridge.queuedByThread.delete(threadId);
+  let cancelled = 0;
+  for (const q of list) {
+    cancelled += 1;
+    try {
+      if (q.isGroup && typeof bridge.client.cancelGroupQueued === 'function') {
+        await bridge.client.cancelGroupQueued(q.botId, q.queueId);
+      } else if (typeof bridge.client.cancelQueued === 'function') {
+        await bridge.client.cancelQueued(q.botId, q.queueId, q.threadId);
+      }
+    } catch { /* ignore stale queue item */ }
+  }
+  return cancelled;
+}
+
+/** 将最新一条排队消息插队注入正在执行的任务。 */
+export async function steerLatestQueue(bridge, preferredThreadId, targetChatId = null, { banner = '' } = {}) {
   const hit = pickQueuedEntry(bridge, preferredThreadId);
   if (!hit) {
-    await bridge.say('当前没有排队中的消息。', targetChatId ? { targetChatId } : null);
+    await bridge.say(`${banner}当前没有排队中的消息。`, targetChatId ? { targetChatId } : null);
+    return;
+  }
+  const q = hit.list.at(-1);
+  const res = await trySteerQueueItem(bridge, q, { targetChatId, banner });
+  if (res.steered) removeQueued(bridge, q.threadId, q.queueId);
+}
+
+/** 对运行中的任务追加补充插队指令（@bot steer <补充要求>）。 */
+export async function dispatchSteerSupplement(bridge, target, text, imMsgId, quotedId, chatCtx = null, { banner = '', cmdTarget = bridge.trigger } = {}) {
+  const tid = target?.threadId;
+  const hasRunning = Boolean(tid && [...bridge.activeTurns.values()].some((t) => t.threadId === tid));
+  const hasQueued = Boolean(tid && bridge.queuedByThread.get(tid)?.length);
+  const outChatId = chatCtx?.controlChatId || chatCtx?.replyChatId || bridge.selfChat;
+  if (!hasRunning && !hasQueued) {
+    await bridge.say(
+      `${banner}ℹ️ 当前没有运行中或排队中的任务，如需提问请直接发送 \`${cmdTarget} ${text}\`。`,
+      outChatId ? { targetChatId: outChatId } : null,
+    );
+    return null;
+  }
+  return dispatchToBot(bridge, target, text, imMsgId, quotedId, null, {
+    ...(chatCtx || {}),
+    autoSteer: true,
+    steerBanner: banner,
+  });
+}
+
+/** 取消最近一条排队等待的消息。 */
+export async function cancelLatestQueue(bridge, preferredThreadId, targetChatId = null, { banner = '' } = {}) {
+  const hit = pickQueuedEntry(bridge, preferredThreadId);
+  if (!hit) {
+    await bridge.say(`${banner}当前没有排队中的消息。`, targetChatId ? { targetChatId } : null);
     return;
   }
   const q = hit.list.at(-1);
@@ -217,9 +272,9 @@ export async function cancelLatestQueue(bridge, preferredThreadId, targetChatId 
       await bridge.client.cancelQueued(q.botId, q.queueId, q.threadId);
     }
     removeQueued(bridge, q.threadId, q.queueId);
-    await bridge.say(`🗑 已取消排队消息：「${clip(q.text, 50)}」`, route);
+    await bridge.say(`${banner}🗑 已取消排队消息：「${clip(q.text, 50)}」`, route);
   } catch (e) {
-    await bridge.say(`❌ 取消排队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
+    await bridge.say(`${banner}❌ 取消排队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
   }
 }
 
@@ -235,29 +290,34 @@ export async function collectBotTasks(bridge, target) {
 }
 
 /** 将焦点切换到选定的历史或新建任务 Thread。 */
-export async function switchTask(bridge, defaultBotId, defaultBotName, task, { isGroup = false, chatId = null } = {}) {
+export async function switchTask(bridge, defaultBotId, defaultBotName, task, { isGroup = false, chatId = null, isExternal = false, originChatId = null, banner = '' } = {}) {
   const botId = task.botId ?? defaultBotId;
   const botName = task.botName ?? defaultBotName;
   const tid = task.threadId ?? task.id;
   bridge.clearPickers();
   const route = { botId, botName, threadId: tid, ...(isGroup ? { isGroup: true } : {}), ...(chatId ? { targetChatId: chatId } : {}) };
   try {
-    if (isGroup && typeof bridge.client.selectGroupTask === 'function') {
-      await bridge.client.selectGroupTask(botId, tid);
-      bridge.groupByThread.set(tid, { id: botId, name: botName, threadId: tid, isGroup: true });
+    if (isExternal && originChatId) {
+      bridge.setChatThread(originChatId, { id: botId, name: botName, threadId: tid, isGroup });
     } else {
-      await bridge.client.selectTask(botId, tid);
-      bridge.botByThread.set(tid, { id: botId, name: botName, threadId: tid });
+      if (isGroup && typeof bridge.client.selectGroupTask === 'function') {
+        await bridge.client.selectGroupTask(botId, tid);
+        bridge.groupByThread.set(tid, { id: botId, name: botName, threadId: tid, isGroup: true });
+      } else {
+        await bridge.client.selectTask(botId, tid);
+        bridge.botByThread.set(tid, { id: botId, name: botName, threadId: tid });
+      }
+      bridge.focus = { botId, botName, threadId: tid, ...(isGroup ? { isGroup: true } : {}) };
+      bridge.setSelfThread({ id: botId, name: botName, threadId: tid, isGroup });
+      bridge.lastBotReplyAt = bridge.now();
+      bridge.saveState();
     }
-    bridge.focus = { botId, botName, threadId: tid, ...(isGroup ? { isGroup: true } : {}) };
-    bridge.setSelfThread({ id: botId, name: botName, threadId: tid, isGroup });
-    bridge.lastBotReplyAt = bridge.now();
-    bridge.saveState();
     const title = clip(task.title || '未命名会话', 50);
     const shownName = bridge.displayBotName(botId, botName, { isGroup });
-    await bridge.say(`🔀 已切换到 **${shownName}** 的会话「${title}」，直接发消息即可续聊。`, route);
+    const hint = isExternal ? `已在当前会话切换 **${shownName}** 上下文` : `已切换到 **${shownName}** 的会话`;
+    await bridge.say(`${banner}🔀 ${hint}「${title}」${isExternal ? '。' : '，直接发消息即可续聊。'}`, route);
   } catch (e) {
-    await bridge.say(`❌ 切换会话失败：${formatOmbError(e)}`, chatId ? { targetChatId: chatId } : null);
+    await bridge.say(`${banner}❌ 切换会话失败：${formatOmbError(e)}`, chatId ? { targetChatId: chatId } : null);
   }
 }
 
@@ -389,14 +449,26 @@ export async function dispatchToBot(bridge, bot, text, imMsgId, quotedId, replyT
   if (receipt?.queued === true) {
     const queueId = receipt.queueId || sendId;
     const list = bridge.queuedByThread.get(threadId) ?? [];
-    list.push({ queueId, botId: bot.id, botName: bot.name, threadId, isGroup, text, sendId, at: bridge.now(), chatCtx: compactCtx });
+    const entry = { queueId, botId: bot.id, botName: bot.name, threadId, isGroup, text, sendId, at: bridge.now(), chatCtx: compactCtx };
+    const ctrlChat = bridge.resolveControlChatId(ctxInfo);
+    const ctrlBanner = ctxInfo.steerBanner
+      || (isExternal && ctrlChat === bridge.selfChat ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n` : '');
+    if (ctxInfo.autoSteer && receipt.queueId) {
+      const steerRes = await trySteerQueueItem(bridge, entry, {
+        targetChatId: ctrlChat,
+        banner: ctrlBanner,
+        onQueuedText: (res) => `${ctrlBanner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已加入队列等待上一轮完成。`,
+      });
+      if (!steerRes.steered) {
+        list.push(entry);
+        bridge.queuedByThread.set(threadId, list);
+      }
+      return receipt;
+    }
+    list.push(entry);
     bridge.queuedByThread.set(threadId, list);
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
     const cmdTarget = isGroup || (bridge.chiefBotId && bot.id !== bridge.chiefBotId) ? `@${shownName}` : bridge.trigger;
-    const ctrlChat = bridge.resolveControlChatId(ctxInfo);
-    const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
-      ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n`
-      : '';
     await bridge.say(
       `${ctrlBanner}📥 ${who ? `${who} ` : ''}已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
       { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },

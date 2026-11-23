@@ -1,126 +1,24 @@
 import { clip } from '../format.js';
 import { matchProjectSpec } from '../core/projects.js';
-import { fmtTokens, usageBar, formatOmbError, parseChoiceIndex } from './cards.js';
+import { formatOmbError, parseChoiceIndex } from './cards.js';
+import {
+  botCommandTarget,
+  buildHelpText,
+  makeCommandSink,
+  replyContextUsage,
+  resolveChatOrId,
+  runQueueAction,
+  showBotName,
+  stopTarget,
+} from './command-helpers.js';
 
-const showBotName = (bridge, id, name, isGroup = false) => (
-  typeof bridge.displayBotName === 'function'
-    ? bridge.displayBotName(id, name, { isGroup })
-    : (String(name ?? '').trim() || bridge.botName || 'co-bot')
-);
+export { botCommandTarget, buildHelpText };
 
 const TASK_PICK_TTL = 2 * 60 * 1000;
 const parseListChoice = (raw) => {
   const s = String(raw ?? '').trim();
   return parseChoiceIndex(s) ?? (/^\d+$/.test(s) ? Number(s) : null);
 };
-
-function resolveChatOrId(bridge, arg, { isExternal = false, chatCtx = null } = {}) {
-  const q = String(arg ?? '').trim();
-  if (!q && isExternal && chatCtx) {
-    return { id: chatCtx.originChatId, name: chatCtx.chatName || chatCtx.originChatId, type: chatCtx.chatType };
-  }
-  if (!q) return null;
-  return bridge.resolveKnownChat(q) ?? (/^[\w.:-]+$/.test(q) ? { id: q, name: q, type: 'group' } : null);
-}
-
-async function replyContextUsage(sensSink, { title, bot, threadId, task, compactCmd, compactLabel, isExternal = false, emptyHint = '暂无统计（对话后记录）' }) {
-  const ctx = task?.usage?.context;
-  const turns = task?.usage?.turns;
-  if (!ctx?.window) {
-    await sensSink.say(
-      `📊 **${title}**${emptyHint}`,
-      null,
-      null,
-      isExternal && compactCmd ? [{ label: compactLabel, text: compactCmd }] : null,
-    );
-    return;
-  }
-  const pct = Math.min(100, Math.round(((ctx.tokens || 0) / ctx.window) * 100));
-  await sensSink.say(
-    `📊 **${title}**上下文：${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · 共 ${turns} 轮` : ''}）\n\`${usageBar(pct)}\``,
-    { botId: bot.id, botName: bot.name, threadId },
-    null,
-    [{ label: compactLabel, text: compactCmd, ...(pct >= 80 ? { kind: 'primary' } : {}) }],
-  );
-}
-
-/** 返回应指向指定 Bot 的命令前缀（非主 Bot 用 `@<Bot名>`，主 Bot 用触发词）。 */
-export function botCommandTarget(bridge, botId, botName) {
-  if (botId && bridge.chiefBotId && botId !== bridge.chiefBotId && botName) {
-    return `@${showBotName(bridge, botId, botName)}`;
-  }
-  return bridge.trigger;
-}
-
-/** 构造 `@bot help` 简洁使用说明。 */
-export function buildHelpText(bridge) {
-  const t = bridge.trigger;
-  const brand = bridge.botName || 'co-bot';
-  return [
-    `🤖 **${brand} 常用指南**`,
-    `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
-    `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
-    `- \`${t} chats\` / \`chat mute|allow|mode|reset\` / \`summary <群>\` / \`digest\`：管群、跨群纪要与免打扰汇总`,
-    `- \`${t} bind [项目|unbind]\` / \`delegate <会话> [proj:<项目>] <问题>\`：项目目录绑定与 C2C 协作委托`,
-    `- \`${t} new [话题]\` / \`tasks\` / \`task <序号>\` / \`context [群]\` / \`compact [群]\`：会话与上下文管理`,
-    `- \`${t} bots\` / \`status\` / \`memory\` / \`记住 <内容>\` / \`approval [ask|auto|full]\`：团队成员、记忆与审批`,
-    `- \`${t} steer\` / \`cancel\` / \`stop\`：插队、取消排队或停止任务；卡片支持 \`ok/always/no/skip\``,
-  ].join('\n');
-}
-
-function makeCommandSink(bridge, chatCtx, { sensitive = true } = {}) {
-  if (!chatCtx?.isExternal) {
-    return {
-      chatId: bridge.selfChat,
-      say: (text, route = null, replyTo = null, actions = null) => bridge.say(text, route, replyTo, actions),
-      sendFile: (filePath, name, opts = {}) => bridge.sendOutboundFile(filePath, name, opts),
-    };
-  }
-  const ctrlId = typeof bridge.resolveControlChatId === 'function'
-    ? bridge.resolveControlChatId(chatCtx)
-    : bridge.selfChat;
-  const targetId = sensitive ? ctrlId : chatCtx.replyChatId;
-  const label = chatCtx.chatName || chatCtx.originChatId;
-  let bannerSent = false;
-  return {
-    chatId: targetId,
-    say: async (text, route = null, replyTo = null, actions = null) => {
-      if (!targetId) return null;
-      const showOriginBanner = sensitive && !bannerSent && ctrlId && ctrlId === bridge.selfChat;
-      const head = showOriginBanner ? `📍 **来自「${label}」的指令结果**\n` : '';
-      bannerSent = true;
-      const mergedRoute = route ? { ...route, targetChatId: targetId } : { targetChatId: targetId };
-      const rt = sensitive ? null : (replyTo ?? chatCtx.replyToImMsgId);
-      return bridge.say(`${head}${text}`, mergedRoute, rt, actions);
-    },
-    sendFile: (filePath, name, opts = {}) => {
-      if (!targetId) return null;
-      return bridge.sendOutboundFile(filePath, name, { ...opts, chatId: targetId });
-    },
-  };
-}
-
-async function stopTarget(bridge, target, sink = null, { isExternal = false } = {}) {
-  const say = sink?.say ?? ((t, r, rt, a) => bridge.say(t, r, rt, a));
-  const active = [...bridge.activeTurns.values()].find((t) => t.threadId === target.threadId || t.botId === target.botId)
-    ?? (!isExternal ? [...bridge.activeTurns.values()].at(-1) : null);
-  if (target.isGroup && typeof bridge.client.interruptGroup === 'function') {
-    await bridge.client.interruptGroup(target.botId, target.threadId);
-  } else {
-    await bridge.client.interrupt(target.botId, target.threadId);
-  }
-  if (active && (active.botId === target.botId || active.threadId === target.threadId)) {
-    active.dispose();
-    bridge.activeTurns.delete(active.key);
-    bridge.inFlightTurns?.delete(active.key);
-    bridge.saveState();
-  }
-  if (!isExternal) {
-    bridge.lastBotReplyAt = 0;
-    bridge.clearPickers?.();
-  }
-  await say(`⏹ 已请求停止 **${showBotName(bridge, target.botId, target.botName, Boolean(target.isGroup))}**`);
-}
 
 async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, mid, quotedId, hasAttachments = false, chatCtx }) {
   const isExternal = Boolean(chatCtx?.isExternal);
@@ -145,7 +43,9 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     if (visible.length) {
       const lines = visible.map((b) => {
         const role = b.chiefOfStaff ? '（主协调）' : '';
-        const st = b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲';
+        const st = b.activity === 'dead'
+          ? '🔴 异常(dead)'
+          : (b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲');
         const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
         const apv = b.approvalMode ? ` · 审批:${b.approvalMode}` : '';
         const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
@@ -185,8 +85,13 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     const docNote = doc ? ` · Doctor：${doc.problems?.length ? `⚠️ ${doc.problems.length} 个异常` : `正常（${doc.checked ?? 0}项）`}` : '';
     const brand = bridge.botName || 'co-bot';
     const chiefShown = chief ? showBotName(bridge, chief.id, chief.name) : '无';
+    const deadBots = visible.filter((b) => b.activity === 'dead');
+    const chiefDead = chief?.activity === 'dead';
+    const headState = chiefDead
+      ? `🔴 **${brand} 异常（主协调 dead）**`
+      : (deadBots.length ? `🟡 **${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `🟢 **${brand} 在线**`);
     await sensSink.say(
-      `🟢 **${brand} 在线** · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
+      `${headState} · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
       `协作 Bot：${visible.length} 个${groupNote} · 主协调：**${chiefShown}**（风格：${chief?.replyStyle ?? 'default'}，审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote} · 引擎 v${h.version ?? '?'}` +
       (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : ''),
     );
@@ -199,10 +104,14 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       botName: targetBot.name,
       threadId: targetBot.threadId,
       isGroup: Boolean(targetBot.isGroup),
+      ...(isExternal ? { originChatId: chatCtx.originChatId } : {}),
     } : null;
-    const target = isExternal
+    const rawTarget = isExternal
       ? (quotedRoute ?? [...bridge.activeTurns.values()].find((t) => t.chatCtx?.originChatId === chatCtx.originChatId) ?? scoped)
       : (quotedRoute ?? [...bridge.activeTurns.values()].at(-1) ?? bridge.focus);
+    const target = rawTarget && isExternal && !rawTarget.originChatId
+      ? { ...rawTarget, originChatId: chatCtx.originChatId }
+      : rawTarget;
     if (!target) { await sensSink.say('当前没有运行中或最近对话的 Bot。'); return true; }
     try {
       await stopTarget(bridge, target, sensSink, { isExternal });
@@ -222,15 +131,16 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  if (/^(steer|插队)$/.test(low)) {
-    const tid = isExternal ? (quotedRoute?.threadId ?? targetBot?.threadId) : (quotedRoute?.threadId ?? bridge.focus?.threadId);
-    await bridge.steerLatestQueue(tid, sensSink.chatId);
-    return true;
-  }
-
-  if (/^(cancel|取消排队)$/.test(low)) {
-    const tid = isExternal ? (quotedRoute?.threadId ?? targetBot?.threadId) : (quotedRoute?.threadId ?? bridge.focus?.threadId);
-    await bridge.cancelLatestQueue(tid, sensSink.chatId);
+  if (await runQueueAction(bridge, {
+    raw,
+    target: targetBot,
+    quotedRoute,
+    sensSink,
+    mid,
+    quotedId,
+    chatCtx,
+    cmdTarget: bridge.trigger,
+  })) {
     return true;
   }
 
@@ -256,6 +166,10 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
         return true;
       }
       if (isMute) {
+        if (target.id === 'self' || target.id === bridge.selfChat) {
+          await sensSink.say('⚠️ 不能静音自聊控制会话。');
+          return true;
+        }
         bridge.setChatMuted(target.id, true);
         await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`@bot\` 将不再触发，发 \`${bridge.trigger} chat allow ${target.id}\` 可恢复。`);
       } else {
@@ -340,6 +254,10 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       return true;
     }
     if (/^(mute|off|disable|静音|关闭)$/.test(op)) {
+      if (target.id === 'self' || target.id === bridge.selfChat) {
+        await sensSink.say('⚠️ 不能静音自聊控制会话。');
+        return true;
+      }
       bridge.setChatMuted(target.id, true);
       await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），发 \`${bridge.trigger} chat allow ${target.id}\` 可恢复。`);
     } else {
@@ -398,9 +316,14 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
 
     let limit = 30;
     let focusQuestion = tail;
-    const limM = tail.match(/^(\d{1,3})(?:\s+([\s\S]*))?$/);
+    const limM = tail.match(/^(-?\d+)(?:\s+([\s\S]*))?$/);
     if (limM) {
-      limit = Number(limM[1]);
+      const parsedLimit = Number(limM[1]);
+      if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 200) {
+        await sensSink.say(`⚠️ 汇总条数需为 1～200 之间的整数（收到 \`${limM[1]}\`）。`);
+        return true;
+      }
+      limit = parsedLimit;
       focusQuestion = (limM[2] ?? '').trim();
     }
 
@@ -440,20 +363,33 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       return true;
     }
     const arg = (sendbackM[1] ?? '').trim();
-    if (/^(confirm|确认|发送|send)$/i.test(arg) && bridge.pendingSendBack) {
+    if (/^(confirm|确认|发送|send)$/i.test(arg)) {
+      if (!bridge.pendingSendBack) {
+        await sensSink.say(`当前没有待确认发回的草稿（请先使用 \`${bridge.trigger} sendback\` 选择草稿，或可能已发回）。`);
+        return true;
+      }
       await bridge.confirmSendBack();
       return true;
     }
     let draftId = null;
     let overrideText = arg;
     const tokM = arg.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-    if (tokM && bridge.privateDrafts.has(tokM[1])) {
-      draftId = tokM[1];
-      overrideText = (tokM[2] ?? '').trim();
+    if (tokM) {
+      const first = tokM[1];
+      if (bridge.privateDrafts.has(first)) {
+        draftId = first;
+        overrideText = (tokM[2] ?? '').trim();
+      } else if (/^draft_[A-Za-z0-9_-]+$/i.test(first)) {
+        await sensSink.say(`⚠️ 未找到或已过期的草稿 \`${first}\`，请引用最新草稿回复 \`${bridge.trigger} sendback\`。`);
+        return true;
+      }
     }
     const draft = bridge.resolvePrivateDraft({ quotedId, draftId });
     if (!draft) {
-      await sensSink.say(`暂无待发回的私密草稿（需先在外部群/私聊用 \`${bridge.trigger}!\` 起草）。`);
+      const msg = draftId
+        ? `⚠️ 未找到或已过期的草稿 \`${draftId}\`，请引用最新草稿回复 \`${bridge.trigger} sendback\`。`
+        : `暂无待发回的私密草稿（需先在外部群/私聊用 \`${bridge.trigger}!\` 起草）。`;
+      await sensSink.say(msg);
       return true;
     }
     await bridge.requestSendBack(draft, overrideText);
@@ -502,18 +438,29 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     }
     let targetChat = { id: curChatId, name: curChatName };
     let spec = sub;
-    if (!isExternal) {
-      const twoM = sub.match(/^(\S+)\s+([\s\S]+)$/);
-      if (twoM) {
-        const maybeChat = resolveChatOrId(bridge, twoM[1]);
-        if (maybeChat) {
-          targetChat = maybeChat;
-          spec = twoM[2].trim();
-        }
+    let hasTwoArgs = false;
+    const twoM = sub.match(/^(\S+)\s+([\s\S]+)$/);
+    if (twoM) {
+      const maybeChat = resolveChatOrId(bridge, twoM[1]);
+      if (maybeChat && (!isExternal || maybeChat.id === curChatId)) {
+        targetChat = maybeChat;
+        spec = twoM[2].trim();
+        hasTwoArgs = true;
       }
+    }
+    if (hasTwoArgs && /^(?:unbind|clear|off|del|remove|解绑|清除)$/i.test(spec)) {
+      const removed = bridge.unbindChatProject(targetChat.id);
+      await sensSink.say(removed
+        ? `🔓 已解除「${targetChat.name || targetChat.id}」的项目绑定。`
+        : `会话「${targetChat.name || targetChat.id}」当前未绑定项目。`);
+      return true;
     }
     const matched = matchProjectSpec(spec, bridge.projects);
     if (!matched.ok) {
+      if (!isExternal && !hasTwoArgs && bridge.resolveKnownChat(sub)) {
+        await sensSink.say(`用法：\`${bridge.trigger} bind ${sub} <项目|路径>\` 或 \`${bridge.trigger} bind ${sub} unbind\``);
+        return true;
+      }
       await sensSink.say(`⚠️ 绑定失败：${matched.error}`);
       return true;
     }
@@ -535,7 +482,7 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       await sensSink.say(`用法：\`${bridge.trigger} delegate <会话名|chatId> [proj:<项目>] <问题>\``);
       return true;
     }
-    const targetChat = resolveChatOrId(bridge, m[1], { isExternal, chatCtx });
+    const targetChat = bridge.resolveKnownChat(m[1]);
     if (!targetChat?.id || targetChat.id === bridge.selfChat) {
       await sensSink.say(`未找到可委托的外部群/联系人「${m[1]}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
       return true;
@@ -598,12 +545,16 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       }
       return true;
     }
-    if (/^(steer|插队)$/i.test(raw)) {
-      await bridge.steerLatestQueue(activeTarget.threadId, sensSink.chatId);
-      return true;
-    }
-    if (/^(cancel|取消排队)$/i.test(raw)) {
-      await bridge.cancelLatestQueue(activeTarget.threadId, sensSink.chatId);
+    if (await runQueueAction(bridge, {
+      raw,
+      target: activeTarget,
+      quotedRoute,
+      sensSink,
+      mid,
+      quotedId,
+      chatCtx,
+      cmdTarget,
+    })) {
       return true;
     }
   }
@@ -646,6 +597,10 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
         });
         return true;
       }
+      if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
+        await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
+        return true;
+      }
       const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
       const freshName = showBotName(bridge, fresh.id, fresh.name);
       const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === activeTarget.threadId) ?? fresh.tasks?.[0];
@@ -671,6 +626,10 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     const arg = (apvM[1] ?? '').trim().toLowerCase();
     try {
       const { bots = [] } = await bridge.client.listBots();
+      if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
+        await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
+        return true;
+      }
       const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
       const freshName = showBotName(bridge, fresh.id, fresh.name);
       const curMode = fresh.approvalMode ?? (fresh.autoApprove ? 'auto' : 'ask');
@@ -777,9 +736,14 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     return true;
   }
 
-  const taskM = raw.match(/^(?:task|切换)\s+(.+)$/i);
-  const taskChoice = taskM ? parseListChoice(taskM[1]) : null;
-  if (taskChoice) {
+  const taskM = raw.match(/^(?:task|切换)(?:\s+([\s\S]*))?$/i);
+  if (taskM) {
+    const taskArg = (taskM[1] ?? '').trim();
+    const taskChoice = parseListChoice(taskArg);
+    if (!taskChoice || taskChoice < 1) {
+      await sensSink.say(`用法：\`${cmdTarget} task <正整数序号>\`，先发 \`${cmdTarget} tasks\` 查看会话编号。`);
+      return true;
+    }
     const idx = taskChoice - 1;
     try {
       let tasks = bridge.pendingTaskPick?.botId === activeTarget.id && bridge.now() < bridge.pendingTaskPick.expiresAt
@@ -791,7 +755,13 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
         await sensSink.say(`未找到第 ${idx + 1} 号会话（当前共有 ${tasks.length} 条可用会话）。`);
         return true;
       }
-      await bridge.switchTask(activeTarget.id, activeTarget.name, picked, { isGroup, chatId: sensSink.chatId });
+      await bridge.switchTask(activeTarget.id, activeTarget.name, picked, {
+        isGroup,
+        chatId: sensSink.chatId,
+        isExternal,
+        originChatId: chatCtx?.originChatId,
+        banner: sensSink.banner,
+      });
     } catch (e) {
       await sensSink.say(`❌ 切换会话失败：${formatOmbError(e)}`);
     }
@@ -828,7 +798,7 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       bridge.pendingTaskPick = null;
       bridge.setSelfThread?.(nextTarget);
       bridge.focus = { botId: nextTarget.id, botName: nextTarget.name, threadId: newThreadId, ...(isGroup ? { isGroup: true } : {}) };
-      bridge.lastBotReplyAt = bridge.now();
+      if (!prompt) bridge.lastBotReplyAt = bridge.now();
       bridge.saveState();
     }
     if (!prompt) {
@@ -867,6 +837,10 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
           `🗜️ 已触发压缩「${extChat.name || extChat.id}」的隔离上下文（${done.map((d) => showBotName(bridge, d.botId, d.botName)).join('、')}）。`,
           { botId: done[0].botId, botName: showBotName(bridge, done[0].botId, done[0].botName), threadId: done[0].threadId },
         );
+        return true;
+      }
+      if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
+        await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
         return true;
       }
       await bridge.client.compact(activeTarget.id, activeTarget.threadId);

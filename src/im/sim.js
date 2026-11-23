@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { pruneExpiredFiles, writeJsonAtomic } from '../format.js';
+import { pruneExpiredFiles, safeAttachmentName, writeJsonAtomic } from '../format.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIME = {
@@ -15,11 +15,45 @@ const SIM_CHATS = [
   { id: 'dm_alice', type: 'direct', name: 'Alice' },
 ];
 const CHAT_META = new Map(SIM_CHATS.map((c) => [c.id, c]));
-const SIM_SENDERS = {
+const SIM_SENDERS = Object.assign(Object.create(null), {
   me: { id: 'me', name: '我', isSelf: true },
   alice: { id: 'alice', name: 'Alice', isSelf: false },
   bob: { id: 'bob', name: 'Bob', isSelf: false },
-};
+});
+
+function resolveSimChat(rawChatId) {
+  if (rawChatId === undefined) return chatMetaOf('self');
+  if (typeof rawChatId !== 'string' || !rawChatId.trim()) {
+    throw new Error('chatId 必须为非空字符串');
+  }
+  const clean = rawChatId.trim();
+  if (clean === '__proto__' || clean === 'constructor' || clean === 'prototype') {
+    throw new Error('非法 chatId');
+  }
+  return chatMetaOf(clean);
+}
+
+function resolveSimSender(rawSender, chat) {
+  let id;
+  if (rawSender === undefined) {
+    id = 'me';
+  } else {
+    if (typeof rawSender !== 'string' || !rawSender.trim()) {
+      throw new Error('sender 必须为非空字符串');
+    }
+    id = rawSender.trim();
+    if (id === '__proto__' || id === 'constructor' || id === 'prototype') {
+      throw new Error('非法 sender');
+    }
+  }
+  const sender = Object.hasOwn(SIM_SENDERS, id)
+    ? SIM_SENDERS[id]
+    : { id, name: id, isSelf: false };
+  if (chat.type === 'self' && !sender.isSelf) {
+    throw Object.assign(new Error('自聊会话仅允许本人(me)发送'), { status: 403 });
+  }
+  return sender;
+}
 
 function chatMetaOf(chatId) {
   const id = String(chatId || 'self');
@@ -101,9 +135,9 @@ export class WebSimTransport {
     web.route('POST', '/send', ({ body }) => {
       const text = String(body.text ?? '').trim();
       if (!text) throw new Error('空消息');
-      const chat = chatMetaOf(body.chatId);
-      const sender = chat.type === 'self' ? SIM_SENDERS.me : (SIM_SENDERS[body.sender] ?? SIM_SENDERS.me);
-      const device = DEVICES[body.device] ?? DEVICES.mobile;
+      const chat = resolveSimChat(body.chatId);
+      const sender = resolveSimSender(body.sender, chat);
+      const device = Object.hasOwn(DEVICES, body.device) ? DEVICES[body.device] : DEVICES.mobile;
       const mentions = Array.isArray(body.mentions) ? body.mentions.filter(Boolean) : [];
       const msg = {
         id: `${this.boot}u${++this.n}`,
@@ -137,25 +171,26 @@ export class WebSimTransport {
     web.route('POST', '/recall', ({ body }) => {
       const recalledMsgId = String(body.msgId ?? body.recalledMsgId ?? '').trim();
       if (!recalledMsgId) throw new Error('缺少撤回消息 ID（msgId）');
-      const chat = chatMetaOf(body.chatId);
-      const sender = chat.type === 'self' ? SIM_SENDERS.me : (SIM_SENDERS[body.sender] ?? SIM_SENDERS.me);
+      const chat = resolveSimChat(body.chatId);
+      const sender = resolveSimSender(body.sender, chat);
       const idx = this.history.findIndex((m) => String(m.chatId || 'self') === chat.id && String(m.id) === recalledMsgId);
-      let removed = false;
-      if (idx >= 0) {
-        const [dropped] = this.history.splice(idx, 1);
-        removed = true;
-        if (dropped?.file?.id && !this.history.some((m) => m.file?.id === dropped.file.id)) {
-          const gone = this.files.get(dropped.file.id);
-          this.files.delete(dropped.file.id);
-          if (gone?.path) {
-            try { fs.rmSync(gone.path, { force: true }); } catch { /* ignore */ }
-          }
-        }
-        this.#saveHistory();
+      if (idx < 0) throw Object.assign(new Error('未找到待撤回消息'), { status: 404 });
+      const target = this.history[idx];
+      if (target.from === 'bot' || target.senderId !== sender.id) {
+        throw Object.assign(new Error('无权撤回他人或助手消息'), { status: 403 });
       }
+      const [dropped] = this.history.splice(idx, 1);
+      if (dropped?.file?.id && !this.history.some((m) => m.file?.id === dropped.file.id)) {
+        const gone = this.files.get(dropped.file.id);
+        this.files.delete(dropped.file.id);
+        if (gone?.path) {
+          try { fs.rmSync(gone.path, { force: true }); } catch { /* ignore */ }
+        }
+      }
+      this.#saveHistory();
       const ts = Date.now();
       const notice = { kind: 'recall', chatId: chat.id, recalledMsgId, ts };
-      for (const c of this.clients) c.write(`data: ${JSON.stringify(notice)}\n\n`);
+      this.#broadcastSse(notice);
       onEvent({
         id: `${this.boot}r${++this.n}`,
         kind: 'recall',
@@ -165,18 +200,26 @@ export class WebSimTransport {
         recalledMsgId,
         text: '',
       });
-      return { ok: true, chatId: chat.id, recalledMsgId, removed };
+      return { ok: true, chatId: chat.id, recalledMsgId, removed: true };
     });
 
     web.route('POST', '/upload', ({ body }) => {
-      // eslint-disable-next-line no-control-regex
-      const name = path.basename(String(body.name ?? '')).replace(/[\x00-\x1f]/g, '') || 'file';
-      const rawB64 = String(body.data ?? '').replace(/^data:[^;]*;base64,/i, '');
+      const rawBase = path.posix.basename(String(body.name ?? '').replace(/\\/g, '/').trim());
+      if (!rawBase || rawBase === '.' || rawBase === '..') throw new Error('非法文件名');
+      const name = safeAttachmentName(rawBase, 'file');
+      const rawB64 = String(body.data ?? '')
+        .replace(/^data:[^;]*;base64,/i, '')
+        .replace(/\s+/g, '')
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+      if (!rawB64 || rawB64.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(rawB64)) {
+        throw new Error('文件内容不是合法的 base64 编码');
+      }
       const buf = Buffer.from(rawB64, 'base64');
       if (!buf.length) throw new Error('空文件');
-      const chat = chatMetaOf(body.chatId);
-      const sender = chat.type === 'self' ? SIM_SENDERS.me : (SIM_SENDERS[body.sender] ?? SIM_SENDERS.me);
-      const device = DEVICES[body.device] ?? DEVICES.mobile;
+      const chat = resolveSimChat(body.chatId);
+      const sender = resolveSimSender(body.sender, chat);
+      const device = Object.hasOwn(DEVICES, body.device) ? DEVICES[body.device] : DEVICES.mobile;
       const id = `${this.boot}u${++this.n}`;
       const file = this.#store(id, name, buf);
       const msg = {
@@ -210,7 +253,7 @@ export class WebSimTransport {
 
     web.route('GET', /^\/files\/([\w-]+)$/, ({ res, params, url }) => {
       const f = this.files.get(params[1]);
-      if (!f || !fs.existsSync(f.path)) { res.writeHead(404); return res.end('not found'); }
+      if (!f || !fs.existsSync(f.path)) throw Object.assign(new Error('not found'), { status: 404 });
       if (f.mime === 'text/markdown' && url.searchParams.get('raw') !== '1') {
         res.writeHead(302, { location: `/view?f=${encodeURIComponent(f.id)}` });
         return res.end();
@@ -218,8 +261,9 @@ export class WebSimTransport {
       res.writeHead(200, {
         'content-type': `${f.mime}${f.mime.startsWith('text/') ? '; charset=utf-8' : ''}`,
         'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
         'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(f.name)}`,
-        ...(f.mime === 'text/html' ? { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:" } : {}),
+        ...(f.mime === 'text/html' ? { 'content-security-policy': "default-src 'none'; sandbox; script-src 'none'; style-src 'unsafe-inline'; img-src data:" } : {}),
       });
       fs.createReadStream(f.path).pipe(res);
     });
@@ -383,6 +427,21 @@ export class WebSimTransport {
 
   #card(f) { return { id: f.id, name: f.name, size: f.size, mime: f.mime, url: `/files/${f.id}` }; }
 
+  #broadcastSse(payload) {
+    const chunk = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const c of [...this.clients]) {
+      try {
+        if (c.writableEnded || c.destroyed) {
+          this.clients.delete(c);
+          continue;
+        }
+        c.write(chunk);
+      } catch {
+        this.clients.delete(c);
+      }
+    }
+  }
+
   #push(msg) {
     this.history.push(msg);
     if (this.history.length > 300) {
@@ -396,6 +455,6 @@ export class WebSimTransport {
       }
     }
     this.#saveHistory();
-    for (const c of this.clients) c.write(`data: ${JSON.stringify(msg)}\n\n`);
+    this.#broadcastSse(msg);
   }
 }

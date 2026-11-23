@@ -29,6 +29,8 @@ export function createTurnTracker(
   let stallNotified = false;
   let waitingForInput = false;
   let settled = false;
+  let stoppedByUser = false;
+  let completing = false;
   let emitChain = Promise.resolve();
   const deliveredIntermediateIds = new Set();
   const pendingIntermediates = [];
@@ -164,6 +166,17 @@ export function createTurnTracker(
     stallTimer = null;
   };
 
+  const markStopped = () => {
+    stoppedByUser = true;
+    settled = true;
+    pendingIntermediates.length = 0;
+    heldIntermediates.length = 0;
+    dispose();
+    bridge.activeTurns.delete(key);
+    bridge.inFlightTurns?.delete(key);
+    bridge.saveState();
+  };
+
   const ensureStallWatchdog = () => {
     const threshold = Number(bridge.turnStallMs) || 0;
     if (!(threshold > 0) || stallTimer) return;
@@ -238,7 +251,7 @@ export function createTurnTracker(
                 continue;
               }
             }
-            await complete();
+            await complete(job?.state ?? null);
             return;
           }
           await new Promise((r) => setTimeout(r, 50));
@@ -250,127 +263,181 @@ export function createTurnTracker(
     })().catch(() => {});
   };
 
-  const complete = async () => {
-    if (settled) return;
-    settled = true;
-    const droppedIntermediates = [...pendingIntermediates.splice(0), ...heldIntermediates.splice(0)];
-    dispose();
-    bridge.activeTurns.delete(key);
-    bridge.inFlightTurns?.delete(key);
-    bridge.saveState();
-
-    await emitChain.catch(() => {});
-
-    const ctrlChat = bridge.resolveControlChatId(chatCtx);
-    const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
-      ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
-      : '';
-
-    let messages;
+  const complete = async (jobState = null) => {
+    if (settled || stoppedByUser || completing) return;
+    completing = true;
     try {
-      const res = await bridge.client.getMessages(threadId, 25);
-      messages = Array.isArray(res.messages) ? res.messages : [];
-    } catch (e) {
-      const shownName = bridge.displayBotName(botId, botName, { isGroup });
-      await bridge.say(`${ctrlBanner}⚠️ 获取 **${shownName}** 回复失败：${formatOmbError(e)}`, ctrlChat ? { targetChatId: ctrlChat } : null);
-      return;
-    }
+      const ctrlChat = bridge.resolveControlChatId(chatCtx);
+      const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
+        ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
+        : '';
 
-    let matched = reqMsgId
-      ? messages.filter((m) => m.role === 'bot' && m.requestMessageId === reqMsgId)
-      : [];
-    if (!matched.length) {
-      const uIdx = messages.findLastIndex((m) => m.role === 'user' && (m.id === reqMsgId || m.sendId === sendId));
-      if (uIdx >= 0) matched = messages.slice(uIdx + 1).filter((m) => m.role === 'bot');
-    }
-
-    const pendingMsg = matched.find((m) => messageNeedsInput(m));
-    if (pendingMsg) {
-      await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
-      if (!matched.some((m) => m.kind === 'text' && m.turnTerminal)) {
-        settled = false;
-        bridge.activeTurns.set(key, turn);
-        startWatcher(true);
-        return;
-      }
-    }
-
-    const seenInMatched = new Set(matched.map((m) => m?.id).filter(Boolean).map(String));
-    const missingIntermediates = droppedIntermediates.filter((m) => !m?.id || !seenInMatched.has(String(m.id)));
-    const texts = matched.filter((m) => m.kind === 'text');
-    const rawUndelivered = texts.filter((m) => {
-      if (!m.id) return deliveredIntermediateIds.size === 0;
-      const mid = String(m.id);
-      return !deliveredIntermediateIds.has(mid) && !bridge.deliveredOmbIds.has(mid);
-    });
-    let undeliveredTexts = missingIntermediates.length
-      ? [...missingIntermediates, ...rawUndelivered]
-      : rawUndelivered;
-    if (silentProgress) {
-      const terminalOnly = undeliveredTexts.filter((m) => m.turnTerminal && String(m.text ?? '').trim());
-      if (terminalOnly.length) undeliveredTexts = terminalOnly;
-    }
-    const hasAnyText = undeliveredTexts.some((m) => String(m.text ?? '').trim());
-
-    if (!hasAnyText) {
-      if (deliveredIntermediateIds.size > 0) {
-        if (!isExternal) bridge.lastBotReplyAt = bridge.now();
+      let messages;
+      try {
+        const res = await bridge.client.getMessages(threadId, 25);
+        messages = Array.isArray(res.messages) ? res.messages : [];
+      } catch (e) {
+        if (settled || stoppedByUser) return;
+        settled = true;
+        pendingIntermediates.length = 0;
+        heldIntermediates.length = 0;
+        dispose();
+        bridge.activeTurns.delete(key);
+        bridge.inFlightTurns?.delete(key);
         bridge.saveState();
-        await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
-        if (!isGroup) await maybeWarnHighContext(botId, threadId, chatCtx);
+        const shownName = bridge.displayBotName(botId, botName, { isGroup });
+        await bridge.say(`${ctrlBanner}⚠️ 获取 **${shownName}** 回复失败：${formatOmbError(e)}`, ctrlChat ? { targetChatId: ctrlChat } : null);
         return;
       }
-      const failed = matched.find((m) => m.turnFailed || m.error);
-      if (failed) {
-        const who = bridge.botPrefix(botId, botName, {
-          isGroup,
-          speakerName: isGroup ? (failed.from?.name || '') : '',
-          speakerBotId: isGroup ? (failed.from?.botId || null) : null,
-        });
-        await bridge.say(`${ctrlBanner}❌ ${who ? `${who} ` : ''}${failed.error || '本轮执行失败'}`, {
-          botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
-        });
-      } else {
+
+      if (settled || stoppedByUser) return;
+
+      let matched = reqMsgId
+        ? messages.filter((m) => m.role === 'bot' && m.requestMessageId === reqMsgId)
+        : [];
+      if (!matched.length) {
+        const uIdx = messages.findLastIndex((m) => m.role === 'user' && (m.id === reqMsgId || m.sendId === sendId));
+        if (uIdx >= 0) matched = messages.slice(uIdx + 1).filter((m) => m.role === 'bot');
+      }
+
+      const pendingMsg = matched.find((m) => messageNeedsInput(m));
+      const earlyTexts = matched.filter((m) => m.kind === 'text');
+      const hasEarlyContent = pendingMsg
+        || deliveredIntermediateIds.size > 0
+        || pendingIntermediates.length > 0
+        || heldIntermediates.length > 0
+        || earlyTexts.some((m) => String(m.text ?? '').trim())
+        || matched.some((m) => m.turnFailed || m.error || m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0));
+
+      // `!evt.bot.busy` SSE 事件可能在新轮次尚未落库或上一轮尾波瞬间到达，避免过早判定空转
+      if (!hasEarlyContent && jobState === null && (bridge.now() - startedAt) < 3000) {
+        return;
+      }
+
+      settled = true;
+      const droppedIntermediates = [...pendingIntermediates.splice(0), ...heldIntermediates.splice(0)];
+      dispose();
+      bridge.activeTurns.delete(key);
+      bridge.inFlightTurns?.delete(key);
+      bridge.saveState();
+
+      await emitChain.catch(() => {});
+      if (stoppedByUser) return;
+
+      if (pendingMsg) {
+        await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
+        if (!matched.some((m) => m.kind === 'text' && m.turnTerminal)) {
+          settled = false;
+          bridge.activeTurns.set(key, turn);
+          startWatcher(true);
+          return;
+        }
+      }
+
+      const seenInMatched = new Set(matched.map((m) => m?.id).filter(Boolean).map(String));
+      const missingIntermediates = droppedIntermediates.filter((m) => !m?.id || !seenInMatched.has(String(m.id)));
+      const texts = matched.filter((m) => m.kind === 'text');
+      const rawUndelivered = texts.filter((m) => {
+        if (!m.id) return deliveredIntermediateIds.size === 0;
+        const mid = String(m.id);
+        return !deliveredIntermediateIds.has(mid) && !bridge.deliveredOmbIds.has(mid);
+      });
+      let undeliveredTexts = missingIntermediates.length
+        ? [...missingIntermediates, ...rawUndelivered]
+        : rawUndelivered;
+      if (silentProgress) {
+        const terminalOnly = undeliveredTexts.filter((m) => m.turnTerminal && String(m.text ?? '').trim());
+        if (terminalOnly.length) undeliveredTexts = terminalOnly;
+      }
+      const hasAnyText = undeliveredTexts.some((m) => String(m.text ?? '').trim());
+
+      if (!hasAnyText) {
+        if (deliveredIntermediateIds.size > 0) {
+          if (!isExternal) bridge.lastBotReplyAt = bridge.now();
+          bridge.saveState();
+          await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
+          if (!isGroup) await maybeWarnHighContext(botId, threadId, chatCtx);
+          return;
+        }
+        const failed = matched.find((m) => m.turnFailed || m.error);
+        if (failed) {
+          const who = bridge.botPrefix(botId, botName, {
+            isGroup,
+            speakerName: isGroup ? (failed.from?.name || '') : '',
+            speakerBotId: isGroup ? (failed.from?.botId || null) : null,
+          });
+          await bridge.say(`${ctrlBanner}❌ ${who ? `${who} ` : ''}${failed.error || '本轮执行失败'}`, {
+            botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
+          });
+        } else {
+          const forwardedMedia = await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
+          const hasMediaMsg = matched.some((m) => m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0));
+          if (!forwardedMedia && !hasMediaMsg && !stoppedByUser) {
+            const listed = typeof bridge.client.listBots === 'function' ? await bridge.client.listBots().catch(() => null) : null;
+            const curBot = (listed?.bots ?? []).find((b) => b.id === botId);
+            const isDead = curBot?.activity === 'dead';
+            const shownName = bridge.displayBotName(botId, botName, { isGroup });
+            bridge.emitTelemetry?.('turn_failed', {
+              botName: shownName,
+              chatId: ctrlChat || null,
+              summary: isDead ? 'bot_dead' : `empty_turn:${jobState || 'unknown'}`,
+            });
+            let reasonMsg = `${ctrlBanner}❌ **${shownName}** 本轮未返回有效回复（引擎空闲退出），请检查引擎状态或重试。`;
+            if (isDead) {
+              reasonMsg = `${ctrlBanner}❌ **${shownName}** 当前处于异常/停止状态（dead），未能完成本轮回复，请检查或重启 OpenMausBot 引擎。`;
+            } else if (jobState && jobState !== 'idle') {
+              reasonMsg = `${ctrlBanner}❌ **${shownName}** 本轮未返回有效回复（任务状态：\`${jobState}\`），请稍后重试。`;
+            }
+            await bridge.say(reasonMsg, {
+              botId,
+              botName,
+              threadId,
+              ...(isGroup ? { isGroup: true } : {}),
+              ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
+            });
+          }
+        }
+        return;
+      }
+
+      for (const m of undeliveredTexts) {
+        if (m.id) rememberBounded(bridge.deliveredOmbIds, m.id);
+      }
+      if (isGroup) {
+        const buckets = groupBySpeaker(undeliveredTexts);
+        for (const b of buckets) {
+          await deliverBotReply({
+            botId,
+            botName,
+            threadId,
+            text: b.texts.join('\n\n'),
+            finalMsg: b.msgs.at(-1),
+            mediaMessages: b.msgs,
+            proactive: false,
+            isGroup: true,
+            speakerName: b.speakerName,
+            chatCtx,
+          });
+        }
         await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
+        return;
       }
-      return;
-    }
 
-    for (const m of undeliveredTexts) {
-      if (m.id) rememberBounded(bridge.deliveredOmbIds, m.id);
+      const combined = undeliveredTexts.map((m) => String(m.text ?? '').trim()).filter(Boolean).join('\n\n');
+      await deliverBotReply({
+        botId,
+        botName,
+        threadId,
+        text: combined,
+        finalMsg: undeliveredTexts.at(-1) ?? texts.at(-1),
+        mediaMessages: matched,
+        proactive: false,
+        chatCtx,
+      });
+      await maybeWarnHighContext(botId, threadId, chatCtx);
+    } finally {
+      completing = false;
     }
-    if (isGroup) {
-      const buckets = groupBySpeaker(undeliveredTexts);
-      for (const b of buckets) {
-        await deliverBotReply({
-          botId,
-          botName,
-          threadId,
-          text: b.texts.join('\n\n'),
-          finalMsg: b.msgs.at(-1),
-          mediaMessages: b.msgs,
-          proactive: false,
-          isGroup: true,
-          speakerName: b.speakerName,
-          chatCtx,
-        });
-      }
-      await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
-      return;
-    }
-
-    const combined = undeliveredTexts.map((m) => String(m.text ?? '').trim()).filter(Boolean).join('\n\n');
-    await deliverBotReply({
-      botId,
-      botName,
-      threadId,
-      text: combined,
-      finalMsg: undeliveredTexts.at(-1) ?? texts.at(-1),
-      mediaMessages: matched,
-      proactive: false,
-      chatCtx,
-    });
-    await maybeWarnHighContext(botId, threadId, chatCtx);
   };
 
   const turn = {
@@ -485,6 +552,7 @@ export function createTurnTracker(
     },
     complete,
     dispose,
+    markStopped,
     startWatcher,
   };
 

@@ -1,6 +1,6 @@
 {
   "name": "co-bot",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "description": "co-bot：跨平台 IM 手机自聊 ↔ OpenMausBot 桥接网关（npm install 自动安装 OpenMausBot CLI）",

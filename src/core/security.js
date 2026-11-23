@@ -42,7 +42,7 @@ const SECRET_RULES = [
   },
   {
     type: 'secret_kv',
-    re: /\b([A-Z0-9_]*(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN))\s*([:=])\s*(['"]?)([A-Za-z0-9._~+/=@-]{8,})\3/g,
+    re: /\b([A-Za-z0-9_]*(?:API_KEY|SECRET_KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN))\s*([:=])\s*(['"]?)([A-Za-z0-9._~+/=@-]{8,})\3/gi,
     replace: (full, key, sep, quote, val) => {
       if (PLACEHOLDER_VAL_RE.test(val)) return full;
       return `${key}${sep}${quote}[已脱敏:secret_kv]${quote}`;

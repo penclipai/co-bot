@@ -114,10 +114,12 @@ export function parseStartMention(rawText, trigger = '@bot', aliases = [], known
 }
 
 export function maskNonTriggerSpans(s) {
-  return String(s ?? '').replace(
-    /(```[\s\S]*?```|`[^`\n]+`|「[^」\n]*」|"[^"\n]*"|'[^'\n]*')/g,
-    (m) => ' '.repeat(m.length),
-  );
+  return String(s ?? '')
+    .replace(
+      /(```[\s\S]*?```|`[^`\n]+`|「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|‘[^’\n]*’|"[^"\n]*"|'[^'\n]*')/g,
+      (m) => ' '.repeat(m.length),
+    )
+    .replace(/^[ \t]*>[^\n]*/gm, (m) => ' '.repeat(m.length));
 }
 
 export function parseInlineTriggerMention(rawText, trigger = '@bot', aliases = [], knownNames = []) {

@@ -116,6 +116,18 @@ function matchesProjectMention(text, token) {
   return String(text).toLowerCase().includes(t.toLowerCase());
 }
 
+/** 检测文本是否显式提及了未被 allowedProjects 授权的已配置项目。 */
+export function findUnauthorizedProjectMention(text, projects = [], allowedProjects = null) {
+  if (!text || !Array.isArray(projects) || !projects.length) return null;
+  if (!Array.isArray(allowedProjects) || !allowedProjects.length) return null;
+  for (const p of projects) {
+    if (isProjectAuthorized(p, allowedProjects)) continue;
+    const tokens = [p.name, ...(p.aliases ?? [])];
+    if (tokens.some((tok) => matchesProjectMention(text, tok))) return p;
+  }
+  return null;
+}
+
 /**
  * 解析当次提问的目标代码作用域（优先级：显式提及白名单项目 > 会话已绑定项目 > 无绑定）。
  */

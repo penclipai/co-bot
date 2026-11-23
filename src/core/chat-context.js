@@ -4,12 +4,15 @@
  * 隐私边界：仅保留在内存中，不落盘外部群聊/私聊记录；按 chatId 隔离并带 TTL 与条数上限。
  */
 
+import { scanAndRedactOutbound } from './security.js';
+
 export function redactSecrets(text) {
-  return String(text ?? '')
+  const preMasked = String(text ?? '')
     .replace(/\bomb_sess_[A-Za-z0-9_-]+/g, '[REDACTED]')
     .replace(/\bctx_[A-Za-z0-9._-]{12,}/g, '[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]');
+  return scanAndRedactOutbound(preMasked).text;
 }
 
 const DANGEROUS_MENTION_RE = /^(all|everyone|here|channel|所有人|全体成员|全体|大家|bot|ai|主bot)$/i;

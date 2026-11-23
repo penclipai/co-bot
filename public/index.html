@@ -161,10 +161,16 @@
   function updateChatChrome() {
     const meta = CHATS[activeChat];
     $('#chatTitle').textContent = meta.name;
+    document.title = `${meta.name} · ${brandName}`;
     const isSelf = activeChat === 'self';
     $('#senderBtn').hidden = isSelf;
     if (isSelf) sender = 'me';
     $('#senderBtn').textContent = SENDER_LABELS[sender] || '我';
+    box.placeholder = isSelf
+      ? '发 @bot …（支持 Ctrl+V 粘贴截图）'
+      : (sender === 'me'
+        ? '发 @bot … 或 @bot! 私密回自聊'
+        : `以 ${SENDER_LABELS[sender]} 身份发言（仅用于构建群聊上下文）`);
     for (const tab of document.querySelectorAll('#chatTabs .ctab')) {
       const cid = tab.dataset.chat;
       tab.classList.toggle('active', cid === activeChat);
@@ -186,7 +192,9 @@
     lastTs = msg.ts;
 
     if (msg.from === 'me' || (msg.from === 'bot' && Array.isArray(msg.actions) && msg.actions.length)) {
-      for (const oldBtn of list.querySelectorAll('.actions button:not(:disabled)')) oldBtn.disabled = true;
+      for (const oldBtn of list.querySelectorAll('.actions button:not(:disabled):not([data-keep-active="1"])')) {
+        oldBtn.disabled = true;
+      }
     }
     const row = document.createElement('div');
     const rowKind = msg.from === 'bot' ? 'bot' : (msg.isSelf === false || msg.from === 'other' ? 'other' : 'me');
@@ -212,7 +220,6 @@
         img.className = 'thumb';
         img.src = f.url;
         img.alt = f.name;
-        img.loading = 'lazy';
         img.addEventListener('click', (e) => { e.stopPropagation(); openLightbox(f); });
         b.append(img);
       } else {
@@ -251,6 +258,7 @@
         btn.type = 'button';
         btn.className = 'act' + (act.kind ? ' ' + act.kind : '');
         btn.textContent = act.label;
+        if (/\bsendback\s+draft_/i.test(act.text || '')) btn.dataset.keepActive = '1';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           for (const sibling of wrap.querySelectorAll('button')) sibling.disabled = true;
@@ -284,9 +292,10 @@
       const rc = document.createElement('button');
       rc.type = 'button';
       rc.textContent = '撤回';
-      rc.onclick = (e) => {
+      rc.onclick = async (e) => {
         e.stopPropagation();
-        post('/recall', { chatId: msg.chatId || activeChat, msgId: msg.id, sender: msg.senderId || sender });
+        const r = await post('/recall', { chatId: msg.chatId || activeChat, msgId: msg.id, sender: msg.senderId || sender });
+        if (!r.ok) alert((await r.json().catch(() => ({}))).error || '撤回失败');
       };
       dv.append(rc);
     }
@@ -333,11 +342,15 @@
       replyTo = null;
       replyBar.classList.remove('on');
     }
-    if ((ev.chatId || 'self') === activeChat) {
+    const cid = ev.chatId || 'self';
+    if (cid === activeChat) {
       for (const el of list.querySelectorAll('.row')) {
         if (el.dataset.msgId === mid) el.remove();
       }
       if (!list.querySelector('.row')) renderEmptyHint();
+    } else if (unread[cid] > 0) {
+      unread[cid] = Math.max(0, unread[cid] - 1);
+      updateChatChrome();
     }
   }
 
@@ -381,12 +394,29 @@
   $('#devBtn').onclick = () => { device = device === 'mobile' ? 'desktop' : 'mobile'; $('#devBtn').textContent = DEV[device]; };
 
   async function send(text) {
+    const prev = text;
     text = text.trim();
     if (!text) return;
     const body = { chatId: activeChat, sender, text, replyTo, device };
+    const prevReply = replyTo;
     box.value = ''; replyTo = null; replyBar.classList.remove('on'); grow();
-    await post('/send', body);
-    setTimeout(refreshStatus, 180);
+    try {
+      const r = await post('/send', body);
+      if (!r.ok) {
+        const err = (await r.json().catch(() => ({}))).error || '发送失败';
+        box.value = prev;
+        replyTo = prevReply;
+        if (prevReply) replyBar.classList.add('on');
+        grow();
+        alert(err);
+        return;
+      }
+      setTimeout(refreshStatus, 180);
+    } catch (e) {
+      box.value = prev;
+      grow();
+      alert(e.message || '网络异常，发送失败');
+    }
   }
 
   async function uploadFileObj(f) {

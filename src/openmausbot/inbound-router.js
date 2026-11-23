@@ -1,13 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { evaluateInboundPolicy } from '../core/inbound-policy.js';
-import { isProjectAuthorized } from '../core/projects.js';
+import { findUnauthorizedProjectMention, isProjectAuthorized } from '../core/projects.js';
 import { clip, fileSafe } from '../format.js';
 import { formatOmbError, parseChoiceIndex } from './cards.js';
 import { isExternalChatAllowed } from './chat-manager.js';
 import { buildHelpText, handleCommand } from './commands.js';
 import { formatDelegationRequest, generateDelegationId, parseDelegationTag } from './delegation.js';
-import { hasNonBotMention, parseInlineTriggerMention, parseStartMention, parseStructuredBotMention } from './mentions.js';
+import {
+  buildMentionMatcher,
+  hasNonBotMention,
+  parseInlineTriggerMention,
+  parseStartMention,
+  parseStructuredBotMention,
+} from './mentions.js';
 
 const APPROVE_RE = /^(ok|okay|yes|y|好|好的|可以|允许|同意|通过|执行|批准)$/i;
 const ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都允许)$/i;
@@ -15,6 +21,7 @@ const DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$
 const SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
 const NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
 const BYE_RE = /^(bye|退下|结束对话|退出对话)$/i;
+const OWNER_COMMAND_RE = /^(?:help|帮助|bots?|成员|列表|groups?|群组|status|状态|stop|停止|停|interrupt|bye|退下|结束对话|退出对话|steer|插队|cancel|取消排队|digest|汇总|chats?|群列表|会话策略|静音|取消静音|解除静音|summary|recap|群汇总|总结群|纪要|sendback|发回原群|发回|bind|绑定|delegate|委托|协作|context|ctx|usage|上下文|approval|审批模式|审批|style|风格|model|模型|memory|记忆|记住|tasks|会话|历史|task|切换|new|新会话|fresh|compact|压缩)(?:[\s:：]|$)/i;
 
 /** 构建入站消息对应的会话上下文描述对象。 */
 export function buildExternalChatCtx(bridge, { isSelfChat, chatId, chatType, chatName, mid, privateReply, ev }) {
@@ -152,18 +159,30 @@ async function handleCollaboratorEvent(bridge, ev, rawText, delegation) {
 
   if (isReq) {
     if (bridge.delegations.hasProcessed(delegation.id)) return;
-    if (delegation.project && decision.allowedProjects?.length) {
-      const matchedProj = bridge.projects.find((p) => p.name.toLowerCase() === delegation.project.toLowerCase()
-        || p.aliases.includes(delegation.project.toLowerCase()));
-      const authorized = matchedProj
-        ? isProjectAuthorized(matchedProj, decision.allowedProjects)
-        : decision.allowedProjects.some((p) => p.toLowerCase() === delegation.project.toLowerCase());
-      if (!authorized) {
+    if (decision.allowedProjects?.length) {
+      if (delegation.project) {
+        const matchedProj = bridge.projects.find((p) => p.name.toLowerCase() === delegation.project.toLowerCase()
+          || p.aliases.includes(delegation.project.toLowerCase()));
+        const authorized = matchedProj
+          ? isProjectAuthorized(matchedProj, decision.allowedProjects)
+          : decision.allowedProjects.some((p) => p.toLowerCase() === delegation.project.toLowerCase());
+        if (!authorized) {
+          bridge.policyDenials += 1;
+          bridge.emitTelemetry('policy_denied', {
+            chatId,
+            chatType,
+            summary: `sender=${ev.sender?.id || '?'} reason=project_not_authorized:${delegation.project}`,
+          });
+          return;
+        }
+      }
+      const unauth = findUnauthorizedProjectMention(delegation.body, bridge.projects, decision.allowedProjects);
+      if (unauth) {
         bridge.policyDenials += 1;
         bridge.emitTelemetry('policy_denied', {
           chatId,
           chatType,
-          summary: `sender=${ev.sender?.id || '?'} reason=project_not_authorized:${delegation.project}`,
+          summary: `sender=${ev.sender?.id || '?'} reason=project_not_authorized:${unauth.name}`,
         });
         return;
       }
@@ -175,6 +194,14 @@ async function handleCollaboratorEvent(bridge, ev, rawText, delegation) {
       chatType,
       summary: `inbound id=${delegation.id}${delegation.project ? ` proj=${delegation.project}` : ''}`,
     });
+  } else if (hit.parsed?.atStart && OWNER_COMMAND_RE.test(hit.parsed.bodyText)) {
+    bridge.policyDenials += 1;
+    bridge.emitTelemetry('policy_denied', {
+      chatId,
+      chatType,
+      summary: `sender=${ev.sender?.id || '?'} reason=owner_only_command`,
+    });
+    return;
   }
 
   if (decision.mode === 'confirm_in_self' && !bridge.selfChat) {
@@ -399,7 +426,23 @@ export async function handleInboundEvent(bridge, ev) {
     if (!bridge.commandDevices.some((d) => d === dev.type || d === dev.id)) return;
   }
 
-  if (!isSelfChat && !isExternalChatAllowed(bridge, chatId, chatType)) return;
+  if (!isSelfChat && !isExternalChatAllowed(bridge, chatId, chatType)) {
+    const aliases = bridge.getEffectiveTriggerAliases();
+    const names = bridge.getKnownBotNames();
+    const wouldTrigger = Boolean(
+      parseStartMention(rawText, bridge.trigger, aliases, names)
+      || parseInlineTriggerMention(rawText, bridge.trigger, aliases, names)
+      || (ev.replyTo != null && bridge.msgRoute.has(String(ev.replyTo))),
+    );
+    if (wouldTrigger) {
+      bridge.emitTelemetry('policy_denied', {
+        chatId,
+        chatType,
+        summary: `sender=${ev.sender?.id || 'me'} reason=chat_not_allowed`,
+      });
+    }
+    return;
+  }
 
   if (atts.length) {
     bridge.fileMsgs.set(mid, { chatId, atts, at: bridge.now(), used: false });
@@ -553,12 +596,27 @@ export async function handleInboundEvent(bridge, ev) {
   let privateReply = false;
 
   const hit = await resolveExplicitTrigger(bridge, rawText, ev, knownNames, triggerAliases);
-  const parsed = hit.parsed;
+  let effectiveParsed = hit.parsed;
   let targetBot = hit.targetBot;
 
-  if (parsed && targetBot) {
-    let bodyText = parsed.bodyText;
-    privateReply = Boolean(!isSelfChat && parsed.bang);
+  if (effectiveParsed && targetBot) {
+    let bodyText = effectiveParsed.bodyText;
+    privateReply = Boolean(!isSelfChat && effectiveParsed.bang);
+    if (effectiveParsed.atStart) {
+      const matcher = buildMentionMatcher(bridge.trigger, triggerAliases, knownNames);
+      for (let hops = 0; hops < 5 && /^@[^\s\u200B!:：,，]+/.test(bodyText); hops += 1) {
+        const nested = parseStartMention(bodyText, bridge.trigger, triggerAliases, knownNames);
+        if (!nested || !matcher.isKnownBotOrGroup(nested.mention)) break;
+        if (!nested.isDefault) {
+          const nextRes = await resolveBotTarget(bridge, nested.mention, false, ev);
+          if (!nextRes.targetBot) break;
+          targetBot = nextRes.targetBot;
+          effectiveParsed = { ...effectiveParsed, isDefault: nextRes.isDefault };
+        }
+        privateReply = privateReply || Boolean(!isSelfChat && nested.bang);
+        bodyText = nested.bodyText;
+      }
+    }
     if (!isSelfChat && bridge.chats.privateFlag !== false && bodyText) {
       const privM = bodyText.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
       if (privM) {
@@ -584,8 +642,8 @@ export async function handleInboundEvent(bridge, ev) {
       ev,
     });
 
-    if (parsed.atStart && await handleCommand(bridge, bodyText, {
-      isDefault: parsed.isDefault,
+    if (effectiveParsed.atStart && await handleCommand(bridge, bodyText, {
+      isDefault: effectiveParsed.isDefault,
       targetBot: scopedTarget,
       quotedRoute,
       mid,

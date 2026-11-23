@@ -55,6 +55,9 @@ export function evaluateInboundPolicy(ev, { collaborators = [], chatAllowed = tr
   if ((ev.chat.type || 'direct') === 'self') {
     return { allowed: false, reason: 'non_self_in_self_chat' };
   }
+  if (isDelegationReq && (ev.chat.type || 'direct') !== 'direct') {
+    return { allowed: false, reason: 'delegation_requires_direct' };
+  }
   if (!chatAllowed) {
     return { allowed: false, reason: 'chat_not_allowed' };
   }

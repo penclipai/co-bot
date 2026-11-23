@@ -27,7 +27,9 @@ import {
 } from './delivery.js';
 import {
   cancelLatestQueue,
+  cancelThreadQueue,
   collectBotTasks,
+  dispatchSteerSupplement,
   dispatchToBot,
   handleSseEvent,
   steerLatestQueue,
@@ -811,8 +813,12 @@ export class OpenMausBotBridge {
   sendDelegation(targetChat, question, opts) { return sendDelegation(this, targetChat, question, opts); }
   sendOutboundFile(filePath, name, opts) { return sendOutboundFile(this, filePath, name, opts); }
   onEvent(ev) { return handleInboundEvent(this, ev); }
-  steerLatestQueue(preferredThreadId, targetChatId = null) { return steerLatestQueue(this, preferredThreadId, targetChatId); }
-  cancelLatestQueue(preferredThreadId, targetChatId = null) { return cancelLatestQueue(this, preferredThreadId, targetChatId); }
+  steerLatestQueue(preferredThreadId, targetChatId = null, opts = {}) { return steerLatestQueue(this, preferredThreadId, targetChatId, opts); }
+  cancelLatestQueue(preferredThreadId, targetChatId = null, opts = {}) { return cancelLatestQueue(this, preferredThreadId, targetChatId, opts); }
+  cancelThreadQueue(threadId) { return cancelThreadQueue(this, threadId); }
+  dispatchSteerSupplement(target, text, imMsgId, quotedId, chatCtx = null, opts = {}) {
+    return dispatchSteerSupplement(this, target, text, imMsgId, quotedId, chatCtx, opts);
+  }
   collectBotTasks(target) { return collectBotTasks(this, target); }
   switchTask(defaultBotId, defaultBotName, task, opts) { return switchTask(this, defaultBotId, defaultBotName, task, opts); }
   dispatchToBot(bot, text, imMsgId, quotedId, replyToOmbId, chatCtx = null) {

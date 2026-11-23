@@ -1,7 +1,7 @@
 import { clipSummary, normalizeCapabilities } from '../core/channel-contract.js';
 import { redactSecrets } from '../core/chat-context.js';
 
-const MAX_RECENT_EVENTS = 80;
+const MAX_RECENT_EVENTS = 250;
 
 function sanitizeConfigSnapshot(cfg = {}) {
   const redactSecret = (val) => (val ? '[REDACTED]' : '');
@@ -146,8 +146,14 @@ export const inspectorPlugin = {
       if (action === 'chat_mute' || action === 'chat_allow') {
         const chatId = String(body?.chatId || '').trim();
         if (!chatId) throw new Error('缺少 chatId');
-        if (action === 'chat_mute') bridge.setChatMuted(chatId, true);
-        else bridge.setChatAllowed(chatId);
+        if (action === 'chat_mute') {
+          if (chatId === 'self' || chatId === bridge.selfChat) {
+            throw new Error('不能静音自聊控制会话');
+          }
+          bridge.setChatMuted(chatId, true);
+        } else {
+          bridge.setChatAllowed(chatId);
+        }
         return { ok: true, action, chatId, chatPolicy: bridge.getChatPolicy() };
       }
       if (action === 'chat_mode') {
@@ -169,14 +175,23 @@ export const inspectorPlugin = {
       const chatFilter = String(url?.searchParams?.get('chatId') || '').trim();
       const sourceFilter = String(url?.searchParams?.get('source') || '').trim();
       const typeFilter = String(url?.searchParams?.get('type') || '').trim();
+      const rawLim = url?.searchParams?.get('limit');
+      const parsedLim = rawLim != null && /^\d+$/.test(String(rawLim).trim()) ? Number(rawLim) : 0;
+      const limit = parsedLim > 0 ? Math.min(MAX_RECENT_EVENTS, parsedLim) : 0;
       let list = [...events].reverse();
       if (chatFilter) list = list.filter((e) => e.chatId === chatFilter);
       if (sourceFilter) list = list.filter((e) => e.source === sourceFilter);
       if (typeFilter) list = list.filter((e) => e.type === typeFilter);
+      if (limit > 0) list = list.slice(0, limit);
       return {
         ok: true,
         ts: Date.now(),
-        filter: { chatId: chatFilter || null, source: sourceFilter || null, type: typeFilter || null },
+        filter: {
+          chatId: chatFilter || null,
+          source: sourceFilter || null,
+          type: typeFilter || null,
+          ...(limit > 0 ? { limit } : {}),
+        },
         channel: { name: snap.name, capabilities: snap.capabilities, status: snap.status },
         plugins: snap.plugins,
         events: list,

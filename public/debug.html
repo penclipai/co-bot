@@ -38,17 +38,18 @@
     .card-head h2 { margin: 0; }
     .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; min-width: 0; }
     .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 600; }
-    .kv { font-size: 13px; line-height: 1.7; }
+    .kv { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); margin: 2px 4px 2px 0; }
     .badge.ok { color: var(--ok); border-color: rgba(34, 197, 94, 0.4); }
     .badge.err { color: var(--err); border-color: rgba(239, 68, 68, 0.4); }
     .badge.off { color: var(--muted); }
+    .tbl { width: 100%; overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -79,27 +80,27 @@
         <h2>多会话上下文与隔离 Thread</h2>
         <div id="policyBox" class="filters">加载中…</div>
       </div>
-      <table>
+      <div class="tbl"><table>
         <thead>
           <tr><th>名称</th><th>chatId</th><th>类别</th><th>策略状态</th><th>内存缓存</th><th>隔离 Thread</th><th>操作</th></tr>
         </thead>
         <tbody id="chatBody"></tbody>
-      </table>
+      </table></div>
     </section>
 
     <section class="card">
       <h2>已挂载插件（Kernel）</h2>
-      <table>
+      <div class="tbl"><table>
         <thead>
           <tr><th>插件</th><th>类别</th><th>状态</th><th>提供服务</th><th>依赖</th><th>详情</th></tr>
         </thead>
         <tbody id="pluginBody"></tbody>
-      </table>
+      </table></div>
     </section>
 
     <section class="card">
       <div class="card-head">
-        <h2>最近脱敏事件流（最多 80 条）</h2>
+        <h2>最近脱敏事件流（最多 250 条）</h2>
         <div class="filters">
           <label>会话 <select id="chatFilter"><option value="">全部会话</option></select></label>
           <label>来源 <select id="sourceFilter"><option value="">全部来源</option><option value="channel">channel</option><option value="bridge">bridge</option></select></label>
@@ -121,6 +122,7 @@
             <option value="delegation_res">delegation_res</option>
             <option value="turn_resumed">turn_resumed</option>
             <option value="turn_stalled">turn_stalled</option>
+            <option value="turn_failed">turn_failed</option>
             <option value="outbound_buffered">outbound_buffered</option>
             <option value="outbound_replayed">outbound_replayed</option>
             <option value="outbound_failed">outbound_failed</option>
@@ -129,18 +131,19 @@
           </select></label>
         </div>
       </div>
-      <table>
+      <div class="tbl"><table>
         <thead>
           <tr><th>时间</th><th>来源</th><th>会话</th><th>类型</th><th>摘要</th></tr>
         </thead>
         <tbody id="eventBody"></tbody>
-      </table>
+      </table></div>
     </section>
   </div>
 
   <script>
     const el = (id) => document.getElementById(id);
     let paused = false;
+    let refreshing = false;
     const knownChatIds = new Set();
 
     function badge(text, cls) {
@@ -168,6 +171,10 @@
         addLine(ombBox, '地址', omb.url || '-');
         addLine(ombBox, '模式', omb.desktopManaged ? (omb.paired ? '桌面端（已配对）' : '桌面端（未配对）') : 'CLI 模式');
         const chief = (omb.bots || []).find((b) => b.chiefOfStaff) || (omb.bots || [])[0];
+        const deadBots = (omb.bots || []).filter((b) => b.activity === 'dead');
+        if (deadBots.length) {
+          ombBox.appendChild(badge(`异常: ${deadBots.map((b) => b.name).join('、')} (dead)`, 'err'));
+        }
         const waitCount = (omb.bots || []).filter((b) => b.waitingForTeammates).length;
         addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}${waitCount ? `（${waitCount} 个等待队友）` : ''}`);
         if (chief?.approvalMode) {
@@ -355,7 +362,9 @@
       }
     }
 
-    async function refresh() {
+    async function refresh(force = false) {
+      if (refreshing && !force) return;
+      refreshing = true;
       try {
         const params = new URLSearchParams();
         if (el('chatFilter').value) params.set('chatId', el('chatFilter').value);
@@ -371,10 +380,12 @@
         el('updatedAt').textContent = `最近更新：${new Date().toLocaleTimeString()}`;
       } catch (e) {
         el('updatedAt').textContent = `刷新失败：${e.message}`;
+      } finally {
+        refreshing = false;
       }
     }
 
-    el('refreshBtn').addEventListener('click', refresh);
+    el('refreshBtn').addEventListener('click', () => refresh(true));
     el('exportBtn').addEventListener('click', () => {
       const a = document.createElement('a');
       a.href = '/api/debug/bundle?download=1';

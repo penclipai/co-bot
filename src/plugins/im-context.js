@@ -36,7 +36,7 @@ export const imContextPlugin = {
     const channel = ctx.get('channel');
 
     const store = new ChatContextStore({
-      maxPerChat: chatsCfg.contextMaxMessagesPerChat ?? 120,
+      maxPerChat: chatsCfg.contextMaxMessagesPerChat ?? 200,
       maxChats: chatsCfg.contextMaxChats ?? 200,
       ttlMs: chatsCfg.contextTtlMs ?? 24 * 60 * 60_000,
     });
@@ -74,7 +74,7 @@ export const imContextPlugin = {
 
     const getHistory = async (chatId, { limit = 20, before = null, excludeMsgId = null } = {}) => {
       if (!chatId) return [];
-      const max = Math.max(1, Math.min(50, Number(limit) || 20));
+      const max = Math.max(1, Math.min(200, Number(limit) || 20));
       let local = store.getRecent(chatId, { limit: max, beforeMsgId: before, excludeMsgId });
 
       const missingInLocal = before && !store.getMessage(chatId, before);

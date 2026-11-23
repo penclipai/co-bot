@@ -122,7 +122,7 @@ export async function compactExternalChat(bridge, targetChat, preferredBot = nul
 }
 
 export async function buildExternalSummaryPrompt(bridge, targetChat, { limit = 30, focusQuestion = '' } = {}) {
-  const maxMsgs = Math.max(5, Math.min(80, Number(limit) || 30));
+  const maxMsgs = Math.max(1, Math.min(200, Number(limit) || 30));
   const recentMsgs = bridge.imContext
     ? await bridge.imContext.getHistory(targetChat.id, { limit: maxMsgs })
     : bridge.localContextStore.getRecent(targetChat.id, { limit: maxMsgs });
@@ -148,8 +148,8 @@ export function resolvePrivateDraft(bridge, { quotedId = null, draftId = null } 
   for (const [k, v] of bridge.privateDrafts) {
     if ((v.createdAt || 0) < cutoff) bridge.privateDrafts.delete(k);
   }
-  if (draftId && bridge.privateDrafts.has(String(draftId))) {
-    return bridge.privateDrafts.get(String(draftId));
+  if (draftId) {
+    return bridge.privateDrafts.get(String(draftId)) ?? null;
   }
   if (quotedId && bridge.privateDrafts.has(String(quotedId))) {
     return bridge.privateDrafts.get(String(quotedId));
@@ -229,6 +229,15 @@ export async function confirmSendBack(bridge) {
     chatType: draft.originChatType,
     summary: safeBody,
   });
+  for (const [k, v] of bridge.privateDrafts) {
+    if (k === draft.id || k === draft.imMsgId || v?.id === draft.id) {
+      bridge.privateDrafts.delete(k);
+    }
+  }
+  if (bridge.lastPrivateDraftId === draft.id || bridge.lastPrivateDraftId === draft.imMsgId) {
+    bridge.lastPrivateDraftId = null;
+  }
+  bridge.saveState();
   await bridge.say(`✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特与安全脱敏处理）。`);
   return sentId;
 }
