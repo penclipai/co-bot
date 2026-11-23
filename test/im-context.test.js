@@ -191,13 +191,13 @@ test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thre
     assert.ok(selfPrivReplies.some((s) => s.text.includes('私密回复 · 来自「研发架构群」') && s.text.includes('nginx upstream 超时')));
     assert.match(mock.sentPrompts[2].text, /reply_destination: self_chat_private/);
 
-    // 5. 敏感指令（@bot bots / @bot memory）从群里触发时重定向到自聊，不泄露到群里
+    // 5. 敏感指令（@bot status / @bot chats）从群里触发时重定向到自聊，不泄露到群里
     await bridge.onEvent({
       id: 'm_me_6',
       ts: Date.now() + 3000,
       chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot memory',
+      text: '@bot status',
     });
     assert.equal(sent.filter((s) => s.chatId === 'grp_dev').length, beforeGrpCount);
     assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('来自「研发架构群」的指令结果')));
@@ -570,15 +570,15 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
     assert.equal(sent.some((s) => s.chatId === 'grp_dev'), false, '跨群 summary 绝不向目标群发消息');
     assert.match(sent.at(-1).text, /群纪要：/);
 
-    // 别名 `@bot 汇总 研发架构群` 走跨群汇总，而裸 `@bot 汇总` 仍走静默消息汇总
+    // 别名 `@bot 汇总`（无参数）明确返回 summary 用法，与免打扰通知彻底解耦
     await bridge.onEvent({
-      id: 's_bare_digest',
+      id: 's_bare_summary',
       ts: Date.now() + 20,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
       text: '@bot 汇总',
     });
-    assert.match(sent.at(-1).text, /当前没有静默积压消息/);
+    assert.match(sent.at(-1).text, /用法：.*summary/);
 
     // 3. 动态静音 & 重启持久化 & 解除静音 & self_only 模式切换
     await bridge.onEvent({
@@ -586,7 +586,7 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
       ts: Date.now() + 30,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot chat mute 研发架构群',
+      text: '@bot mute 研发架构群',
     });
     assert.match(sent.at(-1).text, /已静音「研发架构群」/);
 
@@ -616,7 +616,7 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
       ts: Date.now() + 50,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot chat allow grp_dev',
+      text: '@bot unmute grp_dev',
     });
     assert.equal(bridge2.getChatPolicy().muted.includes('grp_dev'), false);
 
@@ -626,7 +626,7 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
       ts: Date.now() + 60,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot chat mode self_only',
+      text: '@bot chats self',
     });
     assert.equal(bridge2.getChatPolicy().mode, 'self_only');
     await bridge2.onEvent({
@@ -634,7 +634,7 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
       ts: Date.now() + 70,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot chat reset',
+      text: '@bot chats reset',
     });
     assert.equal(bridge2.getChatPolicy().mode, 'owner_everywhere');
     await bridge2.stop();

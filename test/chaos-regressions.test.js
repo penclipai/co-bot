@@ -298,11 +298,9 @@ test('turn-tracker & commands: dead 状态检测、空转显式报错、媒体�
   bridge.now = () => realNow() + fakeOffset;
 
   try {
-    // 1. @bot bots & @bot status 正确标示 dead 异常状态
-    await bridge.onEvent({ id: 'cmd_bots', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot bots' });
-    assert.match(sent.at(-1).text, /异常\(dead\)/);
-
+    // 1. @bot status 统一展示健康状态与团队成员 dead 异常标示
     await bridge.onEvent({ id: 'cmd_status', ts: Date.now() + 1, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
+    assert.match(sent.at(-1).text, /异常\(dead\)/);
     assert.match(sent.at(-1).text, /🔴.*异常（主协调 dead）/);
 
     // 2. dead 空轮次显式通知并记入 turn_failed 遥测
@@ -350,7 +348,7 @@ test('turn-tracker & commands: dead 状态检测、空转显式报错、媒体�
     // task 非法序号本地拦截
     for (const arg of ['0', '-1', 'abc']) {
       await bridge.onEvent({ id: `cmd_t_${arg}`, ts: Date.now() + 12, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: `@bot task ${arg}` });
-      assert.match(sent.at(-1).text, /用法：.*task <正整数序号>/);
+      assert.match(sent.at(-1).text, /用法：.*task \[正整数序号\]/);
     }
     assert.equal(mock.sentPrompts.length, promptsBeforeCmds);
 

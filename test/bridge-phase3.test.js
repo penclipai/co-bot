@@ -74,7 +74,7 @@ test('code review fixes: respond retry preserves pendingCard, picker mutual excl
     await until(() => sent.some((m) => m.text.includes('已执行命令，结果正常')));
     assert.equal(bridge.status().pendingCards, 0);
 
-    // 2. 收紧中文正则：@bot 找 一下项目 bug 正常发给 Agent；@bot memory 删除 不静默回列表
+    // 2. 收紧中文正则：@bot 找 一下项目 bug 与已精简的 memory 均正常发给 Agent
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
       setTimeout(() => {
         const reply = { id: nextId(), role: 'bot', kind: 'text', threadId, requestMessageId: reqMsg.id, text: `Agent处理：${reqMsg.text}`, turnTerminal: true };
@@ -86,7 +86,7 @@ test('code review fixes: respond retry preserves pendingCard, picker mutual excl
     await transport.emitUser('@bot 找 一下项目里的 bug');
     await until(() => sent.some((m) => m.text.includes('Agent处理：找 一下项目里的 bug')));
     await transport.emitUser('@bot memory 删除第一条');
-    await until(() => sent.some((m) => m.text.includes('memory add <内容>')));
+    await until(() => sent.some((m) => m.text.includes('Agent处理：memory 删除第一条')));
 
     // 4. 非主 Bot @Dev 的上下文提醒及按钮应指向 @Dev compact，且多段未下发回复全部记入 deliveredOmbIds
     const actionsLog = [];
@@ -95,7 +95,7 @@ test('code review fixes: respond retry preserves pendingCard, picker mutual excl
       if (opts?.actions) actionsLog.push(opts.actions);
       return baseSend.call(transport, chatId, text, opts);
     };
-    await transport.emitUser('@Dev context');
+    await transport.emitUser('@Dev status');
     await until(() => sent.some((m) => m.text.includes('90%')));
     assert.equal(actionsLog.at(-1)?.[0]?.text, '@Dev compact');
 
@@ -317,7 +317,7 @@ test('Phase 3 UX: remote skip/跳过 dismiss for secret, connector, and signIn c
   }
 });
 
-test('Phase 3 UX: Chinese spoken ordinals across question cards, @bot tasks, and @bot model', async () => {
+test('Phase 3 UX: Chinese spoken ordinals across question cards and @bot task', async () => {
   const omb = await startMockOmb(
     [
       {
@@ -377,8 +377,8 @@ test('Phase 3 UX: Chinese spoken ordinals across question cards, @bot tasks, and
     await until(() => sent.some((m) => m.text.includes('已采用方案：全量')));
     assert.equal(omb.responds[0]?.message, '全量');
 
-    // 2. @bot tasks 回复 "1个无关备忘" 不误触发；回复 "选二" 切换到第二个会话
-    await transport.emitUser('@bot tasks');
+    // 2. @bot task 回复 "1个无关备忘" 不误触发；回复 "选二" 切换到第二个会话
+    await transport.emitUser('@bot task');
     await until(() => sent.some((m) => m.text.includes('线上回归排查')));
     await transport.emitUser('1个无关备忘');
     await new Promise((r) => setTimeout(r, 30));
@@ -393,7 +393,7 @@ test('Phase 3 UX: Chinese spoken ordinals across question cards, @bot tasks, and
   }
 });
 
-test('Phase 3 UX: multi-bot group room @<群名> dual-bot replies, quote continuation, tasks/new/steer/stop, and single-bot guard', async () => {
+test('Phase 3 UX: multi-bot group room @<群名> dual-bot replies, quote continuation, task/new/steer/stop, and single-bot guard', async () => {
   const omb = await startMockOmb(
     [
       { id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true },
@@ -429,8 +429,8 @@ test('Phase 3 UX: multi-bot group room @<群名> dual-bot replies, quote continu
   try {
     await bridge.start();
 
-    // 1. @bot bots 同时列出可见 Bot 与协作群组
-    await transport.emitUser('@bot bots');
+    // 1. @bot status 同时列出可见 Bot 与协作群组
+    await transport.emitUser('@bot status');
     await until(() => sent.some((m) => m.text.includes('协作群组') && m.text.includes('架构组')));
 
     // 2. @架构组 对话：两个 Bot 在同一轮依次发言（turnTerminal: true 后第二个 Bot 仍能完整送达），且带上 [群名 · 发言Bot] 标签
@@ -470,11 +470,11 @@ test('Phase 3 UX: multi-bot group room @<群名> dual-bot replies, quote continu
     await until(() => bridge.status().activeTurns === 0);
 
     // 4. 单 Bot 专属指令对群返回清晰提示，不调错接口
-    await transport.emitUser('@架构组 approval');
+    await transport.emitUser('@架构组 compact');
     await until(() => sent.some((m) => m.text.includes('群组「架构组」不支持该单 Bot 指令')));
 
-    // 5. @架构组 tasks + 中文序数切换，以及 @架构组 new <话题>
-    await transport.emitUser('@架构组 tasks');
+    // 5. @架构组 task + 中文序数切换，以及 @架构组 new <话题>
+    await transport.emitUser('@架构组 task');
     await until(() => sent.some((m) => m.text.includes('性能优化')));
     await transport.emitUser('第二个');
     await until(() => sent.some((m) => m.text.includes('已切换到 **架构组** 的会话「性能优化」')));

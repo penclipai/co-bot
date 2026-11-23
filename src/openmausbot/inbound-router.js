@@ -21,7 +21,7 @@ const DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$
 const SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
 const NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
 const BYE_RE = /^(bye|退下|结束对话|退出对话)$/i;
-const OWNER_COMMAND_RE = /^(?:help|帮助|bots?|成员|列表|groups?|群组|status|状态|stop|停止|停|interrupt|bye|退下|结束对话|退出对话|steer|插队|cancel|取消排队|digest|汇总|chats?|群列表|会话策略|静音|取消静音|解除静音|summary|recap|群汇总|总结群|纪要|sendback|发回原群|发回|bind|绑定|delegate|委托|协作|context|ctx|usage|上下文|approval|审批模式|审批|style|风格|model|模型|memory|记忆|记住|tasks|会话|历史|task|切换|new|新会话|fresh|compact|压缩)(?:[\s:：]|$)/i;
+const OWNER_COMMAND_RE = /^(?:help|帮助|status|状态|stop|停止|bye|退下|steer|插队|cancel|取消排队|chats|mute|静音|unmute|解除静音|summary|汇总|纪要|sendback|发回|bind|绑定|delegate|委托|new|新会话|task|会话|compact|压缩)(?:[\s:：]|$)/i;
 
 /** 构建入站消息对应的会话上下文描述对象。 */
 export function buildExternalChatCtx(bridge, { isSelfChat, chatId, chatType, chatName, mid, privateReply, ev }) {
@@ -554,7 +554,7 @@ export async function handleInboundEvent(bridge, ev) {
     }
   }
 
-  // 1b. @bot tasks / @bot search 列表待选择序号（仅自聊）
+  // 1b. @bot task 列表待选择序号（仅自聊）
   if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && bridge.pendingTaskPick && bridge.now() < bridge.pendingTaskPick.expiresAt) {
     const choice = parseChoiceIndex(rawText);
     if (choice) {

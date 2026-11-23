@@ -27,7 +27,7 @@ const until = (fn, ms = 3000) => new Promise((resolve, reject) => {
   check();
 });
 
-function createMockOmbClient({ onSendMessage, memory = '' } = {}) {
+function createMockOmbClient({ onSendMessage } = {}) {
   let seq = 0;
   const sentPrompts = [];
   const threadMsgs = new Map();
@@ -61,7 +61,6 @@ function createMockOmbClient({ onSendMessage, memory = '' } = {}) {
       },
       async getMessages(tid) { return { messages: threadMsgs.get(tid) ?? [] }; },
       async getJob() { return { state: 'completed', version: 'v1', needsInput: [] }; },
-      async getMemory() { return { text: memory, topics: [] }; },
       async subscribeEvents(_cb, { signal }) {
         await new Promise((r) => signal?.addEventListener('abort', r, { once: true }));
       },
@@ -403,7 +402,7 @@ test('Step 2 (v0.6): SharedContextManager git pull --ff-only + 2-tier external c
     await bridge.start();
 
     // Non-whitelist stranger -> ignored & policyDenials += 1
-    await transport.emit({ id: 'stranger_1', ts: Date.now(), chat: { id: 'grp_team', type: 'group', name: '研发群' }, sender: { id: 'u_stranger', name: 'Mallory', isSelf: false }, text: '@bot memory' });
+    await transport.emit({ id: 'stranger_1', ts: Date.now(), chat: { id: 'grp_team', type: 'group', name: '研发群' }, sender: { id: 'u_stranger', name: 'Mallory', isSelf: false }, text: '@bot status' });
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(sentPrompts.length, 0);
     assert.equal(bridge.status().policyDenials, 1);

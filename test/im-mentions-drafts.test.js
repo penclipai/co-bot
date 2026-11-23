@@ -296,7 +296,7 @@ test('B1+B2+B3 群聊深水区：结构化 mentions 与撤回擦除、连发多�
     });
     assert.equal(mock.sentPrompts.length, 1, '结构化 @同事 时引用 Bot 回复不应重触 Bot');
 
-    // 4. B3: 85% 警告发往自聊且附 `@bot compact grp_dev` 按钮；自聊可执行 `@bot context grp_dev` 与 `@bot compact grp_dev`
+    // 4. B3: 85% 警告发往自聊且附 `@bot compact grp_dev` 按钮；自聊可执行 `@bot status grp_dev` 与 `@bot compact grp_dev`
     const warnMsg = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('85%'));
     assert.ok(warnMsg, '外部群达到 85% 应在自聊收到提示');
     assert.match(warnMsg.opts.actions[0].text, /^@bot compact grp_dev$/);
@@ -306,7 +306,7 @@ test('B1+B2+B3 群聊深水区：结构化 mentions 与撤回擦除、连发多�
       ts: t0 + 5000,
       chat: { id: 'chat_self', type: 'self' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot context grp_dev',
+      text: '@bot status grp_dev',
     });
     const ctxResp = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('研发架构群') && s.text.includes('85%'));
     assert.ok(ctxResp);

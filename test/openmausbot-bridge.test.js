@@ -74,8 +74,8 @@ test('openmausbot bridge: throttled activity milestone, approval ok/no, bots and
   try {
     await bridge.start();
 
-    // 1. @bot bots
-    await transport.emitUser('@bot bots');
+    // 1. @bot status
+    await transport.emitUser('@bot status');
     await until(() => sent.length === 1);
     assert.match(sent[0].text, /co-bot/);
     assert.equal(/mausbot/i.test(sent[0].text), false);
@@ -224,7 +224,7 @@ test('openmausbot bridge: commandDevices allowlist, state persistence, .md attac
   }
 });
 
-test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bot digest, and card bypass', async () => {
+test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bot status/flushQuietDigest, and card bypass', async () => {
   const omb = await startMockOmb([
     { id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true },
     { id: 'b2', name: 'Ops', threadId: 't2', chiefOfStaff: false },
@@ -268,26 +268,31 @@ test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bo
     await until(() => sent.length === 1);
     assert.match(sent[0].text, /确认重启服务/);
 
-    // 3. @bot digest 立即汇总静默积压
-    await transport.emitUser('@bot digest');
+    // 3. @bot status 可观察静默积压条数，走出免打扰时段后自动汇总下发
+    await transport.emitUser('@bot status');
     await until(() => sent.length === 2);
-    assert.match(sent[1].text, /免打扰期间汇总（1 条）[\s\S]*Ops[\s\S]*巡检完成/);
+    assert.match(sent[1].text, /静默待汇总：1 条/);
+
+    curNow = new Date(2026, 10, 19, 10, 0, 0).getTime();
+    const flushed = await bridge.flushQuietDigest();
+    assert.equal(flushed, 1);
+    await until(() => sent.length === 3);
+    assert.match(sent[2].text, /免打扰期间汇总（1 条）[\s\S]*Ops[\s\S]*巡检完成/);
     assert.equal(bridge.status().quietPending, 0);
 
     // 4. 切到白天 10:00：主动通知直接带 🔔 推到手机，同一 msg.id 的 patch 不重复推，且可直接引用回复
-    curNow = new Date(2026, 10, 19, 10, 0, 0).getTime();
     const p2 = { id: 'pro_2', role: 'bot', kind: 'text', threadId: 't2', text: 'CI 构建已修复通过', turnTerminal: true };
     omb.broadcast({ kind: 'message', threadId: 't2', message: p2 });
     omb.broadcast({ kind: 'message.patch', threadId: 't2', message: p2 });
-    await until(() => sent.length === 3);
-    assert.match(sent[2].text, /^🔔 \*\*Ops 通知\*\*[\s\S]*CI 构建已修复通过/);
+    await until(() => sent.length === 4);
+    assert.match(sent[3].text, /^🔔 \*\*Ops 通知\*\*[\s\S]*CI 构建已修复通过/);
     await new Promise((r) => setTimeout(r, 40));
-    assert.equal(sent.length, 3, '同一主动消息 id 不得重复推送');
+    assert.equal(sent.length, 4, '同一主动消息 id 不得重复推送');
 
     // 直接引用主动通知气泡，顺着发给 Ops Bot
-    await transport.emitUser('帮我看下耗时', { replyTo: sent[2].id });
-    await until(() => sent.length === 4);
-    assert.match(sent[3].text, /\*\*\[Ops\]\*\*[\s\S]*Ops: 帮我看下耗时/);
+    await transport.emitUser('帮我看下耗时', { replyTo: sent[3].id });
+    await until(() => sent.length === 5);
+    assert.match(sent[4].text, /\*\*\[Ops\]\*\*[\s\S]*Ops: 帮我看下耗时/);
   } finally {
     await bridge.stop();
     await omb.close();

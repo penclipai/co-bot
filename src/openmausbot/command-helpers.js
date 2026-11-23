@@ -17,11 +17,22 @@ export function resolveChatOrId(bridge, arg, { isExternal = false, chatCtx = nul
   return bridge.resolveKnownChat(q) ?? (/^[\w.:-]+$/.test(q) ? { id: q, name: q, type: 'group' } : null);
 }
 
+/** 计算单个会话的上下文占比与进度条文案；无窗口统计时返回 null。 */
+export function formatContextSummary(task) {
+  const ctx = task?.usage?.context;
+  if (!ctx?.window) return null;
+  const pct = Math.min(100, Math.round(((ctx.tokens || 0) / ctx.window) * 100));
+  const turns = task?.usage?.turns;
+  return {
+    pct,
+    line: `${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · 共 ${turns} 轮` : ''}）\n\`${usageBar(pct)}\``,
+  };
+}
+
 /** 格式化并回复当前或指定会话的上下文 Token 占用情况。 */
 export async function replyContextUsage(sensSink, { title, bot, threadId, task, compactCmd, compactLabel, isExternal = false, emptyHint = '暂无统计（对话后记录）' }) {
-  const ctx = task?.usage?.context;
-  const turns = task?.usage?.turns;
-  if (!ctx?.window) {
+  const summary = formatContextSummary(task);
+  if (!summary) {
     await sensSink.say(
       `📊 **${title}**${emptyHint}`,
       null,
@@ -30,12 +41,11 @@ export async function replyContextUsage(sensSink, { title, bot, threadId, task, 
     );
     return;
   }
-  const pct = Math.min(100, Math.round(((ctx.tokens || 0) / ctx.window) * 100));
   await sensSink.say(
-    `📊 **${title}**上下文：${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · 共 ${turns} 轮` : ''}）\n\`${usageBar(pct)}\``,
+    `📊 **${title}**上下文：${summary.line}`,
     { botId: bot.id, botName: bot.name, threadId },
     null,
-    [{ label: compactLabel, text: compactCmd, ...(pct >= 80 ? { kind: 'primary' } : {}) }],
+    [{ label: compactLabel, text: compactCmd, ...(summary.pct >= 80 ? { kind: 'primary' } : {}) }],
   );
 }
 
@@ -55,11 +65,10 @@ export function buildHelpText(bridge) {
     `🤖 **${brand} 常用指南**`,
     `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
     `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
-    `- \`${t} chats\` / \`chat mute|allow|mode|reset\` / \`summary <群>\` / \`digest\`：管群、跨群纪要与免打扰汇总`,
+    `- \`${t} chats [self|all|reset]\` / \`mute|unmute [群]\` / \`summary <群> [条数]\`：管群策略、静音与跨群纪要`,
     `- \`${t} bind [项目|unbind]\` / \`delegate <会话> [proj:<项目>] <问题>\`：项目目录绑定与 C2C 协作委托`,
-    `- \`${t} new [话题]\` / \`tasks\` / \`task <序号>\` / \`context [群]\` / \`compact [群]\`：会话与上下文管理`,
-    `- \`${t} bots\` / \`status\` / \`memory\` / \`记住 <内容>\` / \`approval [ask|auto|full]\`：团队成员、记忆与审批`,
-    `- \`${t} steer\` / \`cancel\` / \`stop\`：插队、取消排队或停止任务；卡片支持 \`ok/always/no/skip\``,
+    `- \`${t} new [话题]\` / \`task [序号]\` / \`compact [群]\`：新建、切换最近会话与上下文压缩`,
+    `- \`${t} status [群]\` / \`stop\`：团队诊断、Bot 与上下文状态或停止任务（卡片回 \`ok/always/no/skip\`）`,
   ].join('\n');
 }
 

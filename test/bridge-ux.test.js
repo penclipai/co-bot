@@ -230,7 +230,7 @@ test('UX Batch 1: followUpWindowMs stickiness, note-prefix protection, proactive
   }
 });
 
-test('UX Batch 2: busy queue awareness, @bot steer/cancel, queued SSE drain, @bot tasks switch, @bot style grok, and WebSim actions', async () => {
+test('UX Batch 2: busy queue awareness, @bot steer/cancel, queued SSE drain, @bot task switch, and WebSim actions', async () => {
   const omb = await startMockOmb([
     {
       id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true,
@@ -284,8 +284,8 @@ test('UX Batch 2: busy queue awareness, @bot steer/cancel, queued SSE drain, @bo
     await transport.emitUser('@bot stop');
     await until(() => sent.some((m) => m.text.includes('已请求停止')));
 
-    // 2. @bot tasks 列出并回复数字 2 切换会话
-    await transport.emitUser('@bot tasks');
+    // 2. @bot task 列出并回复数字 2 切换会话
+    await transport.emitUser('@bot task');
     await until(() => sent.some((m) => m.text.includes('最近会话') && m.text.includes('昨日排查记录')));
     await transport.emitUser('2');
     await until(() => sent.some((m) => m.text.includes('昨日排查记录') && m.text.includes('已切换到')));
@@ -422,7 +422,7 @@ test('P0 reliability: say() retry backoff, full state persistence (quietQueue/pe
   }
 });
 
-test('P1 commands: @bot context & >80% warning, @bot compact, @bot memory', async () => {
+test('P1 commands: @bot status context & >80% warning, @bot compact, and retired command passthrough', async () => {
   const omb = await startMockOmb(
     [
       {
@@ -458,8 +458,8 @@ test('P1 commands: @bot context & >80% warning, @bot compact, @bot memory', asyn
   try {
     await bridge.start();
 
-    // 1. @bot context 查看上下文仪表盘 + 普通对话后自动触发一次 >80% 提醒
-    await transport.emitUser('@bot context');
+    // 1. @bot status 查看上下文仪表盘 + 普通对话后自动触发一次 >80% 提醒
+    await transport.emitUser('@bot status');
     await until(() => sent.some((m) => m.text.includes('85%') && m.text.includes('85K / 100K')));
 
     await transport.emitUser('@bot 看下日志');
@@ -471,12 +471,13 @@ test('P1 commands: @bot context & >80% warning, @bot compact, @bot memory', asyn
     await transport.emitUser('@bot compact');
     await until(() => sent.some((m) => m.text.includes('压缩当前会话上下文')));
 
-    // 3. @bot memory 查看 + @bot 记住 写入长期记忆
-    await transport.emitUser('@bot memory');
-    await until(() => sent.some((m) => m.text.includes('回复简短优先') && m.text.includes('projects.md')));
-    await transport.emitUser('@bot 记住 用中文总结代码变更');
-    await until(() => sent.some((m) => m.text.includes('已记入 **co-bot** 的长期记忆')));
-    assert.match(omb.memoryState.get('b1').text, /用中文总结代码变更/);
+    // 3. 已精简的旧命令（memory/记住/approval/digest/bots/tasks/context）不再作为内建命令拦截，均正常透传给 Agent
+    for (const cmd of ['@bot memory', '@bot 记住 用中文总结代码变更', '@bot approval auto', '@bot digest', '@bot bots', '@bot tasks', '@bot context']) {
+      const stripped = cmd.replace(/^@bot\s+/, '');
+      await transport.emitUser(cmd);
+      await until(() => sent.some((m) => m.text.includes(`完成：${stripped}`)));
+    }
+    assert.equal(omb.memoryState.get('b1').text, '- 回复简短优先\n');
   } finally {
     await bridge.stop();
     await omb.close();

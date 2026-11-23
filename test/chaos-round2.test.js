@@ -346,7 +346,7 @@ test('Round 2 路由/C2C/草稿/队列/命令与 SSE 竞态防护', async () => 
     await bridge.onEvent({ id: 'g_bind2', ts: Date.now() + 15, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot bind grp_ops2 unbind' });
     assert.match(sent.at(-1).text, /已解除「Ops2」的项目绑定/);
 
-    await bridge.onEvent({ id: 'g_ctx', ts: Date.now() + 16, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot context' });
+    await bridge.onEvent({ id: 'g_ctx', ts: Date.now() + 16, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
     assert.match(sent.at(-1).text, /尚未建立独立隔离上下文/);
     await bridge.onEvent({ id: 'g_cmp', ts: Date.now() + 17, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot compact' });
     assert.match(sent.at(-1).text, /尚未建立独立隔离上下文/);
@@ -358,7 +358,7 @@ test('Round 2 路由/C2C/草稿/队列/命令与 SSE 竞态防护', async () => 
     assert.equal(bridge.lastBotReplyAt, 0);
     assert.match(sent.at(-1).text, /来自「Ops2」的指令结果/);
 
-    await bridge.onEvent({ id: 'mute_self', ts: Date.now() + 19, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot chat mute self' });
+    await bridge.onEvent({ id: 'mute_self', ts: Date.now() + 19, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot mute self' });
     assert.match(sent.at(-1).text, /不能静音自聊/);
 
     // 5. 静音群本人 @bot 发送产生 policy_denied 遥测（不增协作者误用计数或至少有事件可查）

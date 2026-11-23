@@ -381,8 +381,8 @@ test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInS
   try {
     const fakeBridge = { trigger: '@bot', followUpWindowMs: 120_000 };
     const help = buildHelpText(fakeBridge);
-    assert.match(help, /chats[\s\S]*summary[\s\S]*new[\s\S]*tasks[\s\S]*compact/);
-    assert.doesNotMatch(help, /schedule|routines|@bot model|export|style cobot/);
+    assert.match(help, /chats[\s\S]*mute\|unmute[\s\S]*summary[\s\S]*new[\s\S]*task[\s\S]*compact[\s\S]*status/);
+    assert.doesNotMatch(help, /schedule|routines|@bot model|export|style cobot|@bot bots|@bot tasks|@bot context|@bot memory|@bot approval|@bot digest|steer|cancel/);
 
     // 2. Live bridge flow: externalAckInSelf + persistent privateDraft polish + sendback
     let replySeq = 0;

@@ -145,11 +145,7 @@ function makeRichMockClient({
         const tid = `t_new_${++newTaskSeq}`;
         return { task: { threadId: tid } };
       },
-      async listRoutines() { return { routines: [] }; },
       async compact() { return { ok: true }; },
-      async getMemory() { return { text: '- 已记住核心偏好', topics: [] }; },
-      async putMemory() { return { ok: true }; },
-      async exportThread() { return { name: 'session.md', text: '# 对话导出\n\n测试内容' }; },
       async subscribeEvents(cb, { signal }) {
         ssePush = cb;
         await new Promise((r) => signal?.addEventListener('abort', r, { once: true }));
@@ -227,7 +223,9 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
       message: { id: 'pro_q1', role: 'bot', kind: 'text', text: '静默期间主协调消息', turnTerminal: true },
     });
     await until(() => bridge.quietQueue.length === 1);
-    await tr.emitUser('@bot digest');
+    await tr.emitUser('@bot status');
+    await until(() => tr.sent.some((m) => m.text.includes('静默待汇总：1 条')));
+    await bridge.flushQuietDigest();
     await until(() => tr.sent.some((m) => m.text.includes('静默期间主协调消息')));
     assert.ok(tr.sent.some((m) => m.text.includes('- **co-bot**：静默期间主协调消息')));
     bridge.quietHours = { enabled: false, start: '22:00', end: '08:30' };
@@ -241,17 +239,13 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     await until(() => tr.sent.some((m) => m.text.includes('API Key')));
     assert.ok(tr.sent.at(-1).text.includes('管理后台'));
 
-    // 6. 所有内建控制命令（help/help all/bots/status/new/tasks/context/memory/approval/compact/chats）均零泄露
+    // 6. 所有内建控制命令（help/help all/status/new/task/compact/chats/mute/unmute）均零泄露
     const cmds = [
       '@bot help',
       '@bot help all',
-      '@bot bots',
       '@bot status',
       '@bot new',
-      '@bot tasks',
-      '@bot context',
-      '@bot memory',
-      '@bot approval',
+      '@bot task',
       '@bot compact',
       '@bot chats',
     ];
@@ -376,7 +370,7 @@ test('syncChiefIdentity patches MausBot->co-bot & legacy soul idempotently, pres
   });
   try {
     await b3.start();
-    await tr3.emitUser('@bot bots');
+    await tr3.emitUser('@bot status');
     await until(() => tr3.sent.length === 1);
     assert.equal(/mausbot/i.test(tr3.sent[0].text), false);
     assert.ok(tr3.sent[0].text.includes('co-bot'));

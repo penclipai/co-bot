@@ -255,45 +255,6 @@ export class OpenMausBotClient {
     return this.#json(`/api/bots/${enc(botId)}/tasks/${enc(taskThreadId)}?messages=0`, { method: 'POST', body: {} });
   }
 
-  async search(q, { limit = 8, threadId } = {}) {
-    const params = new URLSearchParams({ q: String(q ?? ''), limit: String(limit) });
-    if (threadId) params.set('threadId', String(threadId));
-    const data = await this.#json(`/api/search?${params.toString()}`);
-    return { hits: Array.isArray(data?.hits) ? data.hits : [] };
-  }
-
-  async exportThread(threadId, format = 'markdown') {
-    const fmt = format === 'json' ? 'json' : 'markdown';
-    const res = await this.#fetchRaw(`/api/threads/${enc(threadId)}/export?format=${enc(fmt)}`, {
-      timeoutMs: Math.max(this.timeoutMs, 30_000),
-    });
-    return {
-      text: await res.text(),
-      name: parseDispositionName(res.headers.get('content-disposition'), `${threadId}.${fmt === 'json' ? 'json' : 'md'}`),
-    };
-  }
-
-  async listRoutines() {
-    const data = await this.#json('/api/routines');
-    return { routines: Array.isArray(data?.routines) ? data.routines : [] };
-  }
-
-  runRoutine(routineId) {
-    return this.#json(`/api/routines/${enc(routineId)}/run`, { method: 'POST', body: {} });
-  }
-
-  patchRoutine(routineId, patch) {
-    return this.#json(`/api/routines/${enc(routineId)}`, { method: 'PATCH', body: patch });
-  }
-
-  getMemory(botId) {
-    return this.#json(`/api/bots/${enc(botId)}/memory`);
-  }
-
-  putMemory(botId, text) {
-    return this.#json(`/api/bots/${enc(botId)}/memory`, { method: 'PUT', body: { text: String(text ?? '') } });
-  }
-
   steerQueued(botId, queueId, threadId) {
     return this.#json(`/api/bots/${enc(botId)}/queue/${enc(queueId)}/steer`, { method: 'POST', body: threadBody(threadId) });
   }

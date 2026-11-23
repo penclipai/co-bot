@@ -24,7 +24,7 @@
 | 群里本人发消息后 Bot 重复回复（回环） | 通道把本人发送又回显为 `isSelf: true` 入站，或正文残留 `@bot` | 1) 确保 `send()`/`sendFile()` 返回真实 `msgId`；2) 保持 `externalSanitizeMentions: "all"`（插入 `\u200B`），入站会自动跳过 `@\u200Bbot`。 |
 | 外部群回复里 `@同事` 或 `@所有人` 真艾特了别人 | 手动关闭了 `externalSanitizeMentions` | 将 `chats.externalSanitizeMentions` 保持为 `"all"`（默认）或 `"dangerous"`。只有 `@bot!` 发回自聊的私密草稿保留原始 `@`。 |
 | 成员撤回消息后 Bot 仍答出撤回内容 | 通道插件未推送标准撤回事件 | 在入站回调推送 `{ kind: 'recall', id, chat, sender, recalledMsgId }`，并在 `/debug` 筛选 `type=recall` 核对。 |
-| 在外部群触发后自聊串了话题（`focus` 漂移） | 手动在桌面端切错线程或关闭了隔离 | 确认 `chats.isolateThreadsByChat: true`（默认），通过 `/api/status` 核对 `chatThreads` 与 `focus.threadId` 分离；必要时自聊发 `@bot tasks` 切回。 |
+| 在外部群触发后自聊串了话题（`focus` 漂移） | 手动在桌面端切错线程或关闭了隔离 | 确认 `chats.isolateThreadsByChat: true`（默认），通过 `/api/status` 核对 `chatThreads` 与 `focus.threadId` 分离；必要时自聊发 `@bot task` 切回。 |
 | 群里引用较早消息显示 `[unavailable]` | 超出内存窗口或通道未实现历史接口 | 调大 `chats.contextWindow`，或在插件实现 `getMessage`、`getHistory` 与 `download`。 |
 | 提示 `尚未获知 selfChatId` | 首次启动未配置 `selfChatId` 且未收到自聊消息 | 用本人 IM 账号在**自聊窗口**发一条消息，系统会自动学习并持久化到 `data/bridge-state.json`。 |
 

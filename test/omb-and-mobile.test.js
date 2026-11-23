@@ -185,7 +185,6 @@ test('Track D1: voice transcript hook, audio fallback, and linkCard normalizatio
 
 test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status and commands', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-0177-prefs-'));
-  const patchedBots = [];
   const ombServer = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://127.0.0.1');
     const chunks = [];
@@ -210,17 +209,12 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
             threadId: 't1',
             chiefOfStaff: true,
             replyStyle: 'conversational',
-            approvalMode: patchedBots.at(-1)?.patch?.approvalMode || 'ask',
+            approvalMode: 'ask',
             waitingForTeammates: true,
             tasks: [{ threadId: 't1', title: '自聊主线' }],
           }],
           groups: [],
         }));
-      }
-      if (u.pathname === '/api/bots/b1' && req.method === 'PATCH') {
-        const patch = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-        patchedBots.push({ botId: 'b1', patch });
-        return res.end(JSON.stringify({ ok: true, bot: { id: 'b1', ...patch } }));
       }
       if (u.pathname === '/api/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -275,16 +269,9 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
     assert.equal(st1.openmausbot.bots[0].approvalMode, 'ask');
     assert.equal(st1.openmausbot.bots[0].waitingForTeammates, true);
 
-    // 2. @bot bots / @bot status / @bot approval auto
-    await pushMsg({ id: 'cmd_bots', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot bots' });
-    await until(() => sentOut.some((m) => m.text.includes('审批:ask') && m.text.includes('等待队友')));
-
+    // 2. @bot status 统一展示审批状态、等待队友与 Doctor 诊断
     await pushMsg({ id: 'cmd_status', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    await until(() => sentOut.some((m) => m.text.includes('Doctor：正常（9项）')));
-
-    await pushMsg({ id: 'cmd_apv', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot approval auto' });
-    await until(() => sentOut.some((m) => m.text.includes('审批模式设为 `auto`')));
-    assert.equal(patchedBots.at(-1)?.patch?.approvalMode, 'auto');
+    await until(() => sentOut.some((m) => m.text.includes('审批:ask') && m.text.includes('等待队友') && m.text.includes('Doctor：正常（9项）')));
 
     await k1.stop();
   } finally {

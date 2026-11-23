@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export function makeMockHarness({ onCreateTask, onSendMessage, onRespond, onExport } = {}) {
+export function makeMockHarness({ onCreateTask, onSendMessage, onRespond } = {}) {
   const sentPrompts = [];
   const createdTasks = [];
   const responds = [];
@@ -63,9 +63,6 @@ export function makeMockHarness({ onCreateTask, onSendMessage, onRespond, onExpo
       async respond(threadId, payload) {
         responds.push({ threadId, ...payload });
         return onRespond ? onRespond({ threadId, ...payload }) : { ok: true };
-      },
-      async exportThread(threadId) {
-        return onExport ? onExport(threadId) : { name: 'ext.md', text: '# Exported thread' };
       },
       async subscribeEvents(_cb, { signal } = {}) {
         if (!signal) return new Promise(() => {});

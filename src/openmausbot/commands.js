@@ -4,6 +4,7 @@ import { formatOmbError, parseChoiceIndex } from './cards.js';
 import {
   botCommandTarget,
   buildHelpText,
+  formatContextSummary,
   makeCommandSink,
   replyContextUsage,
   resolveChatOrId,
@@ -20,6 +21,137 @@ const parseListChoice = (raw) => {
   return parseChoiceIndex(s) ?? (/^\d+$/.test(s) ? Number(s) : null);
 };
 
+async function replyExternalChatContext(bridge, sensSink, { extArg, bots, targetBot, cmdTarget }) {
+  const extChat = bridge.resolveKnownChat(extArg);
+  if (!extChat) {
+    await sensSink.say(`未找到匹配会话「${extArg}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+    return;
+  }
+  const entries = [...bridge.chatThreads.values()].filter((v) => v && v.chatId === extChat.id && !v.isGroup);
+  const entry = entries.find((v) => v.botId === targetBot.id) ?? entries[0];
+  if (!entry) {
+    await sensSink.say(`会话「${extChat.name || extChat.id}」尚未建立隔离上下文。`);
+    return;
+  }
+  const fresh = bots.find((b) => b.id === entry.botId) ?? targetBot;
+  const freshName = showBotName(bridge, fresh.id, fresh.name);
+  const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === entry.threadId);
+  await replyContextUsage(sensSink, {
+    title: `${extChat.name || extChat.id}（${freshName}）隔离`,
+    bot: { ...fresh, name: freshName },
+    threadId: entry.threadId,
+    task,
+    compactCmd: `${cmdTarget} compact ${extChat.id}`,
+    compactLabel: '压缩该群会话',
+    isExternal: true,
+    emptyHint: '上下文暂无统计（对话后记录）。',
+  });
+}
+
+async function handleStatusCommand(bridge, statusArg, { targetBot, sensSink, isExternal, chatCtx }) {
+  const [h, { bots = [], groups = [] }, env, sess] = await Promise.all([
+    bridge.client.health(),
+    bridge.client.listBots(),
+    typeof bridge.client.environment === 'function' ? bridge.client.environment().catch(() => null) : null,
+    typeof bridge.client.authSession === 'function' ? bridge.client.authSession().catch(() => null) : null,
+  ]);
+  const visible = bots.filter((b) => !b.hidden);
+  const visibleGroups = groups.filter((g) => !g.hidden && !g.dm);
+  const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
+  const activeBot = bots.find((b) => b.id === targetBot?.id) ?? chief;
+  const cmdTarget = activeBot ? botCommandTarget(bridge, activeBot.id, activeBot.name) : bridge.trigger;
+
+  if (statusArg) {
+    await replyExternalChatContext(bridge, sensSink, {
+      extArg: statusArg,
+      bots,
+      targetBot: activeBot ?? targetBot,
+      cmdTarget,
+    });
+    return;
+  }
+
+  const desktopManaged = env?.capabilities?.selfUpdate === 'desktop-managed';
+  const authState = desktopManaged
+    ? (sess?.kind === 'session' ? '桌面端（已配对）' : '桌面端（⚠️ 未配对）')
+    : (sess?.kind === 'session' ? 'CLI 模式（已配对）' : 'CLI 模式（本地免配对）');
+  const stickyNote = bridge.isStickyActive() ? ' · 连续对话激活中' : '';
+  const groupNote = visibleGroups.length ? ` · 协作群组：${visibleGroups.length} 个` : '';
+  const doc = h?.doctor;
+  const docNote = doc ? ` · Doctor：${doc.problems?.length ? `⚠️ ${doc.problems.length} 个异常` : `正常（${doc.checked ?? 0}项）`}` : '';
+  const brand = bridge.botName || 'co-bot';
+  const chiefShown = chief ? showBotName(bridge, chief.id, chief.name) : '无';
+  const deadBots = visible.filter((b) => b.activity === 'dead');
+  const headState = chief?.activity === 'dead'
+    ? `🔴 **${brand} 异常（主协调 dead）**`
+    : (deadBots.length ? `🟡 **${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `🟢 **${brand} 在线**`);
+
+  const headerLine =
+    `${headState} · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
+    `协作 Bot：${visible.length} 个${groupNote} · 主协调：**${chiefShown}**（审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote} · 引擎 v${h.version ?? '?'}` +
+    (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : '');
+
+  let ctxBot = activeBot ?? chief;
+  let ctxThreadId = targetBot?.threadId ?? ctxBot?.threadId;
+  let ctxTitle = ctxBot ? `${showBotName(bridge, ctxBot.id, ctxBot.name)} 当前会话` : '当前会话';
+  let compactCmd = `${cmdTarget} compact`;
+  let compactLabel = '压缩上下文';
+  let missingExt = false;
+  if (isExternal) {
+    const extEntry = bridge.chatThreads.get(`${chatCtx.originChatId}:${targetBot.id}`);
+    if (!extEntry) {
+      missingExt = true;
+    } else {
+      ctxBot = bots.find((b) => b.id === extEntry.botId) ?? ctxBot;
+      ctxThreadId = extEntry.threadId;
+      const ctxBotShown = ctxBot ? showBotName(bridge, ctxBot.id, ctxBot.name) : 'co-bot';
+      ctxTitle = `${chatCtx.chatName || chatCtx.originChatId}（${ctxBotShown}）隔离`;
+      compactCmd = `${botCommandTarget(bridge, ctxBot?.id, ctxBot?.name)} compact ${chatCtx.originChatId}`;
+      compactLabel = '压缩该群会话';
+    }
+  }
+
+  const ctxTask = !missingExt && ctxBot
+    ? ((ctxBot.tasks ?? []).find((t) => (t.threadId ?? t.id) === ctxThreadId) ?? (isExternal ? null : ctxBot.tasks?.[0]))
+    : null;
+  const ctxSummary = formatContextSummary(ctxTask);
+  const ctxLine = missingExt
+    ? `📊 **${chatCtx.chatName || chatCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
+    : (ctxSummary
+      ? `📊 **${ctxTitle}**上下文：${ctxSummary.line}`
+      : `📊 **${ctxTitle}**：上下文暂无统计（对话后记录）`);
+
+  const sections = [headerLine, ctxLine];
+  if (visible.length) {
+    const botLines = visible.map((b) => {
+      const role = b.chiefOfStaff ? '（主协调）' : '';
+      const st = b.activity === 'dead'
+        ? '🔴 异常(dead)'
+        : (b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲');
+      const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
+      const apv = b.approvalMode ? ` · 审批:${b.approvalMode}` : '';
+      const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
+      return `- **${showBotName(bridge, b.id, b.name)}**${role} · ${st}${mod}${apv}${waitTm}`;
+    });
+    sections.push(`🤖 **协作团队（${visible.length}）**\n${botLines.join('\n')}`);
+  }
+  if (visibleGroups.length) {
+    const gLines = visibleGroups.map((g) => {
+      const count = Array.isArray(g.memberIds) ? `${g.memberIds.length} 成员` : '协作群';
+      return `- **${g.name}**（${count} · ${g.busy ? '讨论中' : '空闲'}）`;
+    });
+    sections.push(`👥 **协作群组（${visibleGroups.length}，用 \`@群名\` 发起协作）**\n${gLines.join('\n')}`);
+  }
+
+  const route = ctxSummary && ctxBot
+    ? { botId: ctxBot.id, botName: showBotName(bridge, ctxBot.id, ctxBot.name), threadId: ctxThreadId }
+    : null;
+  const actions = ctxSummary
+    ? [{ label: compactLabel, text: compactCmd, ...(ctxSummary.pct >= 80 ? { kind: 'primary' } : {}) }]
+    : null;
+  await sensSink.say(sections.join('\n\n'), route, null, actions);
+}
+
 async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, mid, quotedId, hasAttachments = false, chatCtx }) {
   const isExternal = Boolean(chatCtx?.isExternal);
   const replySink = makeCommandSink(bridge, chatCtx, { sensitive: false });
@@ -31,74 +163,17 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  if (/^(bots?|成员|列表|groups?|群组)$/.test(low)) {
-    const { bots = [], groups = [] } = await bridge.client.listBots();
-    const visible = bots.filter((b) => !b.hidden);
-    const visibleGroups = groups.filter((g) => !g.hidden && !g.dm);
-    if (!visible.length && !visibleGroups.length) {
-      await sensSink.say('当前暂无可用协作 Bot。');
-      return true;
+  const statusM = raw.match(/^(?:status|状态)(?:\s+([\s\S]+))?$/i);
+  if (statusM) {
+    try {
+      await handleStatusCommand(bridge, (statusM[1] ?? '').trim(), { targetBot, sensSink, isExternal, chatCtx });
+    } catch (e) {
+      await sensSink.say(`❌ 获取状态失败：${formatOmbError(e)}`);
     }
-    const parts = [];
-    if (visible.length) {
-      const lines = visible.map((b) => {
-        const role = b.chiefOfStaff ? '（主协调）' : '';
-        const st = b.activity === 'dead'
-          ? '🔴 异常(dead)'
-          : (b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲');
-        const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
-        const apv = b.approvalMode ? ` · 审批:${b.approvalMode}` : '';
-        const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
-        return `- **${showBotName(bridge, b.id, b.name)}**${role} · ${st}${mod}${apv}${waitTm}`;
-      });
-      parts.push(`🤖 **${bridge.botName || 'co-bot'} 协作团队（${visible.length}）**\n${lines.join('\n')}`);
-    }
-    if (visibleGroups.length) {
-      const gLines = visibleGroups.map((g) => {
-        const count = Array.isArray(g.memberIds) ? `${g.memberIds.length} 成员` : '协作群';
-        const st = g.busy ? '讨论中' : '空闲';
-        return `- **${g.name}**（${count} · ${st}）`;
-      });
-      parts.push(`👥 **协作群组（${visibleGroups.length}，用 \`@群名\` 发起协作）**\n${gLines.join('\n')}`);
-    }
-    await sensSink.say(parts.join('\n\n'));
     return true;
   }
 
-  if (/^(status|状态)$/.test(low)) {
-    const [h, { bots = [], groups = [] }, env, sess] = await Promise.all([
-      bridge.client.health(),
-      bridge.client.listBots(),
-      typeof bridge.client.environment === 'function' ? bridge.client.environment().catch(() => null) : null,
-      typeof bridge.client.authSession === 'function' ? bridge.client.authSession().catch(() => null) : null,
-    ]);
-    const visible = bots.filter((b) => !b.hidden);
-    const visibleGroups = groups.filter((g) => !g.hidden && !g.dm);
-    const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
-    const desktopManaged = env?.capabilities?.selfUpdate === 'desktop-managed';
-    const authState = desktopManaged
-      ? (sess?.kind === 'session' ? '桌面端（已配对）' : '桌面端（⚠️ 未配对）')
-      : (sess?.kind === 'session' ? 'CLI 模式（已配对）' : 'CLI 模式（本地免配对）');
-    const stickyNote = bridge.isStickyActive() ? ' · 连续对话激活中' : '';
-    const groupNote = visibleGroups.length ? ` · 协作群组：${visibleGroups.length} 个` : '';
-    const doc = h?.doctor;
-    const docNote = doc ? ` · Doctor：${doc.problems?.length ? `⚠️ ${doc.problems.length} 个异常` : `正常（${doc.checked ?? 0}项）`}` : '';
-    const brand = bridge.botName || 'co-bot';
-    const chiefShown = chief ? showBotName(bridge, chief.id, chief.name) : '无';
-    const deadBots = visible.filter((b) => b.activity === 'dead');
-    const chiefDead = chief?.activity === 'dead';
-    const headState = chiefDead
-      ? `🔴 **${brand} 异常（主协调 dead）**`
-      : (deadBots.length ? `🟡 **${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `🟢 **${brand} 在线**`);
-    await sensSink.say(
-      `${headState} · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
-      `协作 Bot：${visible.length} 个${groupNote} · 主协调：**${chiefShown}**（风格：${chief?.replyStyle ?? 'default'}，审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote} · 引擎 v${h.version ?? '?'}` +
-      (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : ''),
-    );
-    return true;
-  }
-
-  if (/^(stop|停止|停|interrupt)$/.test(low)) {
+  if (/^(?:stop|停止)$/.test(low)) {
     const scoped = targetBot ? {
       botId: targetBot.id,
       botName: targetBot.name,
@@ -121,7 +196,7 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  if (/^(bye|退下|结束对话|退出对话)$/.test(low)) {
+  if (/^(?:bye|退下)$/.test(low)) {
     if (isExternal) {
       await sensSink.say('👋 外部群/私聊仅在 `@bot` 或引用 Bot 回复时触发，不会开启免 `@` 粘性。');
       return true;
@@ -144,49 +219,41 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  if (/^(digest|汇总)$/i.test(low)) {
-    if (isExternal) {
-      await sensSink.say('🔕 静默汇总仅可在自聊查看。');
+  // 静音 / 解除静音：@bot mute|静音 [群] / @bot unmute|解除静音 [群]
+  const muteM = raw.match(/^(mute|静音|unmute|解除静音)(?:\s+([\s\S]+))?$/i);
+  if (muteM) {
+    const isMute = /^(?:mute|静音)$/i.test(muteM[1]);
+    const arg = (muteM[2] ?? '').trim();
+    const target = resolveChatOrId(bridge, arg, { isExternal, chatCtx });
+    if (!target) {
+      await sensSink.say(`未找到匹配会话「${arg}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
       return true;
     }
-    const n = await bridge.flushQuietDigest();
-    if (!n) await replySink.say('当前没有静默积压消息。');
+    if (isMute) {
+      if (target.id === 'self' || target.id === bridge.selfChat) {
+        await sensSink.say('⚠️ 不能静音自聊控制会话。');
+        return true;
+      }
+      bridge.setChatMuted(target.id, true);
+      await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`@bot\` 将不再触发，发 \`${bridge.trigger} unmute ${target.id}\` 可恢复。`);
+    } else {
+      bridge.setChatAllowed(target.id);
+      await sensSink.say(`✅ 已允许「${target.name}」（\`${target.id}\`）使用 \`@bot\`。`);
+    }
     return true;
   }
 
-  // 动态管群与策略切换：@bot chats / @bot chat mute|allow|mode <...> / @bot 静音 <群>
-  const chatShortM = raw.match(/^(静音|取消静音|解除静音)(?:\s+([\s\S]+))?$/i);
-  const chatsCmdM = !chatShortM ? raw.match(/^(?:chats?|群列表|会话策略)(?:\s+([\s\S]+))?$/i) : null;
-  if (chatShortM || chatsCmdM) {
-    if (chatShortM) {
-      const isMute = chatShortM[1] === '静音';
-      const target = resolveChatOrId(bridge, chatShortM[2], { isExternal, chatCtx });
-      if (!target) {
-        await sensSink.say(`未找到匹配会话「${chatShortM[2] ?? ''}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
-        return true;
-      }
-      if (isMute) {
-        if (target.id === 'self' || target.id === bridge.selfChat) {
-          await sensSink.say('⚠️ 不能静音自聊控制会话。');
-          return true;
-        }
-        bridge.setChatMuted(target.id, true);
-        await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`@bot\` 将不再触发，发 \`${bridge.trigger} chat allow ${target.id}\` 可恢复。`);
-      } else {
-        bridge.setChatAllowed(target.id);
-        await sensSink.say(`✅ 已允许「${target.name}」（\`${target.id}\`）使用 \`@bot\`。`);
-      }
-      return true;
-    }
-
-    const sub = (chatsCmdM[1] ?? '').trim();
-    if (!sub || /^(list|ls|查看|列表)$/i.test(sub)) {
+  // 多会话查看与模式切换：@bot chats [self|all|reset]
+  const chatsCmdM = raw.match(/^chats(?:\s+([\s\S]+))?$/i);
+  if (chatsCmdM) {
+    const sub = (chatsCmdM[1] ?? '').trim().toLowerCase();
+    if (!sub) {
       const pol = bridge.getChatPolicy();
       const known = bridge.listKnownChats().filter((c) => c.type !== 'self');
       const modeLabel = pol.mode === 'self_only' ? '仅自聊（self_only）' : '本人任意群/私聊（owner_everywhere）';
       if (!known.length) {
         await sensSink.say(
-          `💬 **多会话触发策略**：${modeLabel}\n当前暂无外部群/私聊记录；在群聊发消息后即可在此查看或 \`${bridge.trigger} chat mute/allow <群名|chatId>\`。`,
+          `💬 **多会话触发策略**：${modeLabel}\n当前暂无外部群/私聊记录；在群聊发消息后即可在此查看或 \`${bridge.trigger} mute/unmute <群名|chatId>\`。`,
         );
         return true;
       }
@@ -200,75 +267,42 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       const actions = firstExt
         ? [
             firstExt.allowed
-              ? { label: `静音 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} chat mute ${firstExt.id}` }
-              : { label: `恢复 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} chat allow ${firstExt.id}`, kind: 'primary' },
+              ? { label: `静音 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} mute ${firstExt.id}` }
+              : { label: `恢复 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} unmute ${firstExt.id}`, kind: 'primary' },
             pol.mode === 'self_only'
-              ? { label: '切回全局', text: `${bridge.trigger} chat mode owner_everywhere` }
-              : { label: '仅自聊模式', text: `${bridge.trigger} chat mode self_only` },
+              ? { label: '切回全局', text: `${bridge.trigger} chats all` }
+              : { label: '仅自聊模式', text: `${bridge.trigger} chats self` },
           ]
         : [];
       await sensSink.say(
-        `💬 **多会话管理**（当前模式：${modeLabel}）\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} chat mute|allow <群名|id>\`、\`chat mode self_only|everywhere|reset\``,
+        `💬 **多会话管理**（当前模式：${modeLabel}）\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} mute|unmute <群名|id>\`、\`${bridge.trigger} chats self|all|reset\``,
         null,
         null,
         actions,
       );
       return true;
     }
-
-    const opM = sub.match(/^(mute|off|disable|静音|关闭|allow|unmute|on|enable|开启|允许|解除静音|mode|模式|reset|重置)(?:\s+([\s\S]+))?$/i);
-    if (!opM) {
-      await sensSink.say(`用法：\`${bridge.trigger} chats\`、\`${bridge.trigger} chat mute|allow <群名|id>\` 或 \`${bridge.trigger} chat mode self_only|everywhere|reset\``);
-      return true;
-    }
-    const op = opM[1].toLowerCase();
-    const arg = (opM[2] ?? '').trim();
-    if (/^(reset|重置)$/.test(op)) {
+    if (sub === 'reset') {
       bridge.resetChatPolicy();
       await sensSink.say('🔄 已重置运行期会话静音与模式覆盖，恢复 `config.json` 配置。');
       return true;
     }
-    if (/^(mode|模式)$/.test(op)) {
-      if (!arg || /^(reset|重置)$/.test(arg)) {
-        bridge.setChatMode(null);
-        await sensSink.say(`🔄 已恢复全局触发模式为配置默认值（\`${bridge.chats.mode}\`）。`);
-        return true;
-      }
-      if (/^(self_only|self|仅自聊|仅自己)$/i.test(arg)) {
-        bridge.setChatMode('self_only');
-        await sensSink.say('🔒 已切换为**仅自聊模式**（外部群/私聊仍保留内存上下文但暂停响应 `@bot`，发 `chat mode everywhere` 恢复）。');
-        return true;
-      }
-      if (/^(owner_everywhere|everywhere|all|全局|全部|开启)$/i.test(arg)) {
-        bridge.setChatMode('owner_everywhere');
-        await sensSink.say('🌐 已切换为**本人全局可用模式**（外部群/私聊按黑白名单与静音状态响应）。');
-        return true;
-      }
-      await sensSink.say('可用模式：`owner_everywhere`（全局）、`self_only`（仅自聊）或 `reset`。');
+    if (sub === 'self') {
+      bridge.setChatMode('self_only');
+      await sensSink.say('🔒 已切换为**仅自聊模式**（外部群/私聊仍保留内存上下文但暂停响应 `@bot`，发 `chats all` 恢复）。');
       return true;
     }
-
-    const target = resolveChatOrId(bridge, arg, { isExternal, chatCtx });
-    if (!target) {
-      await sensSink.say(`未找到匹配会话「${arg}」，发 \`${bridge.trigger} chats\` 查看已知会话 ID。`);
+    if (sub === 'all') {
+      bridge.setChatMode('owner_everywhere');
+      await sensSink.say('🌐 已切换为**本人全局可用模式**（外部群/私聊按黑白名单与静音状态响应）。');
       return true;
     }
-    if (/^(mute|off|disable|静音|关闭)$/.test(op)) {
-      if (target.id === 'self' || target.id === bridge.selfChat) {
-        await sensSink.say('⚠️ 不能静音自聊控制会话。');
-        return true;
-      }
-      bridge.setChatMuted(target.id, true);
-      await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），发 \`${bridge.trigger} chat allow ${target.id}\` 可恢复。`);
-    } else {
-      bridge.setChatAllowed(target.id);
-      await sensSink.say(`✅ 已允许「${target.name}」（\`${target.id}\`）使用 \`@bot\`。`);
-    }
+    await sensSink.say(`用法：\`${bridge.trigger} chats [self|all|reset]\` 或 \`${bridge.trigger} mute|unmute <群名|id>\``);
     return true;
   }
 
-  // 跨群只读纪要：@bot summary <群名|id> [条数] [关注问题] / @bot 汇总|纪要 <群名>
-  const sumM = raw.match(/^(?:summary|recap|群汇总|总结群|汇总|纪要)(?:\s+([\s\S]+))?$/i);
+  // 跨群只读纪要：@bot summary <群名|id> [条数] [关注问题]
+  const sumM = raw.match(/^(?:summary|汇总|纪要)(?:\s+([\s\S]+))?$/i);
   if (sumM) {
     const restRaw = (sumM[1] ?? '').trim();
     const known = bridge.listKnownChats().filter((c) => c.type !== 'self');
@@ -356,7 +390,7 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
   }
 
   // 自聊私密草稿确认回发：@bot sendback [draftId | 改写内容 | confirm]
-  const sendbackM = raw.match(/^(?:sendback|发回原群|发回)(?:\s+([\s\S]+))?$/i);
+  const sendbackM = raw.match(/^(?:sendback|发回)(?:\s+([\s\S]+))?$/i);
   if (sendbackM) {
     if (isExternal) {
       await sensSink.say(`ℹ️ 请在**自聊**中引用或回复 \`${bridge.trigger} sendback\` 预览确认后再发回当前会话，避免误发。`);
@@ -474,7 +508,7 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
   }
 
   // 极简 2 态 C2C 委托：@bot delegate <会话名|chatId> [proj:<项目>] <问题>
-  const delM = raw.match(/^(?:delegate|委托|协作)(?:\s+([\s\S]+))?$/i);
+  const delM = raw.match(/^(?:delegate|委托)(?:\s+([\s\S]+))?$/i);
   if (delM) {
     const rest = (delM[1] ?? '').trim();
     const m = rest.match(/^(\S+)\s+([\s\S]+)$/);
@@ -531,8 +565,13 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
   const shownTargetName = showBotName(bridge, activeTarget.id, activeTarget.name, isGroup);
   const cmdTarget = isGroup ? `@${shownTargetName}` : botCommandTarget(bridge, activeTarget.id, activeTarget.name);
 
+  const singleBotOnlyHint = async () => {
+    await sensSink.say(`ℹ️ 群组「${activeTarget.name}」不支持该单 Bot 指令，请直接 \`@具体Bot名\` 操作。`);
+    return true;
+  };
+
   if (!isDefault) {
-    if (/^(stop|停止|停|interrupt)$/i.test(raw)) {
+    if (/^(?:stop|停止)$/i.test(raw)) {
       try {
         await stopTarget(bridge, {
           botId: activeTarget.id,
@@ -557,191 +596,84 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     })) {
       return true;
     }
-  }
-
-  const singleBotOnlyHint = async () => {
-    await sensSink.say(`ℹ️ 群组「${activeTarget.name}」不支持该单 Bot 指令，请直接 \`@具体Bot名\` 操作。`);
-    return true;
-  };
-
-  const ctxCmdM = raw.match(/^(?:context|ctx|usage|上下文)(?:\s+([\s\S]+))?$/i);
-  if (ctxCmdM) {
-    if (isGroup) return singleBotOnlyHint();
-    const ctxArg = (ctxCmdM[1] ?? '').trim();
-    try {
-      const { bots } = await bridge.client.listBots();
-      if (ctxArg) {
-        const extChat = bridge.resolveKnownChat(ctxArg);
-        if (!extChat) {
-          await sensSink.say(`未找到匹配会话「${ctxArg}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+    const botStatusM = raw.match(/^(?:status|状态)(?:\s+([\s\S]+))?$/i);
+    if (botStatusM) {
+      if (isGroup) return singleBotOnlyHint();
+      const statusArg = (botStatusM[1] ?? '').trim();
+      try {
+        const { bots = [] } = await bridge.client.listBots();
+        if (statusArg) {
+          await replyExternalChatContext(bridge, sensSink, { extArg: statusArg, bots, targetBot: activeTarget, cmdTarget });
           return true;
         }
-        const entries = [...bridge.chatThreads.values()].filter((v) => v && v.chatId === extChat.id && !v.isGroup);
-        const entry = entries.find((v) => v.botId === activeTarget.id) ?? entries[0];
-        if (!entry) {
-          await sensSink.say(`会话「${extChat.name || extChat.id}」尚未建立隔离上下文。`);
+        if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
+          await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
           return true;
         }
-        const fresh = bots.find((b) => b.id === entry.botId) ?? activeTarget;
+        const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
         const freshName = showBotName(bridge, fresh.id, fresh.name);
-        const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === entry.threadId);
+        const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === activeTarget.threadId) ?? fresh.tasks?.[0];
         await replyContextUsage(sensSink, {
-          title: `${extChat.name || extChat.id}（${freshName}）隔离`,
+          title: `${freshName} 当前会话`,
           bot: { ...fresh, name: freshName },
-          threadId: entry.threadId,
+          threadId: activeTarget.threadId,
           task,
-          compactCmd: `${cmdTarget} compact ${extChat.id}`,
-          compactLabel: '压缩该群会话',
-          isExternal: true,
-          emptyHint: '上下文暂无统计（对话后记录）。',
+          compactCmd: isExternal ? `${cmdTarget} compact ${chatCtx.originChatId}` : `${cmdTarget} compact`,
+          compactLabel: isExternal ? '压缩该群会话' : '压缩上下文',
+          emptyHint: '当前会话上下文暂无统计（发送对话后会自动记录）。',
         });
-        return true;
+      } catch (e) {
+        await sensSink.say(`❌ 获取状态失败：${formatOmbError(e)}`);
       }
-      if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
-        await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
-        return true;
-      }
-      const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
-      const freshName = showBotName(bridge, fresh.id, fresh.name);
-      const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === activeTarget.threadId) ?? fresh.tasks?.[0];
-      const compactTarget = botCommandTarget(bridge, fresh.id, fresh.name);
-      await replyContextUsage(sensSink, {
-        title: `${freshName} 当前会话`,
-        bot: { ...fresh, name: freshName },
-        threadId: activeTarget.threadId,
-        task,
-        compactCmd: isExternal ? `${compactTarget} compact ${chatCtx.originChatId}` : `${compactTarget} compact`,
-        compactLabel: isExternal ? '压缩该群会话' : '压缩上下文',
-        emptyHint: '当前会话上下文暂无统计（发送对话后会自动记录）。',
-      });
-    } catch (e) {
-      await sensSink.say(`❌ 查询上下文失败：${formatOmbError(e)}`);
+      return true;
     }
-    return true;
   }
 
-  const apvM = raw.match(/^(?:approval|审批模式|审批)(?:\s+([\s\S]+))?$/i);
-  if (apvM) {
-    if (isGroup) return singleBotOnlyHint();
-    const arg = (apvM[1] ?? '').trim().toLowerCase();
-    try {
-      const { bots = [] } = await bridge.client.listBots();
-      if (isExternal && !bridge.chatThreads.has(`${chatCtx.originChatId}:${activeTarget.id}`)) {
-        await sensSink.say(`会话「${chatCtx.chatName || chatCtx.originChatId}」尚未建立独立隔离上下文（发送对话后自动创建）。`);
-        return true;
-      }
-      const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
-      const freshName = showBotName(bridge, fresh.id, fresh.name);
-      const curMode = fresh.approvalMode ?? (fresh.autoApprove ? 'auto' : 'ask');
-      if (!arg || /^(show|查看|list)$/.test(arg)) {
-        await sensSink.say(
-          `🛡 **${freshName}** 当前审批模式：\`${curMode}\`（可选 \`ask\` 逐次询问 / \`auto\` 安全自动 / \`full\` 全自动）\n` +
-          `发送 \`${cmdTarget} approval ask | auto | full\` 即可切换。`,
-          { botId: fresh.id, botName: freshName, threadId: activeTarget.threadId },
-          null,
-          [
-            { label: 'ask（询问）', text: `${cmdTarget} approval ask`, ...(curMode === 'ask' ? { kind: 'primary' } : {}) },
-            { label: 'auto（自动）', text: `${cmdTarget} approval auto`, ...(curMode === 'auto' ? { kind: 'primary' } : {}) },
-            { label: 'full（放行）', text: `${cmdTarget} approval full`, ...(curMode === 'full' ? { kind: 'primary' } : {}) },
-          ],
-        );
-        return true;
-      }
-      const modeMap = { ask: 'ask', 询问: 'ask', auto: 'auto', 自动: 'auto', full: 'full', 放行: 'full', 全自动: 'full' };
-      const nextMode = modeMap[arg];
-      if (!nextMode) {
-        await sensSink.say(`不支持的审批模式「${arg}」，可选：\`ask\`、\`auto\` 或 \`full\`。`);
-        return true;
-      }
-      await bridge.withCliLoopbackFallback((c) => c.patchBot(fresh.id, { approvalMode: nextMode }));
-      await bridge.refreshMultiBot();
-      await sensSink.say(`🛡 已将 **${freshName}** 的审批模式设为 \`${nextMode}\`。`);
-    } catch (e) {
-      await sensSink.say(`❌ 切换审批模式失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
-  const memDirectM = raw.match(/^记住[\s:：]+([\s\S]+)$/);
-  const memCmdM = !memDirectM ? raw.match(/^(?:memory|记忆)(?:\s+([\s\S]+))?$/i) : null;
-  if (memDirectM || memCmdM) {
-    if (isGroup) return singleBotOnlyHint();
-    const rest = (memCmdM?.[1] ?? '').trim();
-    let addText = (memDirectM?.[1] ?? '').trim();
-    if (!addText && rest && !/^(?:show|查看|list)$/i.test(rest)) {
-      const addM = rest.match(/^(?:add|添加|记录)(?:\s+([\s\S]+))?$/i);
-      if (!addM || !addM[1]?.trim()) {
-        await sensSink.say(`用法：\`${cmdTarget} memory\` 查看记忆，或 \`${cmdTarget} memory add <内容>\` / \`${cmdTarget} 记住 <内容>\``);
-        return true;
-      }
-      addText = addM[1].trim();
-    }
-    try {
-      const mem = await bridge.client.getMemory(activeTarget.id);
-      const curText = String(mem?.text ?? '').trimEnd();
-      if (addText) {
-        const line = addText.startsWith('- ') ? addText : `- ${addText}`;
-        const nextText = curText ? `${curText}\n${line}\n` : `${line}\n`;
-        await bridge.client.putMemory(activeTarget.id, nextText);
-        await sensSink.say(`🧠 已记入 **${shownTargetName}** 的长期记忆：\n${line}`);
-      } else {
-        const topics = Array.isArray(mem?.topics) && mem.topics.length
-          ? `\n\n📁 专题记忆：${mem.topics.map((t) => `\`${t.name || t.path}\``).join('、')}`
-          : '';
-        const body = curText ? clip(curText, 800) : `（暂无长期记忆，发 \`${cmdTarget} 记住 <一条规则>\` 可直接写入）`;
-        await sensSink.say(`🧠 **${shownTargetName} 长期记忆**\n${body}${topics}`);
-      }
-    } catch (e) {
-      await sensSink.say(`❌ 访问长期记忆失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
-  if (/^(tasks|会话|历史)$/i.test(raw)) {
-    try {
-      const { fresh, top } = await bridge.collectBotTasks(activeTarget);
-      const freshName = showBotName(bridge, fresh.id, fresh.name, isGroup);
-      if (!top.length) {
-        await sensSink.say(`**${freshName}** 暂无可切换的历史会话，可发 \`${cmdTarget} new\` 创建新会话。`);
-        return true;
-      }
-      const route = { botId: fresh.id, botName: freshName, threadId: fresh.threadId, ...(isGroup ? { isGroup: true } : {}) };
-      bridge.clearPickers();
-      bridge.pendingTaskPick = {
-        botId: fresh.id,
-        botName: freshName,
-        isGroup,
-        tasks: top,
-        expiresAt: bridge.now() + TASK_PICK_TTL,
-      };
-      const lines = top.map((t, i) => {
-        const cur = (t.threadId ?? t.id) === fresh.threadId ? '（当前）' : '';
-        const busy = t.busy ? ' · 运行中' : '';
-        return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
-      });
-      const actions = top.map((t, i) => ({
-        label: `${i + 1}. ${clip(t.title || '会话', 16)}`,
-        text: String(i + 1),
-        ...((t.threadId ?? t.id) === fresh.threadId ? { kind: 'primary' } : {}),
-      }));
-      await sensSink.say(
-        `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
-        route,
-        null,
-        actions,
-      );
-    } catch (e) {
-      await sensSink.say(`❌ 获取会话列表失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
-  const taskM = raw.match(/^(?:task|切换)(?:\s+([\s\S]*))?$/i);
+  // 会话列表与切换：@bot task（列出最近 5 条） / @bot task <序号>（切换）
+  const taskM = raw.match(/^(?:task|会话)(?:\s+([\s\S]*))?$/i);
   if (taskM) {
     const taskArg = (taskM[1] ?? '').trim();
+    if (!taskArg) {
+      try {
+        const { fresh, top } = await bridge.collectBotTasks(activeTarget);
+        const freshName = showBotName(bridge, fresh.id, fresh.name, isGroup);
+        if (!top.length) {
+          await sensSink.say(`**${freshName}** 暂无可切换的历史会话，可发 \`${cmdTarget} new\` 创建新会话。`);
+          return true;
+        }
+        const route = { botId: fresh.id, botName: freshName, threadId: fresh.threadId, ...(isGroup ? { isGroup: true } : {}) };
+        bridge.clearPickers();
+        bridge.pendingTaskPick = {
+          botId: fresh.id,
+          botName: freshName,
+          isGroup,
+          tasks: top,
+          expiresAt: bridge.now() + TASK_PICK_TTL,
+        };
+        const lines = top.map((t, i) => {
+          const cur = (t.threadId ?? t.id) === fresh.threadId ? '（当前）' : '';
+          const busy = t.busy ? ' · 运行中' : '';
+          return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
+        });
+        const actions = top.map((t, i) => ({
+          label: `${i + 1}. ${clip(t.title || '会话', 16)}`,
+          text: String(i + 1),
+          ...((t.threadId ?? t.id) === fresh.threadId ? { kind: 'primary' } : {}),
+        }));
+        await sensSink.say(
+          `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
+          route,
+          null,
+          actions,
+        );
+      } catch (e) {
+        await sensSink.say(`❌ 获取会话列表失败：${formatOmbError(e)}`);
+      }
+      return true;
+    }
     const taskChoice = parseListChoice(taskArg);
     if (!taskChoice || taskChoice < 1) {
-      await sensSink.say(`用法：\`${cmdTarget} task <正整数序号>\`，先发 \`${cmdTarget} tasks\` 查看会话编号。`);
+      await sensSink.say(`用法：\`${cmdTarget} task [正整数序号]\`，不带序号可查看最近会话编号。`);
       return true;
     }
     const idx = taskChoice - 1;
@@ -768,7 +700,7 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     return true;
   }
 
-  const newM = raw.match(/^(?:new|新会话|fresh)(?:\s+([\s\S]+))?$/i);
+  const newM = raw.match(/^(?:new|新会话)(?:\s+([\s\S]+))?$/i);
   if (newM) {
     const prompt = (newM[1] ?? '').trim();
     const titleArg = prompt
