@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附件</title>
+<style>
+  :root { --bg: #fff; --fg: #1f2328; --mut: #656d76; --line: #d0d7de; --code: #f6f8fa; --link: #0969da; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --mut: #8d96a0; --line: #30363d; --code: #161b22; --link: #4493f8; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .bar { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--bg); border-bottom: 1px solid var(--line); font-size: 14px; color: var(--mut); }
+  .bar b { color: var(--fg); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar a { color: var(--link); text-decoration: none; }
+  main { padding: 8px 16px 40px; max-width: 760px; margin: 0 auto; overflow-wrap: anywhere; }
+  h1 { font-size: 21px; } h2 { font-size: 18px; margin-top: 1.4em; } h3 { font-size: 16px; }
+  code { font: 13.5px ui-monospace, Menlo, Consolas, monospace; background: var(--code); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  pre code { padding: 0; background: none; }
+  .add { color: #1a7f37; } .del { color: #cf222e; }
+  blockquote { margin: 0; padding: 0 12px; border-left: 3px solid var(--line); color: var(--mut); }
+  a { color: var(--link); }
+  ul, ol { padding-left: 1.4em; }
+  .tbl { overflow-x: auto; } table { border-collapse: collapse; } th, td { border: 1px solid var(--line); padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div class="bar"><b id="name">附件</b><a id="raw" href="#">原文</a></div>
+<main id="out">加载中…</main>
+<script src="/md.js"></script>
+<script>
+  const id = new URLSearchParams(location.search).get('f');
+  const raw = `/files/${encodeURIComponent(id)}?raw=1`;
+  document.getElementById('raw').href = raw;
+  fetch(raw).then((r) => {
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    if (m) document.title = document.getElementById('name').textContent = decodeURIComponent(m[1]);
+    return r.ok ? r.text() : Promise.reject(new Error('文件不存在或已过期'));
+  }).then((t) => { document.getElementById('out').innerHTML = renderMarkdown(t); })
+    .catch((e) => { document.getElementById('out').textContent = e.message; });
+</script>
+</body>
+</html>

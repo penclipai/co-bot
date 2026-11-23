@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>co-bot 插件与通道诊断台</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1117;
+      --card: #181c25;
+      --border: #2a3140;
+      --text: #e6ebf5;
+      --muted: #93a0b8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --accent: #3b82f6;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f6fa;
+        --card: #ffffff;
+        --border: #dfe4ee;
+        --text: #172030;
+        --muted: #64748b;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 16px; }
+    .wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 14px; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+    h1 { margin: 0; font-size: 18px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+    button, select { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+    button:hover, select:hover { border-color: var(--accent); }
+    .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .card-head h2 { margin: 0; }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+    .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 600; }
+    .kv { font-size: 13px; line-height: 1.7; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); margin: 2px 4px 2px 0; }
+    .badge.ok { color: var(--ok); border-color: rgba(34, 197, 94, 0.4); }
+    .badge.err { color: var(--err); border-color: rgba(239, 68, 68, 0.4); }
+    .badge.off { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>co-bot 本地只读诊断台</h1>
+      <div class="toolbar">
+        <span id="updatedAt">加载中…</span>
+        <button id="toggleBtn" type="button">暂停自动刷新</button>
+        <button id="refreshBtn" type="button">立即刷新</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <h2>OpenMausBot &amp; 桥接器</h2>
+        <div id="ombBox" class="kv">加载中…</div>
+      </section>
+      <section class="card">
+        <h2>IM 通道与能力声明</h2>
+        <div id="channelBox" class="kv">加载中…</div>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>多会话上下文与隔离 Thread</h2>
+        <div id="policyBox" class="filters">加载中…</div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>名称</th><th>chatId</th><th>类别</th><th>策略状态</th><th>内存缓存</th><th>隔离 Thread</th></tr>
+        </thead>
+        <tbody id="chatBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>定时跨群纪要（Scheduled Summaries）</h2>
+      <table>
+        <thead>
+          <tr><th>目标会话</th><th>chatId</th><th>时间</th><th>状态</th><th>关注重点</th><th>最近执行</th></tr>
+        </thead>
+        <tbody id="schedBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>已挂载插件（Kernel）</h2>
+      <table>
+        <thead>
+          <tr><th>插件</th><th>类别</th><th>状态</th><th>提供服务</th><th>依赖</th><th>详情</th></tr>
+        </thead>
+        <tbody id="pluginBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>最近脱敏事件流（最多 80 条）</h2>
+        <div class="filters">
+          <label>会话 <select id="chatFilter"><option value="">全部会话</option></select></label>
+          <label>来源 <select id="sourceFilter"><option value="">全部来源</option><option value="channel">channel</option><option value="bridge">bridge</option></select></label>
+          <label>类型 <select id="typeFilter">
+            <option value="">全部类型</option>
+            <option value="inbound">inbound</option>
+            <option value="outbound">outbound</option>
+            <option value="dispatch">dispatch</option>
+            <option value="reply">reply</option>
+            <option value="recall">recall</option>
+            <option value="sendback">sendback</option>
+            <option value="card">card</option>
+            <option value="proactive">proactive</option>
+            <option value="state">state</option>
+          </select></label>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>时间</th><th>来源</th><th>会话</th><th>类型</th><th>摘要</th></tr>
+        </thead>
+        <tbody id="eventBody"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    let paused = false;
+    const knownChatIds = new Set();
+
+    function badge(text, cls) {
+      const s = document.createElement('span');
+      s.className = `badge ${cls || ''}`.trim();
+      s.textContent = text;
+      return s;
+    }
+
+    function addLine(parent, label, val) {
+      const row = document.createElement('div');
+      const strong = document.createElement('strong');
+      strong.textContent = `${label}：`;
+      row.appendChild(strong);
+      row.appendChild(document.createTextNode(val));
+      parent.appendChild(row);
+    }
+
+    function renderStatus(st) {
+      const ombBox = el('ombBox');
+      ombBox.replaceChildren();
+      const omb = st.openmausbot;
+      if (omb?.ok) {
+        ombBox.appendChild(badge(`在线 v${omb.version || '?'}`, 'ok'));
+        addLine(ombBox, '地址', omb.url || '-');
+        addLine(ombBox, '模式', omb.desktopManaged ? (omb.paired ? '桌面端（已配对）' : '桌面端（未配对）') : 'CLI 模式');
+        addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}`);
+      } else {
+        ombBox.appendChild(badge('OpenMausBot 离线', 'err'));
+        if (omb?.error) addLine(ombBox, '错误', omb.error);
+      }
+      if (st.bridge) {
+        addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}`);
+        addLine(ombBox, '连续对话粘性', st.bridge.stickyActive ? '激活中' : '未激活');
+        addLine(ombBox, '定时跨群纪要', `${st.bridge.scheduledSummaries ?? 0} 条规则`);
+        addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : '无');
+      }
+      if (st.context) {
+        addLine(ombBox, '内存上下文', `${st.context.chatCount} 会话 / ${st.context.totalMessages} 条消息`);
+      }
+
+      const policyBox = el('policyBox');
+      policyBox.replaceChildren();
+      const pol = st.chatPolicy;
+      if (pol) {
+        policyBox.appendChild(badge(pol.mode === 'self_only' ? '模式：仅自聊' : '模式：本人全局', pol.mode === 'self_only' ? 'off' : 'ok'));
+        if (pol.muted?.length) policyBox.appendChild(badge(`已静音 ${pol.muted.length}`, 'err'));
+        if (pol.allowed?.length) policyBox.appendChild(badge(`运行期放行 ${pol.allowed.length}`, 'ok'));
+      }
+
+      const cBody = el('chatBody');
+      cBody.replaceChildren();
+      const chats = st.chats || [];
+      if (!chats.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6;
+        td.textContent = '暂无已知会话记录。';
+        tr.appendChild(td);
+        cBody.appendChild(tr);
+      } else {
+        for (const c of chats) {
+          knownChatIds.add(c.id);
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td');
+          td1.textContent = c.name || c.id;
+          const td2 = document.createElement('td');
+          const cIdCode = document.createElement('code');
+          cIdCode.textContent = c.id;
+          td2.appendChild(cIdCode);
+          const td3 = document.createElement('td');
+          td3.textContent = c.type || '-';
+          const td4 = document.createElement('td');
+          td4.appendChild(badge(c.allowed ? '允许' : (c.muted ? '已静音' : '禁止'), c.allowed ? 'ok' : 'err'));
+          const td5 = document.createElement('td');
+          td5.textContent = `${c.cachedMessages ?? 0} 条`;
+          const td6 = document.createElement('td');
+          const thrTxt = (c.threads || []).map((t) => `${t.botName}:${String(t.threadId).slice(0, 8)}`).join(', ');
+          td6.textContent = thrTxt || '-';
+          tr.append(td1, td2, td3, td4, td5, td6);
+          cBody.appendChild(tr);
+        }
+      }
+
+      const sBody = el('schedBody');
+      sBody.replaceChildren();
+      const scheds = st.scheduledSummaries || [];
+      if (!scheds.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6;
+        td.textContent = '暂无定时跨群纪要规则（可在自聊发送 `@bot schedule add <群名> <HH:MM>` 添加）。';
+        tr.appendChild(td);
+        sBody.appendChild(tr);
+      } else {
+        for (const s of scheds) {
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td');
+          td1.textContent = s.chatName || s.chatId;
+          const td2 = document.createElement('td');
+          const sCode = document.createElement('code');
+          sCode.textContent = s.chatId;
+          td2.appendChild(sCode);
+          const td3 = document.createElement('td');
+          td3.textContent = s.time || '-';
+          const td4 = document.createElement('td');
+          td4.appendChild(badge(s.enabled === false ? '暂停' : '启用', s.enabled === false ? 'off' : 'ok'));
+          const td5 = document.createElement('td');
+          td5.textContent = s.focus || '-';
+          const td6 = document.createElement('td');
+          td6.textContent = s.lastRunDate || '-';
+          tr.append(td1, td2, td3, td4, td5, td6);
+          sBody.appendChild(tr);
+        }
+      }
+
+      const chBox = el('channelBox');
+      chBox.replaceChildren();
+      const ch = st.channel || {};
+      chBox.appendChild(badge(ch.name || st.transport || '-', ch.status?.connected === false ? 'err' : 'ok'));
+      addLine(chBox, 'selfChatId', ch.status?.selfChatId || '尚未学习');
+      if (ch.status?.reconnectAttempts) addLine(chBox, '重连次数', String(ch.status.reconnectAttempts));
+      if (ch.status?.lastError) addLine(chBox, '最近错误', ch.status.lastError);
+      const capsWrap = document.createElement('div');
+      capsWrap.style.marginTop = '6px';
+      const caps = ch.capabilities || {};
+      for (const [k, v] of Object.entries(caps)) {
+        const txt = typeof v === 'boolean' ? `${k}:${v ? 'on' : 'off'}` : `${k}:${v}`;
+        capsWrap.appendChild(badge(txt, v ? 'ok' : 'off'));
+      }
+      chBox.appendChild(capsWrap);
+
+      const pBody = el('pluginBody');
+      pBody.replaceChildren();
+      for (const p of (st.plugins || [])) {
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td');
+        td1.textContent = p.name;
+        const td2 = document.createElement('td');
+        td2.textContent = p.kind;
+        const td3 = document.createElement('td');
+        td3.appendChild(badge(p.active ? 'active' : 'inactive', p.active ? 'ok' : 'off'));
+        const td4 = document.createElement('td');
+        td4.textContent = (p.provides || []).join(', ') || '-';
+        const td5 = document.createElement('td');
+        td5.textContent = (p.inject || []).join(', ') || '-';
+        const td6 = document.createElement('td');
+        const code = document.createElement('code');
+        code.textContent = p.status ? JSON.stringify(p.status) : '-';
+        td6.appendChild(code);
+        tr.append(td1, td2, td3, td4, td5, td6);
+        pBody.appendChild(tr);
+      }
+    }
+
+    function syncChatFilter(events) {
+      const sel = el('chatFilter');
+      const cur = sel.value;
+      for (const ev of events) if (ev.chatId) knownChatIds.add(ev.chatId);
+      const opts = [''];
+      for (const id of knownChatIds) if (id) opts.push(id);
+      if (sel.options.length !== opts.length) {
+        sel.replaceChildren();
+        for (const val of opts) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = val || '全部会话';
+          sel.appendChild(opt);
+        }
+        sel.value = opts.includes(cur) ? cur : '';
+      }
+    }
+
+    function renderEvents(data) {
+      const eBody = el('eventBody');
+      eBody.replaceChildren();
+      const list = data.events || [];
+      syncChatFilter(list);
+      if (!list.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.textContent = '暂无匹配的收发事件。';
+        tr.appendChild(td);
+        eBody.appendChild(tr);
+        return;
+      }
+      for (const ev of list) {
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td');
+        td1.textContent = new Date(ev.ts).toLocaleTimeString();
+        const td2 = document.createElement('td');
+        td2.textContent = ev.source || '-';
+        const tdChat = document.createElement('td');
+        tdChat.textContent = ev.chatId || ev.chatType || '-';
+        const td3 = document.createElement('td');
+        td3.textContent = ev.type || '-';
+        const td4 = document.createElement('td');
+        td4.textContent = ev.summary || '-';
+        tr.append(td1, td2, tdChat, td3, td4);
+        eBody.appendChild(tr);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const params = new URLSearchParams();
+        if (el('chatFilter').value) params.set('chatId', el('chatFilter').value);
+        if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
+        if (el('typeFilter').value) params.set('type', el('typeFilter').value);
+        const qs = params.toString();
+        const [st, ev] = await Promise.all([
+          fetch('/api/status').then((r) => r.json()),
+          fetch(`/api/debug/events${qs ? `?${qs}` : ''}`).then((r) => r.json()),
+        ]);
+        renderStatus(st);
+        renderEvents(ev);
+        el('updatedAt').textContent = `最近更新：${new Date().toLocaleTimeString()}`;
+      } catch (e) {
+        el('updatedAt').textContent = `刷新失败：${e.message}`;
+      }
+    }
+
+    el('refreshBtn').addEventListener('click', refresh);
+    el('chatFilter').addEventListener('change', refresh);
+    el('sourceFilter').addEventListener('change', refresh);
+    el('typeFilter').addEventListener('change', refresh);
+    el('toggleBtn').addEventListener('click', () => {
+      paused = !paused;
+      el('toggleBtn').textContent = paused ? '恢复自动刷新' : '暂停自动刷新';
+    });
+
+    refresh();
+    setInterval(() => { if (!paused) refresh(); }, 3000);
+  </script>
+</body>
+</html>

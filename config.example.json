@@ -1,0 +1,71 @@
+{
+  "openmausbot": {
+    "url": "http://127.0.0.1:8799",
+    "timeoutMs": 15000,
+    "token": "",
+    "autoStart": true,
+    "cliComputerOff": true
+  },
+  "transport": "sim",
+  "channel": {
+    "use": "",
+    "options": {}
+  },
+  "ipc": {
+    "client": "./ipc-client.js",
+    "selfId": "<你在 IM 中的用户 id>",
+    "selfChatId": "",
+    "atAllCountsAsMention": false
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "selfChat": {
+    "trigger": "@bot",
+    "commandDevices": [],
+    "proactive": true,
+    "quietHours": {
+      "enabled": false,
+      "start": "22:00",
+      "end": "08:30"
+    },
+    "markdown": true,
+    "resultChars": 1500,
+    "softSplitChars": 2800,
+    "followUpWindowMs": 120000,
+    "hideChiefPrefix": true,
+    "imageBatchMs": 1500,
+    "fileRetentionDays": 7,
+    "sendRetries": 2,
+    "progressDelayMs": 12000,
+    "progressIntervalMs": 25000,
+    "maxProgressUpdates": 2,
+    "intermediateCoalesceMs": 700,
+    "maxIntermediateBubbles": 2,
+    "outPrefix": ""
+  },
+  "chats": {
+    "mode": "owner_everywhere",
+    "enabledTypes": ["self", "group", "direct"],
+    "allowChatIds": [],
+    "denyChatIds": [],
+    "triggerAliases": [],
+    "contextWindow": 15,
+    "contextMaxMessagesPerChat": 120,
+    "contextTtlMs": 86400000,
+    "injectRecentContext": true,
+    "isolateThreadsByChat": true,
+    "externalSilentProgress": true,
+    "routeControlsToSelf": true,
+    "privateFlag": true,
+    "externalSanitizeMentions": "all",
+    "recentAttachmentWindowMs": 120000,
+    "maxAutoAttachments": 4,
+    "autoCompactThreshold": 0.92,
+    "scheduledSummaries": [],
+    "maxQuotedSnippetChars": 800,
+    "maxRecentMessageChars": 280
+  },
+  "dataDir": "./data"
+}

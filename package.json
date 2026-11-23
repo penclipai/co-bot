@@ -1,0 +1,27 @@
+{
+  "name": "co-bot",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "co-bot：跨平台 IM 手机自聊 ↔ OpenMausBot 桥接网关（npm install 自动安装 OpenMausBot CLI）",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "openmausbot": "^0.1.173"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "sim": "node src/index.js --transport sim",
+    "daemon": "node scripts/daemon.js",
+    "restart": "node scripts/daemon.js restart",
+    "stop": "node scripts/daemon.js stop",
+    "status": "node scripts/daemon.js status",
+    "omb": "node scripts/omb.js",
+    "pair": "node scripts/pair.js",
+    "check": "node scripts/check.js",
+    "channel:test": "node scripts/channel-test.js",
+    "ipc:smoke": "node scripts/ipc-smoke.js",
+    "test": "node --test \"test/*.test.js\""
+  }
+}
