@@ -23,11 +23,8 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Run unit & integration tests
-        run: npm test
-
-      - name: Validate channel plugin contract
-        run: npm run channel:test -- --dry
+      - name: Run full verification (lint, tests, channel contract)
+        run: npm run verify
 
       - name: Preview autostart service spec
         run: node scripts/daemon.js install-service --dry

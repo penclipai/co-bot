@@ -1,6 +1,6 @@
 {
   "name": "co-bot",
-  "version": "0.4.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "co-bot：跨平台 IM 手机自聊 ↔ OpenMausBot 桥接网关（npm install 自动安装 OpenMausBot CLI）",
@@ -19,10 +19,17 @@
     "status": "node scripts/daemon.js status",
     "omb": "node scripts/omb.js",
     "pair": "node scripts/pair.js",
-    "setup": "node scripts/setup.js",
     "check": "node scripts/check.js",
     "channel:test": "node scripts/channel-test.js",
-    "ipc:smoke": "node scripts/ipc-smoke.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "verify": "npm run lint && npm test && npm run channel:test -- --dry",
     "test": "node --test \"test/*.test.js\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^6.0.1",
+    "eslint": "^10.15.0",
+    "globals": "^17.14.0"
   }
 }

@@ -28,6 +28,7 @@
    npm start              # 仅前台运行 co-bot（Web 自聊模拟器 http://127.0.0.1:8787/sim）
    npm run lint           # 运行 ESLint 规范检查（含 1000 行上限校验）
    npm run lint:fix       # 自动修复可修复的格式问题
+   npm run verify         # 一键全量校验（lint + 单元测试 + 通道契约检测）
    npm test               # 运行单元测试（node --test）
    ```
 
