@@ -8,7 +8,7 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "openmausbot": "^0.1.173"
+    "openmausbot": "^0.1.177"
   },
   "scripts": {
     "start": "node src/index.js",
