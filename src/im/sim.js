@@ -34,11 +34,12 @@ function chatMetaOf(chatId) {
  * 网页自聊模拟器（本地浏览器访问 / 或 /sim），实现与 IpcTransport 相同的 Transport 契约。
  */
 export class WebSimTransport {
-  constructor({ web, filesDir, historyFile, fileRetentionDays = 7 }) {
+  constructor({ web, filesDir, historyFile, fileRetentionDays = 7, botName = 'co-bot' }) {
     this.web = web;
     this.filesDir = filesDir;
     this.historyFile = historyFile === undefined ? path.join(path.dirname(filesDir), 'sim-history.json') : historyFile;
     this.fileRetentionDays = Number(fileRetentionDays ?? 7);
+    this.botName = String(botName || 'co-bot').trim() || 'co-bot';
     this.files = new Map();
     this.selfChatId = 'self';
     this.history = [];
@@ -232,7 +233,7 @@ export class WebSimTransport {
       chatName: chat.name,
       from: 'bot',
       senderId: 'bot',
-      senderName: 'MausBot',
+      senderName: this.botName,
       isSelf: true,
       text,
       ts: Date.now(),
@@ -270,7 +271,7 @@ export class WebSimTransport {
       chatName: chat.name,
       from: 'bot',
       senderId: 'bot',
-      senderName: 'MausBot',
+      senderName: this.botName,
       isSelf: true,
       text: '',
       file: this.#card(file),

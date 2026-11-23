@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, validateConfig, APP_ROOT } from '../src/config.js';
 import { OpenMausBotClient } from '../src/openmausbot/client.js';
-import { GROK_MOBILE_PROFILE } from '../src/openmausbot/persona.js';
+import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE } from '../src/openmausbot/persona.js';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.js';
 import { probeOpenMausBot } from '../src/plugins/openmausbot.js';
 import { runChannelContractTest } from './channel-test.js';
@@ -153,12 +153,17 @@ if (probe) {
 
     if (applyStyle && chief) {
       const hasSoul = Boolean(String(chief.soul ?? '').trim());
-      if (hasSoul && chief.replyStyle === GROK_MOBILE_PROFILE.replyStyle && !forceStyle) {
-        console.log(`✓ 主 Bot「${chief.name}」已启用手机私聊风格（${chief.replyStyle}）`);
+      if (hasSoul && chief.replyStyle === COBOT_COORDINATOR_PROFILE.replyStyle && !forceStyle) {
+        console.log(`✓ 主 Bot「${chief.name}」已启用协调助手风格（${chief.replyStyle}）`);
       } else if (!hasSoul || forceStyle) {
         try {
-          await getPatchClient().patchBot(chief.id, GROK_MOBILE_PROFILE);
-          console.log(`✓ 已为主 Bot「${chief.name}」启用手机私聊风格（conversational + Grok 式精炼人格）`);
+          const patch = {
+            ...COBOT_COORDINATOR_PROFILE,
+            ...(/^(open)?mausbot$/i.test(String(chief.name || '').trim()) ? { name: cfg.selfChat?.botName || 'co-bot' } : {}),
+            ...(!String(chief.title || '').trim() ? { title: COBOT_COORDINATOR_TITLE } : {}),
+          };
+          await getPatchClient().patchBot(chief.id, patch);
+          console.log(`✓ 已为主 Bot「${patch.name || chief.name}」启用协调助手风格（conversational + co-bot 精炼人格）`);
         } catch (e) {
           console.error(`✗ 应用私聊风格失败：${e.message}`);
           fails++;

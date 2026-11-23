@@ -21,6 +21,7 @@ export const channelSimPlugin = {
       web,
       filesDir: opts.filesDir ?? path.join(cfg.dataDir, 'sim-files'),
       fileRetentionDays: opts.fileRetentionDays ?? cfg.selfChat?.fileRetentionDays ?? 7,
+      botName: opts.botName ?? cfg.selfChat?.botName ?? 'co-bot',
       ...(opts.historyFile !== undefined ? { historyFile: opts.historyFile } : {}),
     });
     attachTransportTelemetry(transport, (ev, data) => ctx.emit(ev, data), 'sim');

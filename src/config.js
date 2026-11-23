@@ -12,6 +12,7 @@ export const defaults = {
     token: '',
     autoStart: true,
     cliComputerOff: true,
+    syncChiefIdentity: true,
   },
   transport: 'sim', // 'sim'（网页自聊模拟器）| 'ipc'（真机 IM IPC 自聊）
   channel: {
@@ -53,6 +54,7 @@ export const defaults = {
     turnStallMs: 180_000,
     stateSaveDebounceMs: 150,
     outPrefix: '',
+    botName: 'co-bot',
   },
   chats: {
     mode: 'owner_everywhere',
@@ -140,6 +142,16 @@ export function validateConfig(rawConfig = {}) {
       }
     } catch {
       errors.push(`openmausbot.url 不是合法 URL：「${rawConfig.openmausbot.url}」`);
+    }
+  }
+
+  if (rawConfig.openmausbot?.syncChiefIdentity !== undefined && typeof rawConfig.openmausbot.syncChiefIdentity !== 'boolean') {
+    errors.push(`openmausbot.syncChiefIdentity 必须为布尔值，当前为「${rawConfig.openmausbot.syncChiefIdentity}」`);
+  }
+
+  if (rawConfig.selfChat?.botName !== undefined) {
+    if (typeof rawConfig.selfChat.botName !== 'string' || !rawConfig.selfChat.botName.trim()) {
+      errors.push('selfChat.botName 必须为非空字符串');
     }
   }
 
@@ -255,6 +267,8 @@ export function loadConfig(argv = process.argv.slice(2), explicitFile) {
 
   cfg.openmausbot.url = String(cfg.openmausbot.url || defaults.openmausbot.url).replace(/\/+$/, '');
   cfg.openmausbot.token = String(flag('--omb-token') || cfg.openmausbot.token || process.env.OMB_TOKEN || '').trim();
+  cfg.openmausbot.syncChiefIdentity = cfg.openmausbot.syncChiefIdentity !== false;
+  cfg.selfChat.botName = String(cfg.selfChat.botName || defaults.selfChat.botName).trim() || 'co-bot';
   cfg.dataDir = path.resolve(base, cfg.dataDir);
   if (cfg.ipc.client) cfg.ipc.client = path.resolve(base, cfg.ipc.client);
   return cfg;

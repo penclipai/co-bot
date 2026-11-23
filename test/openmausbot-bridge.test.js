@@ -625,7 +625,8 @@ test('openmausbot bridge: throttled activity milestone, approval ok/no, bots and
     // 1. @bot bots
     await transport.emitUser('@bot bots');
     await until(() => sent.length === 1);
-    assert.match(sent[0].text, /MausBot/);
+    assert.match(sent[0].text, /co-bot/);
+    assert.equal(/mausbot/i.test(sent[0].text), false);
 
     // 2. 长任务期间先推 activity 进展，再推审批卡片，手机回复 ok 放行并拿到结果（单 Bot 不加 [MausBot] 前缀）
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
@@ -827,7 +828,7 @@ test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bo
     omb.broadcast({ kind: 'message', threadId: 't2', message: p2 });
     omb.broadcast({ kind: 'message.patch', threadId: 't2', message: p2 });
     await until(() => sent.length === 3);
-    assert.match(sent[2].text, /^🔔 \*\*\[Ops\]\*\*[\s\S]*CI 构建已修复通过/);
+    assert.match(sent[2].text, /^🔔 \*\*Ops 通知\*\*[\s\S]*CI 构建已修复通过/);
     await new Promise((r) => setTimeout(r, 40));
     assert.equal(sent.length, 3, '同一主动消息 id 不得重复推送');
 
@@ -966,7 +967,7 @@ test('openmausbot bridge: unpaired desktop mode surfaces helpful Chinese pairing
     await bridge.start();
     await transport.emitUser('@bot hello');
     await until(() => sent.length === 1);
-    assert.match(sent[0].text, /发送给 \*\*MausBot\*\* 失败/);
+    assert.match(sent[0].text, /发送给 \*\*co-bot\*\* 失败/);
     assert.match(sent[0].text, /npm run pair --/);
   } finally {
     await bridge.stop();
@@ -1207,7 +1208,7 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
     const progMsgs = sent.filter((m) => m.text.includes('正在执行命令'));
     assert.equal(progMsgs.length, 1, '相同工具活动进度不得重复刷屏');
     assert.equal(progMsgs[0].text.includes('running a command'), false, '通用英文 spoken 应被静默抑制');
-    assert.match(sent.at(-1).text, /^\*\*\[MausBot\]\*\*/, 'hideChiefPrefix=false 时应保留主 Bot 前缀');
+    assert.match(sent.at(-1).text, /^\*\*\[co-bot\]\*\*/, 'hideChiefPrefix=false 时应保留主 Bot 前缀');
 
     // 2. 中等长回复（90 < len <= 170）走软拆两段，不发 .md；超过 softSplitChars 走截断+.md
     const beforeSoft = sent.length;
@@ -1434,14 +1435,14 @@ test('UX Batch 2: busy queue awareness, @bot steer/cancel, queued SSE drain, @bo
     assert.equal(omb.tasksSelected.at(-1)?.threadId, 't_old');
     assert.equal(bridge.status().focus?.threadId, 't_old');
 
-    // 3. @bot style grok / default 调 patchBot 更新 replyStyle + soul
+    // 3. @bot style cobot/grok / default 调 patchBot 更新 replyStyle + soul
     await transport.emitUser('@bot style grok');
-    await until(() => sent.some((m) => m.text.includes('已为 **MausBot** 应用手机私聊风格')));
+    await until(() => sent.some((m) => m.text.includes('已为 **co-bot** 应用协调助手风格')));
     assert.equal(omb.bots[0].replyStyle, 'conversational');
-    assert.ok(omb.bots[0].soul.includes('Grok Bot'));
+    assert.match(omb.bots[0].soul, /co-bot（Coordinator Bot）/);
 
     await transport.emitUser('@bot style default');
-    await until(() => sent.some((m) => m.text.includes('恢复为 OpenMausBot 默认风格')));
+    await until(() => sent.some((m) => m.text.includes('恢复为默认风格')));
     assert.equal(omb.bots[0].replyStyle, 'default');
     assert.equal(omb.bots[0].soul, '');
 
@@ -1668,7 +1669,7 @@ test('P1 commands: @bot context & >80% warning, @bot search jump, @bot export, @
     await transport.emitUser('@bot memory');
     await until(() => sent.some((m) => m.text.includes('回复简短优先') && m.text.includes('projects.md')));
     await transport.emitUser('@bot 记住 用中文总结代码变更');
-    await until(() => sent.some((m) => m.text.includes('已记入 **MausBot** 的长期记忆')));
+    await until(() => sent.some((m) => m.text.includes('已记入 **co-bot** 的长期记忆')));
     assert.match(omb.memoryState.get('b1').text, /用中文总结代码变更/);
 
     // 6. @bot export 导出当前会话为 .md 附件
@@ -1680,7 +1681,7 @@ test('P1 commands: @bot context & >80% warning, @bot search jump, @bot export, @
     await transport.emitUser('@bot search 支付回调');
     await until(() => sent.some((m) => m.text.includes('支付排障历史')));
     await transport.emitUser('1');
-    await until(() => sent.some((m) => m.text.includes('已切换到 **MausBot** 的会话「支付排障历史」')));
+    await until(() => sent.some((m) => m.text.includes('已切换到 **co-bot** 的会话「支付排障历史」')));
     assert.equal(omb.tasksSelected.at(-1)?.threadId, 't_hist');
   } finally {
     await bridge.stop();

@@ -66,7 +66,7 @@ export function buildMentionMatcher(trigger = '@bot', aliases = [], knownNames =
   );
   const isDefaultName = (name) => {
     const low = String(name ?? '').trim().toLowerCase();
-    return /^(bot|ai|主bot)$/i.test(low) || (bareTrigger && low === bareTrigger) || aliasSet.has(low);
+    return /^(bot|ai|主bot|co-bot|cobot)$/i.test(low) || (bareTrigger && low === bareTrigger) || aliasSet.has(low);
   };
   const isKnownBotOrGroup = (name) => {
     const low = String(name ?? '').trim().toLowerCase();

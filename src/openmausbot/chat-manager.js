@@ -112,7 +112,10 @@ export async function compactExternalChat(bridge, targetChat, preferredBot = nul
   for (const entry of picked) {
     await bridge.client.compact(entry.botId, entry.threadId);
     bridge.contextWarnedThreads.delete(entry.threadId);
-    compacted.push({ botId: entry.botId, botName: entry.botName || 'MausBot', threadId: entry.threadId });
+    const shownName = typeof bridge.displayBotName === 'function'
+      ? bridge.displayBotName(entry.botId, entry.botName)
+      : (entry.botName || bridge.botName || 'co-bot');
+    compacted.push({ botId: entry.botId, botName: shownName, threadId: entry.threadId });
   }
   return compacted;
 }

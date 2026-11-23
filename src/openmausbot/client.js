@@ -178,14 +178,14 @@ export class OpenMausBotClient {
     return { bots: Array.isArray(data.bots) ? data.bots : [], groups: Array.isArray(data.groups) ? data.groups : [] };
   }
 
-  /** 解析 @提及 的目标 Bot；默认（@bot / @ai / @主bot）返回 chiefOfStaff 或第一个可见 Bot。 */
+  /** 解析 @提及 的目标 Bot；默认（@bot / @ai / @主bot / @co-bot）返回 chiefOfStaff 或第一个可见 Bot。 */
   async resolveBot(mention = '') {
     const { bots } = await this.listBots();
     const visible = bots.filter((b) => !b.hidden);
     const pool = visible.length ? visible : bots;
     if (!pool.length) return null;
     const q = String(mention ?? '').trim();
-    if (!q || /^(bot|ai|主bot|default|chief)$/i.test(q)) {
+    if (!q || /^(bot|ai|主bot|co-bot|cobot|default|chief)$/i.test(q)) {
       return pool.find((b) => b.chiefOfStaff) ?? pool[0];
     }
     return matchByNameOrId(pool, q);

@@ -65,12 +65,14 @@ export const openmausbotPlugin = {
     }
 
     const imContext = ctx.has('imContext') ? ctx.get('imContext') : null;
+    const brandName = String(cfg.selfChat?.botName || 'co-bot').trim() || 'co-bot';
     const bridge = new OpenMausBotBridge({
       client,
       transport: channel,
       dataDir: cfg.dataDir,
       imContext,
       chats: cfg.chats,
+      syncChiefIdentity: cfg.openmausbot.syncChiefIdentity !== false,
       autoHealOmb: opts.autoHealOmb !== undefined
         ? opts.autoHealOmb
         : ((cfg.openmausbot.autoStart !== false && isLoopbackUrl(cfg.openmausbot.url))
@@ -109,6 +111,7 @@ export const openmausbotPlugin = {
             bots: p.visible.map((x) => ({
               id: x.id,
               name: x.name,
+              displayName: x.chiefOfStaff ? brandName : (/^(open)?mausbot$/i.test(String(x.name || '').trim()) ? brandName : x.name),
               chiefOfStaff: !!x.chiefOfStaff,
               busy: !!x.busy,
               activity: x.activity ?? 'idle',

@@ -86,7 +86,7 @@ export function formatActivity(msg) {
 export function formatOmbError(e) {
   const msg = e?.message || String(e);
   if (e?.status === 401 || e?.status === 403 || /desktop app|paired device|expired|revoked/i.test(msg)) {
-    return `${msg}\n💡 OpenMausBot 桌面端需要配对 Token：运行 \`npm run pair\`（桌面端一键允许）或 \`npm run pair -- <12位配对码>\`，完成后重启 co-bot。`;
+    return `${msg}\n💡 后台服务需要配对 Token：运行 \`npm run pair\`（桌面端一键允许）或 \`npm run pair -- <12位配对码>\`，完成后重启 co-bot。`;
   }
   return msg;
 }
@@ -164,24 +164,24 @@ export function formatCardPrompt(_botName, msg, whoPrefix) {
   }
   if (msg.secret) {
     return {
-      text: `🔐 ${head}需要补充凭据「${msg.secret.label || msg.secret.target || '密钥'}」，请到 OpenMausBot 界面输入；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `🔐 ${head}需要补充凭据「${msg.secret.label || msg.secret.target || '密钥'}」，请到管理后台输入；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }],
       info: { cardKind: 'secret' },
     };
   }
   if (msg.connector) {
     return {
-      text: `🔌 ${head}需要授权连接器「${msg.connector.label || msg.connector.slug || ''}」，请到 OpenMausBot 界面完成；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `🔌 ${head}需要授权连接器「${msg.connector.label || msg.connector.slug || ''}」，请到管理后台完成；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }],
       info: { cardKind: 'connector' },
     };
   }
   if (msg.signIn) {
     return {
-      text: `🔑 ${head}需要完成登录验证，请到 OpenMausBot 界面操作；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `🔑 ${head}需要完成登录验证，请到管理后台操作；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }],
       info: { cardKind: 'signIn' },
     };
   }
-  return { text: `⏸️ ${head}需要你在 OpenMausBot 界面确认下一步操作。`, actions: [], info: null };
+  return { text: `⏸️ ${head}需要你在管理后台确认下一步操作。`, actions: [], info: null };
 }

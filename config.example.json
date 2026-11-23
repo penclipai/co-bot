@@ -4,7 +4,8 @@
     "timeoutMs": 15000,
     "token": "",
     "autoStart": true,
-    "cliComputerOff": true
+    "cliComputerOff": true,
+    "syncChiefIdentity": true
   },
   "transport": "sim",
   "channel": {
@@ -44,7 +45,8 @@
     "intermediateCoalesceMs": 700,
     "maxIntermediateBubbles": 2,
     "turnStallMs": 180000,
-    "outPrefix": ""
+    "outPrefix": "",
+    "botName": "co-bot"
   },
   "chats": {
     "mode": "owner_everywhere",

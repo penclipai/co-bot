@@ -177,14 +177,15 @@ export function createTurnTracker(
       const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
         ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
         : '';
-      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${botName}` : bridge.trigger;
+      const shownName = bridge.displayBotName(botId, botName, { isGroup });
+      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${shownName}` : bridge.trigger;
       bridge.emitTelemetry?.('turn_stalled', {
-        botName,
+        botName: shownName,
         chatId: ctrlChat || null,
         summary: `elapsed=${elapsedSec}s thread=${threadId}`,
       });
       enqueueEmit(() => bridge.say(
-        `${ctrlBanner}⏳ **${botName}** 已持续无新进展 ${elapsedSec} 秒（仍在后台运行），如需中断可回复 \`${cmdTarget} stop\`。`,
+        `${ctrlBanner}⏳ **${shownName}** 已持续无新进展 ${elapsedSec} 秒（仍在后台运行），如需中断可回复 \`${cmdTarget} stop\`。`,
         { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
         null,
         [{ label: '停止任务', text: `${cmdTarget} stop`, kind: 'danger' }],
@@ -270,7 +271,8 @@ export function createTurnTracker(
       const res = await bridge.client.getMessages(threadId, 25);
       messages = Array.isArray(res.messages) ? res.messages : [];
     } catch (e) {
-      await bridge.say(`${ctrlBanner}⚠️ 获取 **${botName}** 回复失败：${formatOmbError(e)}`, ctrlChat ? { targetChatId: ctrlChat } : null);
+      const shownName = bridge.displayBotName(botId, botName, { isGroup });
+      await bridge.say(`${ctrlBanner}⚠️ 获取 **${shownName}** 回复失败：${formatOmbError(e)}`, ctrlChat ? { targetChatId: ctrlChat } : null);
       return;
     }
 
@@ -320,7 +322,11 @@ export function createTurnTracker(
       }
       const failed = matched.find((m) => m.turnFailed || m.error);
       if (failed) {
-        const who = bridge.botPrefix(botId, botName, { isGroup, speakerName: isGroup ? (failed.from?.name || '') : '' });
+        const who = bridge.botPrefix(botId, botName, {
+          isGroup,
+          speakerName: isGroup ? (failed.from?.name || '') : '',
+          speakerBotId: isGroup ? (failed.from?.botId || null) : null,
+        });
         await bridge.say(`${ctrlBanner}❌ ${who ? `${who} ` : ''}${failed.error || '本轮执行失败'}`, {
           botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
         });

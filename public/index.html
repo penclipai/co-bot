@@ -99,8 +99,8 @@
 <body>
 <div class="app">
   <header>
-    <a class="back" id="ombLink" href="http://127.0.0.1:8799/" target="_blank" rel="noopener" title="打开 OpenMausBot 界面"><b>‹</b>MausBot</a>
-    <h1><span id="chatTitle">自聊</span><small id="sub">OpenMausBot 桥接</small></h1>
+    <a class="back" id="ombLink" href="http://127.0.0.1:8799/" target="_blank" rel="noopener" title="打开后台控制台"><b>‹</b>后台</a>
+    <h1><span id="chatTitle">自聊</span><small id="sub">co-bot 协调助手</small></h1>
     <span class="more"><button class="dev" id="devBtn" type="button" title="切换发送设备标识">手机发</button><i class="dot" id="dot" title="连接状态"></i></span>
   </header>
   <div class="chat-tabs" id="chatTabs">
@@ -135,7 +135,7 @@
   const allMsgs = [];
   const seen = new Map();
   const unread = { self: 0, grp_dev: 0, dm_alice: 0 };
-  let activeChat = 'self', sender = 'me', replyTo = null, lastTs = 0, device = 'mobile';
+  let activeChat = 'self', sender = 'me', replyTo = null, lastTs = 0, device = 'mobile', brandName = 'co-bot';
   const DEV = { mobile: '手机发', desktop: '电脑发' };
 
   const pad = (n) => String(n).padStart(2, '0');
@@ -151,7 +151,7 @@
     d.className = 'empty';
     d.id = 'empty';
     if (activeChat === 'self') {
-      d.innerHTML = '这里模拟 IM 手机端自聊 → OpenMausBot（类 Grok 私聊体验）。<br><br>试试：<b>@bot 你好</b> · <b>@bot style grok</b>（启用私聊风格）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群效率：<b>@bot find &lt;词&gt;</b> · <b>@bot schedule</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b><br>常用效率：<b>@bot model</b> · <b>@bot context</b> · <b>@bot search</b> · <b>@bot export</b> · <b>@bot routines</b> · <b>@bot memory</b><br>会话与控制：<b>@bot new</b> · <b>@bot tasks</b> · <b>@bot compact [群]</b> · <b>@bot steer</b> · <b>@bot stop</b><br><br>审批与选项卡支持点快捷按钮，或直接回复 <b>ok / always / no / 1 / 2</b>。<br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
+      d.innerHTML = '这里模拟 IM 手机端自聊 → co-bot（Coordinator Bot 个人协调助手）。<br><br>试试：<b>@bot 你好</b> · <b>@bot style cobot</b>（启用协调助手风格）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群效率：<b>@bot find &lt;词&gt;</b> · <b>@bot schedule</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b><br>常用效率：<b>@bot model</b> · <b>@bot context</b> · <b>@bot search</b> · <b>@bot export</b> · <b>@bot routines</b> · <b>@bot memory</b><br>会话与控制：<b>@bot new</b> · <b>@bot tasks</b> · <b>@bot compact [群]</b> · <b>@bot steer</b> · <b>@bot stop</b><br><br>审批与选项卡支持点快捷按钮，或直接回复 <b>ok / always / no / 1 / 2</b>。<br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
     } else {
       d.innerHTML = `这是模拟<b>${CHATS[activeChat].name}</b>（群聊 / 私聊场景）。<br><br>1. 点击输入框左侧 <b>我 / Alice / Bob</b> 切换身份发送或<b>撤回</b>消息/文件，构建多轮上下文；<br>2. 点任意气泡上的 <b>引用</b>，再切回 <b>我</b> 发送 <b>@bot 怎么看？</b>（原地回复）；<br>3. 发送 <b>@bot! 总结上面讨论</b> 或 <b>@bot -p ...</b> 可将结果私密发回「自聊」，确认后再 <b>@bot sendback</b> 回发。`;
     }
@@ -272,7 +272,7 @@
     }
     const dv = document.createElement('div');
     dv.className = 'dev';
-    dv.textContent = msg.from === 'bot' ? `${msg.device} · OpenMausBot` : (msg.senderName && rowKind === 'other' ? msg.senderName : msg.device);
+    dv.textContent = msg.from === 'bot' ? `${msg.device} · ${brandName}` : (msg.senderName && rowKind === 'other' ? msg.senderName : msg.device);
     col.append(dv);
 
     const r = document.createElement('button');
@@ -428,22 +428,24 @@
       const s = await fetch('/api/status').then((r) => r.json());
       const omb = s.openmausbot;
       const br = s.bridge;
+      if (br?.botName) brandName = br.botName;
       if (omb?.url) $('#ombLink').href = omb.url;
       if (omb?.ok) {
         const chief = omb.bots.find((b) => b.chiefOfStaff) || omb.bots[0];
-        const focusName = br?.focus?.botName || chief?.name || 'MausBot';
+        const chiefDisplay = chief?.displayName || brandName;
+        const focusName = br?.focus?.botName || chiefDisplay;
         const busyBot = omb.bots.find((b) => b.id === br?.focus?.botId && b.busy) || omb.bots.find((b) => b.busy);
         if (br?.sseAuthFailed || omb.authError) {
-          $('#sub').textContent = 'OpenMausBot 认证失效（请运行 npm run pair）';
+          $('#sub').textContent = '后台服务认证失效（请运行 npm run pair）';
         } else if (omb.desktopManaged && !omb.paired) {
-          $('#sub').textContent = `OpenMausBot v${omb.version || '?'} · 未配对（运行 npm run pair）`;
+          $('#sub').textContent = `${brandName} · 未配对（运行 npm run pair）`;
         } else if (busyBot || (br?.activeTurns ?? 0) > 0) {
-          const whoBusy = busyBot?.name || focusName;
+          const whoBusy = busyBot ? (busyBot.displayName || busyBot.name) : focusName;
           const qText = (br?.queuedCount ?? 0) > 0 ? ` · 排队 ${br.queuedCount}` : '';
           $('#sub').textContent = `${whoBusy} 正在处理…${qText}`;
           box.placeholder = '输入继续补充，或发 @bot steer 插队…';
         } else if (activeChat !== 'self') {
-          $('#sub').textContent = `OpenMausBot v${omb.version || '?'} · @bot 原地回复 / @bot! 私聊`;
+          $('#sub').textContent = `${brandName} · @bot 原地回复 / @bot! 私聊`;
           box.placeholder = sender === 'me'
             ? '发 @bot … 或 @bot! 私密回自聊'
             : `以 ${SENDER_LABELS[sender]} 身份发言（仅用于构建群聊上下文）`;
@@ -451,11 +453,11 @@
           $('#sub').textContent = `连续对话中 · ${focusName}`;
           box.placeholder = '连续对话中，直接回复即可（# 开头只记笔记）';
         } else {
-          $('#sub').textContent = `OpenMausBot v${omb.version || '?'} · ${chief?.name || 'MausBot'}`;
+          $('#sub').textContent = `${brandName} · ${chiefDisplay}`;
           box.placeholder = '发 @bot …（支持 Ctrl+V 粘贴截图）';
         }
       } else if (omb?.error) {
-        $('#sub').textContent = '未连上 OpenMausBot';
+        $('#sub').textContent = '未连上后台服务';
       }
     } catch { /* ignore polling error */ }
   }

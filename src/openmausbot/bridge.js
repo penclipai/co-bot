@@ -7,6 +7,7 @@ import { formatAttachmentTag, messageNeedsInput } from './client.js';
 import { assemblePromptContext, ChatContextStore, sanitizeExternalMentions } from '../core/chat-context.js';
 import { extractCardInfo, fmtTokens, formatCardPrompt, formatOmbError, parseChoiceIndex } from './cards.js';
 import { botCommandTarget, buildHelpText, handleCommand } from './commands.js';
+import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE, LEGACY_GROK_SOUL_RE } from './persona.js';
 import {
   compactChatCtx,
   hasNonBotMention,
@@ -68,7 +69,7 @@ const MIME_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif
 const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
 /**
- * 极薄 IM <-> OpenMausBot 桥接器（类 Grok Bot 私聊体验）：
+ * 极薄 IM <-> OpenMausBot 桥接器（co-bot / Coordinator Bot 手机端协调助手体验）：
  *   - 主 Bot 1v1 干净私聊（默认省略名字前缀）、多 Bot 自由 @<BotName> 协同
  *   - 连续对话短时粘性（followUpWindowMs）+ 连续纯发图防抖合批 + 笔记前缀保护
  *   - 中间口语即时流式上屏 + 中文工具进度去噪 + 适中长回复软拆分两段
@@ -81,6 +82,8 @@ export class OpenMausBotBridge {
     transport,
     dataDir,
     trigger = '@bot',
+    botName = 'co-bot',
+    syncChiefIdentity = false,
     commandDevices = [],
     proactive = true,
     quietHours = { enabled: false, start: '22:00', end: '08:30' },
@@ -122,6 +125,10 @@ export class OpenMausBotBridge {
       autoHealOmb, autoHealCooldownMs, onTelemetry,
       markdown, outPrefix, imContext, transcribeAudio, now,
     });
+    this.botName = String(botName || 'co-bot').trim() || 'co-bot';
+    this.syncChiefIdentity = Boolean(syncChiefIdentity);
+    this.chiefIdentitySynced = false;
+    this.syncingChiefPromise = null;
     this.chats = {
       ...defaults.chats,
       ...(chats && typeof chats === 'object' ? chats : {}),
@@ -300,14 +307,40 @@ export class OpenMausBotBridge {
     );
   }
 
-  botPrefix(botId, botName, { proactive = false, isGroup = false, speakerName = '' } = {}) {
+  displayBotName(botId, rawName = '', { isGroup = false } = {}) {
+    if (isGroup) return String(rawName ?? '').trim() || this.botName;
+    const raw = String(rawName ?? '').trim();
+    if ((botId && this.chiefBotId && botId === this.chiefBotId) || !raw || /^(open)?mausbot$/i.test(raw)) {
+      return this.botName;
+    }
+    return raw;
+  }
+
+  getEffectiveTriggerAliases() {
+    const raw = Array.isArray(this.chats?.triggerAliases) ? this.chats.triggerAliases : [];
+    const out = [];
+    const seen = new Set();
+    for (const item of [...raw, this.botName]) {
+      const val = String(item ?? '').trim();
+      if (!val) continue;
+      const low = val.replace(/^@/, '').toLowerCase();
+      if (seen.has(low)) continue;
+      seen.add(low);
+      out.push(val);
+    }
+    return out;
+  }
+
+  botPrefix(botId, botName, { proactive = false, isGroup = false, speakerName = '', speakerBotId = null } = {}) {
+    const shown = this.displayBotName(botId, botName, { isGroup });
+    const shownSpeaker = speakerName ? this.displayBotName(speakerBotId, speakerName) : '';
     if (isGroup) {
-      return speakerName ? `**[${botName} · ${speakerName}]**` : `**[${botName}]**`;
+      return shownSpeaker ? `**[${shown} · ${shownSpeaker}]**` : `**[${shown}]**`;
     }
     if (!this.multiBotCache) return '';
-    if (proactive) return `**[${botName}]**`;
+    if (proactive) return `**[${shown}]**`;
     if (this.hideChiefPrefix && botId && botId === this.chiefBotId) return '';
-    return `**[${botName}]**`;
+    return `**[${shown}]**`;
   }
 
   status() {
@@ -325,7 +358,10 @@ export class OpenMausBotBridge {
       queuedCount,
       pendingCards: this.pendingCards.size,
       stickyActive: this.isStickyActive(),
-      focus: this.focus,
+      botName: this.botName,
+      focus: this.focus
+        ? { ...this.focus, botName: this.displayBotName(this.focus.botId, this.focus.botName, { isGroup: Boolean(this.focus.isGroup) }) }
+        : null,
       multiBot: this.multiBotCache,
       chatThreads: this.chatThreads.size,
       chatPolicy: this.getChatPolicy(),
@@ -356,7 +392,7 @@ export class OpenMausBotBridge {
       const turn = this.#trackTurn(meta);
       turn.startWatcher();
       this.emitTelemetry('turn_resumed', {
-        botName: meta.botName || 'MausBot',
+        botName: this.displayBotName(meta.botId, meta.botName, { isGroup: Boolean(meta.isGroup) }),
         chatId: meta.chatCtx?.originChatId || this.selfChat || null,
         summary: `thread=${meta.threadId}`,
       });
@@ -428,6 +464,50 @@ export class OpenMausBotBridge {
     await this.transport.stop?.();
   }
 
+  async syncChiefBotIdentity(bots = null) {
+    if (!this.syncChiefIdentity || this.chiefIdentitySynced || typeof this.client?.patchBot !== 'function') return false;
+    if (this.syncingChiefPromise) return this.syncingChiefPromise;
+    this.syncingChiefPromise = (async () => {
+      try {
+        const list = Array.isArray(bots) ? bots : ((await this.client.listBots())?.bots ?? []);
+        const visible = list.filter((b) => b && !b.hidden);
+        const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
+        if (!chief?.id) return false;
+        this.chiefBotId = chief.id;
+
+        const rawName = String(chief.name ?? '').trim();
+        const patch = {};
+        if ((!rawName || /^(open)?mausbot$/i.test(rawName)) && rawName !== this.botName) {
+          patch.name = this.botName;
+        }
+        if (!String(chief.title ?? '').trim()) {
+          patch.title = COBOT_COORDINATOR_TITLE;
+        }
+        const curSoul = String(chief.soul ?? '').trim();
+        if (!curSoul || LEGACY_GROK_SOUL_RE.test(curSoul)) {
+          Object.assign(patch, COBOT_COORDINATOR_PROFILE);
+        }
+        if (Object.keys(patch).length > 0) {
+          await this.withCliLoopbackFallback((c) => c.patchBot(chief.id, patch));
+          const updated = { ...chief, ...patch };
+          this.botById.set(chief.id, updated);
+          for (const [tid, entry] of this.botByThread) {
+            if (entry?.id === chief.id) this.botByThread.set(tid, { ...entry, ...patch });
+          }
+          console.log(`[co-bot] 已同步主 Bot 身份为 ${updated.name || this.botName}（${updated.title || COBOT_COORDINATOR_TITLE}）`);
+        }
+        this.chiefIdentitySynced = true;
+        return true;
+      } catch (e) {
+        if (e?.status === 400 || e?.status === 404) this.chiefIdentitySynced = true;
+        return false;
+      } finally {
+        this.syncingChiefPromise = null;
+      }
+    })();
+    return this.syncingChiefPromise;
+  }
+
   async refreshMultiBot() {
     try {
       const { bots = [], groups = [] } = await this.client.listBots();
@@ -450,6 +530,9 @@ export class OpenMausBotBridge {
       };
       indexEntities(bots, this.botById, this.botByThread, false);
       indexEntities(groups, this.groupById, this.groupByThread, true);
+      if (this.syncChiefIdentity && !this.chiefIdentitySynced && bots.length > 0) {
+        await this.syncChiefBotIdentity(bots);
+      }
       return bots;
     } catch {
       return [];
@@ -791,7 +874,7 @@ export class OpenMausBotBridge {
   }
 
   getKnownBotNames() {
-    const names = [this.trigger, ...(this.chats.triggerAliases || [])];
+    const names = [this.trigger, ...this.getEffectiveTriggerAliases()];
     for (const b of this.botById.values()) if (b?.name) names.push(b.name);
     for (const g of this.groupById.values()) if (g?.name) names.push(g.name);
     return names;
@@ -1056,12 +1139,13 @@ export class OpenMausBotBridge {
 
     // 2. 解析 @bot / @bot! / 句中 @bot / 结构化 mentions / @<BotName> / @<GroupName>、引用气泡、或自聊连续对话粘性窗口
     const knownNames = this.getKnownBotNames();
+    const triggerAliases = this.getEffectiveTriggerAliases();
     let targetBot = null;
     let bodyText = '';
     let replyToOmbId = null;
     let privateReply = false;
 
-    let parsed = parseStartMention(rawText, this.trigger, this.chats.triggerAliases, knownNames);
+    let parsed = parseStartMention(rawText, this.trigger, triggerAliases, knownNames);
     if (parsed) {
       const resolved = await this.#resolveBotTarget(parsed.mention, parsed.isDefault, ev);
       if (resolved.targetBot) {
@@ -1073,7 +1157,7 @@ export class OpenMausBotBridge {
       }
     }
     if (!parsed) {
-      const inlineParsed = parseInlineTriggerMention(rawText, this.trigger, this.chats.triggerAliases, knownNames);
+      const inlineParsed = parseInlineTriggerMention(rawText, this.trigger, triggerAliases, knownNames);
       if (inlineParsed) {
         const resolved = await this.#resolveBotTarget(inlineParsed.mention, inlineParsed.isDefault, ev);
         if (resolved.targetBot) {
@@ -1083,7 +1167,7 @@ export class OpenMausBotBridge {
       }
     }
     if (!parsed && Array.isArray(ev.mentions) && ev.mentions.length) {
-      const structParsed = parseStructuredBotMention(rawText, ev.mentions, this.trigger, this.chats.triggerAliases, knownNames);
+      const structParsed = parseStructuredBotMention(rawText, ev.mentions, this.trigger, triggerAliases, knownNames);
       if (structParsed) {
         const resolved = await this.#resolveBotTarget(structParsed.mention, structParsed.isDefault, ev);
         if (resolved.targetBot) {
@@ -1161,7 +1245,7 @@ export class OpenMausBotBridge {
 
     if (quotedRoute) {
       // 外部群里引用 Bot 回复但显式 @同事（未再 @bot），视作向同事交接/讨论，不重触发 Bot
-      if (!isSelfChat && hasNonBotMention(rawText, this.trigger, this.chats.triggerAliases, knownNames, ev.mentions)) {
+      if (!isSelfChat && hasNonBotMention(rawText, this.trigger, triggerAliases, knownNames, ev.mentions)) {
         return;
       }
       bodyText = rawText;
@@ -1431,7 +1515,8 @@ export class OpenMausBotBridge {
       this.lastBotReplyAt = this.now();
       this.saveState();
       const title = clip(task.title || '未命名会话', 50);
-      await this.say(`🔀 已切换到 **${botName}** 的会话「${title}」，直接发消息即可续聊。`, route);
+      const shownName = this.displayBotName(botId, botName, { isGroup });
+      await this.say(`🔀 已切换到 **${shownName}** 的会话「${title}」，直接发消息即可续聊。`, route);
     } catch (e) {
       await this.say(`❌ 切换会话失败：${formatOmbError(e)}`, chatId ? { targetChatId: chatId } : null);
     }
@@ -1464,8 +1549,9 @@ export class OpenMausBotBridge {
       });
       await this.refreshMultiBot();
       if (!targetChatId || targetChatId === this.selfChat) this.lastBotReplyAt = this.now();
-      await this.say(`🧠 已将 **${bot.name}** 当前会话模型切换为 \`${labelDesc}\`。`, {
-        botId: bot.id, botName: bot.name, threadId, ...(targetChatId ? { targetChatId } : {}),
+      const shownName = this.displayBotName(bot.id, bot.name);
+      await this.say(`🧠 已将 **${shownName}** 当前会话模型切换为 \`${labelDesc}\`。`, {
+        botId: bot.id, botName: shownName, threadId, ...(targetChatId ? { targetChatId } : {}),
       });
     } catch (e) {
       await this.say(`❌ 切换模型失败：${formatOmbError(e)}`, targetChatId ? { targetChatId } : null);
@@ -1495,7 +1581,7 @@ export class OpenMausBotBridge {
           const originLabel = chatCtx.chatName || chatCtx.originChatId;
           await this.say(
             `📍 **来自「${originLabel}」的会话维护**\n🗜️ 该群隔离上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），已自动后台压缩，群内零打扰。`,
-            { botId, botName: bot?.name ?? 'MausBot', threadId, targetChatId: this.selfChat },
+            { botId, botName: this.displayBotName(botId, bot?.name), threadId, targetChatId: this.selfChat },
           );
         }
         return;
@@ -1510,7 +1596,7 @@ export class OpenMausBotBridge {
         : '';
       await this.say(
         `${originBanner}💡 当前会话上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），建议发 \`${compactCmd}\` 压缩以保持准确度。`,
-        { botId, botName: bot?.name ?? 'MausBot', threadId, ...(chatCtx?.isExternal && this.selfChat ? { targetChatId: this.selfChat } : {}) },
+        { botId, botName: this.displayBotName(botId, bot?.name), threadId, ...(chatCtx?.isExternal && this.selfChat ? { targetChatId: this.selfChat } : {}) },
         null,
         [{ label: chatCtx?.isExternal ? '压缩该群会话' : '立即压缩', text: compactCmd, kind: 'primary' }],
       );
@@ -1641,6 +1727,7 @@ export class OpenMausBotBridge {
     }
 
     const sendId = `cobot_${crypto.randomUUID().replace(/-/g, '')}`;
+    const shownName = this.displayBotName(bot.id, bot.name, { isGroup });
     if (!isExternal) {
       this.focus = { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}) };
       this.setSelfThread({ ...bot, threadId });
@@ -1648,7 +1735,7 @@ export class OpenMausBotBridge {
     }
     await this.refreshMultiBot();
     this.emitTelemetry('dispatch', {
-      botName: bot.name,
+      botName: shownName,
       isGroup,
       chatId: ctxInfo.originChatId || null,
       chatType: ctxInfo.chatType || 'self',
@@ -1682,7 +1769,7 @@ export class OpenMausBotBridge {
       const errBanner = isExternal && errTarget === this.selfChat
         ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n`
         : '';
-      return this.say(`${errBanner}❌ 发送给 **${bot.name}** 失败：${formatOmbError(e)}`, errTarget ? { targetChatId: errTarget } : null);
+      return this.say(`${errBanner}❌ 发送给 **${shownName}** 失败：${formatOmbError(e)}`, errTarget ? { targetChatId: errTarget } : null);
     } finally {
       this.pendingThreads.delete(threadId);
     }
@@ -1709,7 +1796,7 @@ export class OpenMausBotBridge {
       list.push({ queueId, botId: bot.id, botName: bot.name, threadId, isGroup, text, sendId, at: this.now(), chatCtx: compactCtx });
       this.queuedByThread.set(threadId, list);
       const who = this.botPrefix(bot.id, bot.name, { isGroup });
-      const cmdTarget = isGroup ? `@${bot.name}` : this.trigger;
+      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${shownName}` : this.trigger;
       const ctrlChat = this.resolveControlChatId(ctxInfo);
       const ctrlBanner = isExternal && ctrlChat === this.selfChat
         ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n`
@@ -1749,7 +1836,7 @@ export class OpenMausBotBridge {
     });
     turn.startWatcher();
     if (isExternal && ctxInfo.silentProgress && this.chats.externalAckInSelf && this.selfChat) {
-      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${bot.name}` : this.trigger;
+      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${shownName}` : this.trigger;
       this.say(
         `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…`,
         { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: this.selfChat },
@@ -1768,6 +1855,8 @@ export class OpenMausBotBridge {
       ? 'card'
       : (msg.secret ? 'secret' : (msg.connector ? 'connector' : (msg.signIn ? 'signIn' : null)));
     const speakerName = isGroup ? (msg.from?.name || '') : '';
+    const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
+    const shownName = this.displayBotName(botId, botName, { isGroup });
     const isExternal = Boolean(chatCtx?.isExternal);
     const ctrlChat = this.resolveControlChatId(chatCtx);
     const route = {
@@ -1778,13 +1867,13 @@ export class OpenMausBotBridge {
       ...(isGroup ? { isGroup: true } : {}),
       ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
     };
-    const who = this.botPrefix(botId, botName, { isGroup, speakerName });
-    const prompt = formatCardPrompt(botName, msg, who);
+    const who = this.botPrefix(botId, botName, { isGroup, speakerName, speakerBotId });
+    const prompt = formatCardPrompt(shownName, msg, who);
     const originBanner = isExternal && ctrlChat === this.selfChat
       ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」的审批 / 确认**\n`
       : '';
     const sentId = await this.say(`${originBanner}${prompt.text}`, route, null, prompt.actions);
-    this.emitTelemetry('card', { botName, kind: cardKind || 'card', summary: prompt.text });
+    this.emitTelemetry('card', { botName: shownName, kind: cardKind || 'card', summary: prompt.text });
     if (sentId && cardKind) {
       this.pendingCards.set(sentId, {
         imMsgId: sentId,
@@ -1855,14 +1944,18 @@ export class OpenMausBotBridge {
     const isExternal = Boolean(chatCtx?.isExternal);
     const targetChatId = chatCtx?.replyChatId || this.selfChat;
     const quoteReplyId = (!isExternal || chatCtx?.privateReply) ? null : (chatCtx?.replyToImMsgId ?? null);
-    const who = this.botPrefix(botId, botName, { proactive, isGroup, speakerName });
+    const speakerBotId = isGroup ? (finalMsg?.from?.botId || null) : null;
+    const shownName = this.displayBotName(botId, botName, { isGroup });
+    const shownSpeaker = speakerName ? this.displayBotName(speakerBotId, speakerName) : '';
+    const who = this.botPrefix(botId, botName, { proactive: false, isGroup, speakerName, speakerBotId });
     const originName = chatCtx?.chatName || chatCtx?.originChatId;
     const privHead = isExternal && chatCtx?.privateReply && !proactive
       ? `📩 **私密回复 · 来自「${originName}」**\n`
       : '';
     const originNote = proactive && isExternal ? `（来自「${originName}」）` : '';
+    const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
     const head = proactive
-      ? (who ? `🔔 ${who}${originNote}\n` : `🔔 **主动通知${originNote}**\n`)
+      ? `🔔 **${proLabel} 通知**${originNote}\n`
       : (who ? `${who}\n` : '');
     const safeBody = isExternal && targetChatId && targetChatId !== this.selfChat
       ? sanitizeExternalMentions(text, { mode: this.chats.externalSanitizeMentions ?? 'all', botNames: this.getKnownBotNames() })
@@ -1934,9 +2027,9 @@ export class OpenMausBotBridge {
       if (canAttach) {
         try {
           fs.mkdirSync(this.inDir, { recursive: true });
-          const mdPath = path.join(this.inDir, `${fileSafe(botName) || 'bot'}-${Date.now()}.md`);
+          const mdPath = path.join(this.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
           fs.writeFileSync(mdPath, `${full}\n`);
-          await this.sendOutboundFile(mdPath, `${fileSafe(botName) || 'reply'}.md`, {
+          await this.sendOutboundFile(mdPath, `${fileSafe(shownName) || 'reply'}.md`, {
             chatId: targetChatId,
             ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
           });
@@ -1992,7 +2085,11 @@ export class OpenMausBotBridge {
     if (!this.quietQueue.length) return 0;
     const items = this.quietQueue.splice(0);
     this.saveState();
-    const lines = items.map((it) => `- **${it.speakerName ? `${it.botName} · ${it.speakerName}` : it.botName}**：${clip(it.text.replace(/\s+/g, ' '), 180)}`);
+    const lines = items.map((it) => {
+      const itemBot = this.displayBotName(it.botId, it.botName, { isGroup: Boolean(it.isGroup) });
+      const itemSpeaker = it.speakerName ? this.displayBotName(it.speakerBotId, it.speakerName) : '';
+      return `- **${itemSpeaker ? `${itemBot} · ${itemSpeaker}` : itemBot}**：${clip(it.text.replace(/\s+/g, ' '), 180)}`;
+    });
     const last = items.at(-1);
     await this.say(
       `🌙 **免打扰期间汇总（${items.length} 条）**\n${lines.join('\n')}`,
@@ -2022,9 +2119,10 @@ export class OpenMausBotBridge {
 
     const owner = await this.#resolveOwnerByThread(threadId);
     const botId = owner?.id ?? threadId;
-    const botName = owner?.name ?? 'MausBot';
     const isGroup = Boolean(owner?.isGroup);
+    const botName = this.displayBotName(botId, owner?.name, { isGroup });
     const speakerName = isGroup ? (msg.from?.name || '') : '';
+    const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
     const extChat = [...this.chatThreads.values()].find((v) => v.threadId === threadId) ?? null;
     const proChatCtx = extChat
       ? {
@@ -2057,7 +2155,7 @@ export class OpenMausBotBridge {
       if (!text && !msg.hasImage && !(msg.attachments?.length)) return;
       rememberBounded(this.deliveredOmbIds, msg.id);
       if (inQuietHours(this.now(), this.quietHours)) {
-        this.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, text: text || '（附件通知）', finalMsg: msg });
+        this.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: text || '（附件通知）', finalMsg: msg });
         this.saveState();
         return;
       }

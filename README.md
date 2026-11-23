@@ -38,9 +38,9 @@
 
 > 若你本机使用 **OpenMausBot Desktop App**（需要图形桌面控屏或内置浏览器），桌面端默认启用配对鉴权，首次执行一次 `npm run pair`（在桌面端弹窗点击 Allow）或 `npm run pair -- <12位配对码>` 将会话 Token 写入已忽略提交的 `config.json` 即可。
 
-## 自聊用法（类 Grok Bot 私聊体验）
+## 自聊用法（co-bot 协调助手体验）
 
-- **`@bot <内容>`**（或 `@ai <内容>`）：发给 OpenMausBot 的默认主 Bot（`chiefOfStaff`）。主 Bot 默认不显示 `**[MausBot]**` 名字前缀（`hideChiefPrefix: true`），保持 1v1 私聊纯净感。
+- **`@bot <内容>`**（或 `@co-bot` / `@ai`）：发给默认主协调 Bot（可在 `selfChat.botName` 自定义展示名，默认 `co-bot`，并通过 `openmausbot.syncChiefIdentity` 自动对齐后端主 Bot 名称与 `Coordinator Bot` 身份）。主 Bot 1v1 私聊默认省略名字前缀（`hideChiefPrefix: true`），主动通知与管理指令统一显示 `co-bot`。
 - **短时连续对话与贴图直发（默认 2 分钟）**：主 Bot / 指定 Bot 回复后，`selfChat.followUpWindowMs`（默认 `120000` ms，设为 `0` 可关闭）内不用再打 `@bot`，直接发文字或连续发送图片/文件（`imageBatchMs` 防抖合批，默认 `1500` ms）即可续聊；以 `#`、`备忘`、`记一下`、`笔记`、`todo` 开头的自聊笔记不会被误发；回复 `@bot bye` / `退下` 可随时结束。
 - **`@<Bot名> <内容>`** / **`@<群名> <内容>`** 与 **引用气泡**：随时 `@` OpenMausBot 团队里的其他 Bot（自动标出 `**[Bot名]**`）或协作群组（自动标出 `**[群名 · 发言Bot名]**`，支持群内多 Bot 接力回复、群会话切换 `tasks`/`new` 与 `stop`/`steer`/`cancel`）；点击或引用历史回复气泡可跨线程续聊（`focus`、`msgRoute`、`quietQueue`、`pendingCards`、`deliveredOmbIds`、`inFlightTurns`、`privateDrafts` 均防抖持久化在 `data/bridge-state.json`，损坏自动 `.corrupt` 备份自愈，重启续接在途任务不丢回复；临时附件默认保留 7 天自动清理 `fileRetentionDays`）。
 - **会话创建、切换、检索与导出**：
@@ -60,7 +60,7 @@
   - 短回复 1 条到位；`1500`～`2800` 字（`resultChars`～`softSplitChars`）智能按段落与代码块围栏拆成 2 条气泡直接阅读；超过 `softSplitChars` 自动截断并附 `.md` 原文；
   - **权限审批卡**：支持 **`ok`** 允许、**`always`** 总是允许（传 `always` / `rememberCommand`）、**`no`** 拒绝；**选项/提问卡与列表**：支持数字 `1` / `2` 或中文口语序数（如 `第一个`、`选2`、`三号`）；**桌面端凭据/连接器/登录卡**：支持回复 **`skip` / `跳过`** 远程跳过继续执行（Web 模拟器 `/sim` 内可直接点快捷按钮）。
 - **忙时排队与插队**：前一条任务仍在执行时新消息自动提示排队状态，可发 **`@bot steer`**（或 **`插队`**）即时插队，或发 **`@bot cancel`** 取消排队；也可随时 `@bot stop` 中断执行。
-- **手机私聊人格预设**：发送 **`@bot style grok`**（或运行 `npm run check -- --apply-style`）可将主 Bot 设为 `conversational` 回复风格与移动端简洁人格（`@bot style default` 可恢复）。
+- **协调助手人格预设**：发送 **`@bot style cobot`**（兼容 `@bot style grok`，或运行 `npm run check -- --apply-style`）可将主 Bot 设为 `conversational` 回复风格与 `co-bot`（Coordinator Bot）移动端简洁人格（`@bot style default` 可恢复）。
 - **主动通知与免打扰**：OpenMausBot 定时 Routine / 异步推送以 `🔔` 回流；可用 **`@bot quiet on|off|23:00-07:30`** 与 **`@bot prefs [ack|sanitize|stall|reset]`** 免重启热调整免打扰与偏好，并持久化保存；`@bot digest` 可随时汇总积压消息。
 - **审批模式与状态诊断**：`@bot status` 与 `@bot bots` 展示 OpenMausBot `doctor` 自检报告、`approvalMode`（`ask`/`auto`/`full`）与队友协作等待状态，可用 **`@bot approval [ask|auto|full]`** 切换审批策略。
 - **其他常用指令与防错**：`@bot bots`、`@bot status`、`@bot help [群聊|定时|会话|模型|全部]`；常见拼错指令自动给出纠错快捷按钮。
@@ -77,7 +77,7 @@
 - **句首/句中 `@bot` 触发与防误触**：
   - 支持句首指令/提问（`@bot ...`、`@Plum ...`）与句中自然召唤（`@Alice 别急，@bot 帮看下`），但会跳过反引号代码（`` `@bot` ``）、引号包裹（`「@bot」`、`"@bot"`）与零宽防误触标记（`@\u200Bbot`），避免技术讨论或复读误触发；
   - 对着同事消息或附件直接回复 `@bot` / `@bot!`（无额外正文）也会自动带上引用正文/附件交由 Bot 分析，而不是弹出帮助菜单；
-  - 引用 Bot 回复并转交同事（如 `辛苦 @Bob 按上面排查`）不会二次触发 Bot，而引用 `MausBot` 回复写 `@Plum ...` 则会带着上文分析接力交给 `Plum`。
+  - 引用 Bot 回复并转交同事（如 `辛苦 @Bob 按上面排查`）不会二次触发 Bot，而引用 `co-bot` 回复写 `@Plum ...` 则会带着上文分析接力交给 `Plum`。
 - **出站 `@提及` 自动防误艾特**：在外部群/他人私聊公开回复时，通过 `chats.externalSanitizeMentions`（默认 `"all"`，可选 `"dangerous"` / `"none"`）自动对散落 `@所有人` / `@同事` / `@Bot` 插入零宽空格（`@\u200B...`）防误触发，同时保留邮箱（`ops@example.com`）与代码块原貌；使用 `@bot!` / `-p` 发回**自聊**的私密草稿仍原样保留 `@`。
 - **原地回复 vs 私密起草与确认回发**：
   - `@bot 总结一下刚才的分歧` → 引用你的触发消息原地回复（仅发送干净终稿，中间思考噪声通过 `externalSilentProgress` 自动静音）；引用 Bot 的回复继续追问即可接力该话题；
@@ -130,7 +130,7 @@
 
 ### 本地诊断与运维台（`/debug`）与排障手册
 - 启动后访问 `http://127.0.0.1:8787/debug`（无头 IM 模式下访问 `/` 亦直达此页），可实时查看进程内存/运行时长、在途续接与断线缓冲指标、已加载插件列表、当前通道 `capabilities` 声明、各群/私聊策略（支持直接点**静音/允许**）与隔离 Thread 列表、**定时跨群纪要（Scheduled Summaries）**（支持直接**试跑 / 启停**）、待确认回发草稿状态、OpenMausBot 在线 Bot/群组状态、一键**导出脱敏诊断包 JSON**，以及按 `chatId` / `source` / **`type`**（含 `recall`、`sendback`、`turn_resumed`、`turn_stalled`、`outbound_buffered` 等）筛选的最近 80 条脱敏事件流；Web 模拟器 `/sim` 同步支持气泡一键 **撤回** 与跨群指令快捷提示。
-- 真实 IM 上线核对与常见问题速查见：[真实 IM 接入与常见排障手册](./docs/TROUBLESHOOTING.md)。
+- 真实 IM 上线核对与常见问题速查见：[真实 IM 接入与常见排障手册](./docs/TROUBLESHOOTING.md)；多阶段协作网络演进蓝图见：[演进路线图（v0.5 ~ v0.8）](./docs/ROADMAP.md)。
 
 ## 目录结构
 
@@ -153,9 +153,10 @@ src/openmausbot/state-store.js  Bridge 状态防抖持久化、损坏备份自�
 src/openmausbot/outbound-queue.js 按会话串行出站队列与断线消息缓冲重放器
 src/openmausbot/turn-tracker.js SSE/Job 单轮追踪、停滞看门狗与中间气泡合并器
 src/openmausbot/commands.js   @bot / @<Bot名> 指令分发与子命令处理器
-src/openmausbot/persona.js    手机 IM 端类 Grok Bot 私聊默认人格与回复风格预设
+src/openmausbot/persona.js    手机 IM 端 co-bot（Coordinator Bot）默认人格与回复风格预设
 src/openmausbot/bridge.js     极薄 IM <-> OpenMausBot 桥接器（按 channel.capabilities 自适应降级）
 public/                       /sim 自聊模拟页、/debug 只读诊断页与 .md 附件预览页（view.html、md.js）
+docs/ROADMAP.md               v0.5 ~ v0.8 演进路线图（安全护栏、多 Agent 编排、C2C 协调者互联与共享上下文）
 docs/TROUBLESHOOTING.md       真实 IM 接入上线 Checklist 与常见故障排查手册
 .github/workflows/ci.yml      GitHub Actions 跨平台矩阵 CI（Ubuntu/Windows/macOS）
 LICENSE                       MIT 开源许可证
