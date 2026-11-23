@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { levenshtein, parseHHMM } from './openmausbot/mentions.js';
 
 export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -49,6 +50,8 @@ export const defaults = {
     maxProgressUpdates: 2,
     intermediateCoalesceMs: 700,
     maxIntermediateBubbles: 2,
+    turnStallMs: 180_000,
+    stateSaveDebounceMs: 150,
     outPrefix: '',
   },
   chats: {
@@ -63,6 +66,7 @@ export const defaults = {
     injectRecentContext: true,
     isolateThreadsByChat: true,
     externalSilentProgress: true,
+    externalAckInSelf: false,
     routeControlsToSelf: true,
     privateFlag: true,
     externalSanitizeMentions: 'all',
@@ -78,6 +82,119 @@ export const defaults = {
 
 export function isPathLikeSpecifier(s) {
   return /^(?:\.\.?[\\/]|\/|[a-zA-Z]:[\\/])/.test(s) || /\.(?:mjs|cjs|js)$/i.test(s);
+}
+
+function closestKey(key, allowedKeys) {
+  let best = null;
+  let bestDist = Infinity;
+  const low = String(key).toLowerCase();
+  for (const k of allowedKeys) {
+    const d = levenshtein(low, String(k).toLowerCase());
+    if (d < bestDist) {
+      bestDist = d;
+      best = k;
+    }
+  }
+  return bestDist <= 2 ? best : null;
+}
+
+function checkUnknownKeys(obj, allowedObj, prefix, warnings) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+  const allowed = Object.keys(allowedObj);
+  for (const key of Object.keys(obj)) {
+    if (!Object.prototype.hasOwnProperty.call(allowedObj, key)) {
+      const hint = closestKey(key, allowed);
+      const pathKey = prefix ? `${prefix}.${key}` : key;
+      const hintPath = hint ? (prefix ? `${prefix}.${hint}` : hint) : null;
+      warnings.push(
+        hintPath
+          ? `未知配置字段「${pathKey}」，你是不是想写「${hintPath}」？`
+          : `未知配置字段「${pathKey}」（将被忽略）`,
+      );
+    }
+  }
+}
+
+/** 轻量配置校验（零依赖）：检查未知字段拼写、端口、URL、HH:MM 时间与阈值范围。 */
+export function validateConfig(rawConfig = {}) {
+  const errors = [];
+  const warnings = [];
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    return { ok: false, errors: ['配置根节点必须是 JSON 对象'], warnings };
+  }
+
+  checkUnknownKeys(rawConfig, { ...defaults, sim: defaults.web }, '', warnings);
+  checkUnknownKeys(rawConfig.openmausbot, defaults.openmausbot, 'openmausbot', warnings);
+  checkUnknownKeys(rawConfig.channel, defaults.channel, 'channel', warnings);
+  checkUnknownKeys(rawConfig.ipc, defaults.ipc, 'ipc', warnings);
+  checkUnknownKeys(rawConfig.web ?? rawConfig.sim, defaults.web, 'web', warnings);
+  checkUnknownKeys(rawConfig.selfChat, defaults.selfChat, 'selfChat', warnings);
+  checkUnknownKeys(rawConfig.selfChat?.quietHours, defaults.selfChat.quietHours, 'selfChat.quietHours', warnings);
+  checkUnknownKeys(rawConfig.chats, defaults.chats, 'chats', warnings);
+
+  if (rawConfig.openmausbot?.url !== undefined) {
+    try {
+      const u = new URL(String(rawConfig.openmausbot.url));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        errors.push(`openmausbot.url 必须为 http/https 地址，当前为「${rawConfig.openmausbot.url}」`);
+      }
+    } catch {
+      errors.push(`openmausbot.url 不是合法 URL：「${rawConfig.openmausbot.url}」`);
+    }
+  }
+
+  const webPort = (rawConfig.web ?? rawConfig.sim)?.port;
+  if (webPort !== undefined) {
+    const p = Number(webPort);
+    if (!Number.isInteger(p) || p < 0 || p > 65535) {
+      errors.push(`web.port 必须为 0～65535 的整数，当前为「${webPort}」`);
+    }
+  }
+
+  const qh = rawConfig.selfChat?.quietHours;
+  if (qh && typeof qh === 'object') {
+    if (qh.start !== undefined && parseHHMM(qh.start) == null) {
+      errors.push(`selfChat.quietHours.start 格式无效（应为 HH:MM）：「${qh.start}」`);
+    }
+    if (qh.end !== undefined && parseHHMM(qh.end) == null) {
+      errors.push(`selfChat.quietHours.end 格式无效（应为 HH:MM）：「${qh.end}」`);
+    }
+  }
+
+  if (rawConfig.selfChat?.turnStallMs !== undefined) {
+    const ms = Number(rawConfig.selfChat.turnStallMs);
+    if (!Number.isFinite(ms) || ms < 0) {
+      errors.push(`selfChat.turnStallMs 必须为非负数字，当前为「${rawConfig.selfChat.turnStallMs}」`);
+    }
+  }
+
+  const ch = rawConfig.chats;
+  if (ch && typeof ch === 'object') {
+    if (ch.mode !== undefined && ch.mode !== 'owner_everywhere' && ch.mode !== 'self_only') {
+      errors.push(`chats.mode 必须为 owner_everywhere 或 self_only，当前为「${ch.mode}」`);
+    }
+    if (ch.externalSanitizeMentions !== undefined && !['all', 'dangerous', 'none'].includes(ch.externalSanitizeMentions)) {
+      errors.push(`chats.externalSanitizeMentions 必须为 all / dangerous / none，当前为「${ch.externalSanitizeMentions}」`);
+    }
+    if (ch.autoCompactThreshold !== undefined) {
+      const th = Number(ch.autoCompactThreshold);
+      if (!Number.isFinite(th) || (th !== 0 && (th < 0.5 || th > 1))) {
+        errors.push(`chats.autoCompactThreshold 必须为 0 或 0.5～1 之间，当前为「${ch.autoCompactThreshold}」`);
+      }
+    }
+    if (Array.isArray(ch.scheduledSummaries)) {
+      ch.scheduledSummaries.forEach((item, idx) => {
+        if (!item?.chatId) {
+          errors.push(`chats.scheduledSummaries[${idx}] 缺少必填字段 chatId`);
+        }
+        if (parseHHMM(item?.time) == null) {
+          errors.push(`chats.scheduledSummaries[${idx}].time 格式无效（应为 HH:MM）：「${item?.time ?? ''}」`);
+        }
+      });
+    }
+  }
+
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 /** 读入 config.json 与命令行覆盖项（--config、--port、--omb、--omb-token、--transport、--channel）。 */

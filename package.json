@@ -19,6 +19,7 @@
     "status": "node scripts/daemon.js status",
     "omb": "node scripts/omb.js",
     "pair": "node scripts/pair.js",
+    "setup": "node scripts/setup.js",
     "check": "node scripts/check.js",
     "channel:test": "node scripts/channel-test.js",
     "ipc:smoke": "node scripts/ipc-smoke.js",

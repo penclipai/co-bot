@@ -3,32 +3,57 @@
  */
 import { formatActivity, formatOmbError } from './cards.js';
 import { messageNeedsInput } from './client.js';
-import { rememberBounded } from './mentions.js';
+import { compactChatCtx, rememberBounded } from './mentions.js';
 
 const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
 
 export function createTurnTracker(
   bridge,
-  { key, botId, botName, threadId, reqMsgId, sendId, isGroup = false, chatCtx = null },
+  { key, botId, botName, threadId, reqMsgId, sendId, isGroup = false, chatCtx = null, startedAt: initStartedAt },
   { deliverBotReply, emitCard, forwardBotMedia, maybeWarnHighContext },
 ) {
-  const startedAt = bridge.now();
+  const startedAt = Number(initStartedAt) > 0 ? Number(initStartedAt) : bridge.now();
   const ac = new AbortController();
   const isExternal = Boolean(chatCtx?.isExternal);
   const silentProgress = Boolean(chatCtx?.silentProgress);
   let progressTimer = null;
   let intermediateTimer = null;
+  let stallTimer = null;
   let progressCount = 0;
   let intermediateBubbleCount = 0;
   let lastProgressAt = 0;
   let latestActivity = '';
   let lastSentActivity = '';
   let lastHumanTextAt = 0;
+  let lastActivityAt = bridge.now();
+  let stallNotified = false;
+  let waitingForInput = false;
   let settled = false;
   let emitChain = Promise.resolve();
   const deliveredIntermediateIds = new Set();
   const pendingIntermediates = [];
   const heldIntermediates = [];
+
+  if (bridge.inFlightTurns) {
+    bridge.inFlightTurns.set(key, {
+      key,
+      botId,
+      botName,
+      threadId,
+      reqMsgId: reqMsgId ?? null,
+      sendId: sendId ?? null,
+      isGroup: Boolean(isGroup),
+      chatCtx: compactChatCtx(chatCtx),
+      startedAt,
+    });
+    if (bridge.inFlightTurns.size > 20) bridge.inFlightTurns.delete(bridge.inFlightTurns.keys().next().value);
+    bridge.saveState({ immediate: true });
+  }
+
+  const touchActivity = () => {
+    lastActivityAt = bridge.now();
+    stallNotified = false;
+  };
 
   const enqueueEmit = (fn) => {
     emitChain = emitChain.then(fn, fn);
@@ -135,14 +160,47 @@ export function createTurnTracker(
     progressTimer = null;
     clearTimeout(intermediateTimer);
     intermediateTimer = null;
+    clearInterval(stallTimer);
+    stallTimer = null;
+  };
+
+  const ensureStallWatchdog = () => {
+    const threshold = Number(bridge.turnStallMs) || 0;
+    if (!(threshold > 0) || stallTimer) return;
+    const pollMs = Math.min(Math.max(40, Math.floor(threshold / 3)), 15_000);
+    stallTimer = setInterval(() => {
+      if (settled || ac.signal.aborted || waitingForInput || stallNotified) return;
+      if ((bridge.now() - lastActivityAt) < threshold) return;
+      stallNotified = true;
+      const elapsedSec = Math.max(1, Math.round((bridge.now() - startedAt) / 1000));
+      const ctrlChat = bridge.resolveControlChatId(chatCtx);
+      const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
+        ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
+        : '';
+      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${botName}` : bridge.trigger;
+      bridge.emitTelemetry?.('turn_stalled', {
+        botName,
+        chatId: ctrlChat || null,
+        summary: `elapsed=${elapsedSec}s thread=${threadId}`,
+      });
+      enqueueEmit(() => bridge.say(
+        `${ctrlBanner}⏳ **${botName}** 已持续无新进展 ${elapsedSec} 秒（仍在后台运行），如需中断可回复 \`${cmdTarget} stop\`。`,
+        { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
+        null,
+        [{ label: '停止任务', text: `${cmdTarget} stop`, kind: 'danger' }],
+      )).catch(() => {});
+    }, pollMs);
+    stallTimer.unref?.();
   };
 
   const startWatcher = (afterInput = false) => {
+    ensureStallWatchdog();
     const watchAc = afterInput ? new AbortController() : ac;
     if (afterInput) ac.signal.addEventListener('abort', () => watchAc.abort(), { once: true });
     (async () => {
       let since;
       let version;
+      let prevState;
       while (!settled && !watchAc.signal.aborted) {
         try {
           const job = await bridge.client.getJob(threadId, {
@@ -152,8 +210,13 @@ export function createTurnTracker(
             version,
             signal: watchAc.signal,
           });
+          if (job?.version !== version || job?.state !== prevState) {
+            touchActivity();
+          }
+          prevState = job?.state;
           since = job?.since;
           version = job?.version;
+          waitingForInput = job?.state === 'needs-input';
           if (Array.isArray(job?.needsInput) && job.needsInput.length) {
             const res = await bridge.client.getMessages(threadId, 10);
             for (const m of res.messages ?? []) {
@@ -192,6 +255,8 @@ export function createTurnTracker(
     const droppedIntermediates = [...pendingIntermediates.splice(0), ...heldIntermediates.splice(0)];
     dispose();
     bridge.activeTurns.delete(key);
+    bridge.inFlightTurns?.delete(key);
+    bridge.saveState();
 
     await emitChain.catch(() => {});
 
@@ -315,6 +380,8 @@ export function createTurnTracker(
     onMessage: (msg) => {
       if (settled || !msg || msg.role !== 'bot') return;
       if (msg.requestMessageId && reqMsgId && msg.requestMessageId !== reqMsgId) return;
+      touchActivity();
+      waitingForInput = false;
       if (msg.kind === 'digest') return;
       if (msg.kind === 'activity') {
         latestActivity = formatActivity(msg);

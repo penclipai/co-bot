@@ -57,6 +57,7 @@
       <h1>co-bot 本地只读诊断台</h1>
       <div class="toolbar">
         <span id="updatedAt">加载中…</span>
+        <button id="exportBtn" type="button">导出诊断包</button>
         <button id="toggleBtn" type="button">暂停自动刷新</button>
         <button id="refreshBtn" type="button">立即刷新</button>
       </div>
@@ -80,7 +81,7 @@
       </div>
       <table>
         <thead>
-          <tr><th>名称</th><th>chatId</th><th>类别</th><th>策略状态</th><th>内存缓存</th><th>隔离 Thread</th></tr>
+          <tr><th>名称</th><th>chatId</th><th>类别</th><th>策略状态</th><th>内存缓存</th><th>隔离 Thread</th><th>操作</th></tr>
         </thead>
         <tbody id="chatBody"></tbody>
       </table>
@@ -90,7 +91,7 @@
       <h2>定时跨群纪要（Scheduled Summaries）</h2>
       <table>
         <thead>
-          <tr><th>目标会话</th><th>chatId</th><th>时间</th><th>状态</th><th>关注重点</th><th>最近执行</th></tr>
+          <tr><th>目标会话</th><th>chatId</th><th>时间</th><th>状态</th><th>关注重点</th><th>最近执行</th><th>操作</th></tr>
         </thead>
         <tbody id="schedBody"></tbody>
       </table>
@@ -122,6 +123,12 @@
             <option value="sendback">sendback</option>
             <option value="card">card</option>
             <option value="proactive">proactive</option>
+            <option value="turn_resumed">turn_resumed</option>
+            <option value="turn_stalled">turn_stalled</option>
+            <option value="outbound_buffered">outbound_buffered</option>
+            <option value="outbound_replayed">outbound_replayed</option>
+            <option value="outbound_failed">outbound_failed</option>
+            <option value="state_corrupt">state_corrupt</option>
             <option value="state">state</option>
           </select></label>
         </div>
@@ -173,7 +180,12 @@
         addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}`);
         addLine(ombBox, '连续对话粘性', st.bridge.stickyActive ? '激活中' : '未激活');
         addLine(ombBox, '定时跨群纪要', `${st.bridge.scheduledSummaries ?? 0} 条规则`);
-        addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : '无');
+        addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : `无（缓存 ${st.bridge.privateDraftsCount ?? 0}）`);
+        addLine(ombBox, '在途续接 / 断线缓冲', `${st.bridge.inFlightTurns ?? 0} / ${st.bridge.outboundBuffered ?? 0}（补发 ${st.bridge.outboundReplayed ?? 0}）`);
+        addLine(ombBox, '出站失败 / 状态自愈', `${st.bridge.outboundFailures ?? 0} / ${st.bridge.stateCorruptRecoveries ?? 0}`);
+      }
+      if (st.runtime) {
+        addLine(ombBox, '进程内存 / 运行时长', `${st.runtime.memoryRssMB} MB / ${st.runtime.uptimeSec}s`);
       }
       if (st.context) {
         addLine(ombBox, '内存上下文', `${st.context.chatCount} 会话 / ${st.context.totalMessages} 条消息`);
@@ -188,13 +200,24 @@
         if (pol.allowed?.length) policyBox.appendChild(badge(`运行期放行 ${pol.allowed.length}`, 'ok'));
       }
 
+      const runDebugAction = async (payload) => {
+        const res = await fetch('/api/debug/action', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await refresh();
+      };
+
       const cBody = el('chatBody');
       cBody.replaceChildren();
       const chats = st.chats || [];
       if (!chats.length) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
-        td.colSpan = 6;
+        td.colSpan = 7;
         td.textContent = '暂无已知会话记录。';
         tr.appendChild(td);
         cBody.appendChild(tr);
@@ -217,7 +240,20 @@
           const td6 = document.createElement('td');
           const thrTxt = (c.threads || []).map((t) => `${t.botName}:${String(t.threadId).slice(0, 8)}`).join(', ');
           td6.textContent = thrTxt || '-';
-          tr.append(td1, td2, td3, td4, td5, td6);
+          const td7 = document.createElement('td');
+          if (c.type !== 'self') {
+            const actBtn = document.createElement('button');
+            actBtn.type = 'button';
+            actBtn.textContent = c.allowed ? '静音' : '允许';
+            actBtn.addEventListener('click', () => {
+              runDebugAction({ action: c.allowed ? 'chat_mute' : 'chat_allow', chatId: c.id })
+                .catch((err) => { el('updatedAt').textContent = `操作失败：${err.message}`; });
+            });
+            td7.appendChild(actBtn);
+          } else {
+            td7.textContent = '-';
+          }
+          tr.append(td1, td2, td3, td4, td5, td6, td7);
           cBody.appendChild(tr);
         }
       }
@@ -228,7 +264,7 @@
       if (!scheds.length) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
-        td.colSpan = 6;
+        td.colSpan = 7;
         td.textContent = '暂无定时跨群纪要规则（可在自聊发送 `@bot schedule add <群名> <HH:MM>` 添加）。';
         tr.appendChild(td);
         sBody.appendChild(tr);
@@ -249,7 +285,24 @@
           td5.textContent = s.focus || '-';
           const td6 = document.createElement('td');
           td6.textContent = s.lastRunDate || '-';
-          tr.append(td1, td2, td3, td4, td5, td6);
+          const td7 = document.createElement('td');
+          const runBtn = document.createElement('button');
+          runBtn.type = 'button';
+          runBtn.textContent = '试跑';
+          runBtn.style.marginRight = '6px';
+          runBtn.addEventListener('click', () => {
+            runDebugAction({ action: 'schedule_run', id: s.id })
+              .catch((err) => { el('updatedAt').textContent = `试跑失败：${err.message}`; });
+          });
+          const toggleSchedBtn = document.createElement('button');
+          toggleSchedBtn.type = 'button';
+          toggleSchedBtn.textContent = s.enabled === false ? '启用' : '暂停';
+          toggleSchedBtn.addEventListener('click', () => {
+            runDebugAction({ action: 'schedule_toggle', id: s.id, enabled: s.enabled === false })
+              .catch((err) => { el('updatedAt').textContent = `操作失败：${err.message}`; });
+          });
+          td7.append(runBtn, toggleSchedBtn);
+          tr.append(td1, td2, td3, td4, td5, td6, td7);
           sBody.appendChild(tr);
         }
       }
@@ -362,6 +415,14 @@
     }
 
     el('refreshBtn').addEventListener('click', refresh);
+    el('exportBtn').addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = '/api/debug/bundle?download=1';
+      a.download = `co-bot-diag-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
     el('chatFilter').addEventListener('change', refresh);
     el('sourceFilter').addEventListener('change', refresh);
     el('typeFilter').addEventListener('change', refresh);

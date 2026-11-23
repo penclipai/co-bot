@@ -79,6 +79,11 @@ export class OpenMausBotBridge {
     maxProgressUpdates = 2,
     intermediateCoalesceMs = 700,
     maxIntermediateBubbles = 2,
+    turnStallMs = 180_000,
+    stateSaveDebounceMs = 150,
+    draftTtlMs = 30 * 60_000,
+    outboundBufferMax = 30,
+    outboundBufferTtlMs = 5 * 60_000,
     resultChars = 1500,
     softSplitChars,
     followUpWindowMs = 120_000,
@@ -100,6 +105,7 @@ export class OpenMausBotBridge {
       client, transport, dataDir, trigger, commandDevices, proactive, quietHours,
       progressDelayMs, progressIntervalMs, maxProgressUpdates,
       intermediateCoalesceMs, maxIntermediateBubbles,
+      turnStallMs, stateSaveDebounceMs, draftTtlMs, outboundBufferMax, outboundBufferTtlMs,
       resultChars, followUpWindowMs, hideChiefPrefix,
       imageBatchMs, fileRetentionDays, sendRetries, sendRetryDelayMs,
       autoHealOmb, autoHealCooldownMs, onTelemetry,
@@ -149,6 +155,16 @@ export class OpenMausBotBridge {
     this.pendingSendBack = null;
     this.scheduledSummaries = [];
     this.summaryTimer = null;
+    this.inFlightTurns = new Map();
+    this.outboundQueue = new Map();
+    this.disconnectedBuffer = [];
+    this.stateSaveTimer = null;
+    this.startedAt = this.now();
+    this.sseReconnects = 0;
+    this.outboundFailures = 0;
+    this.outboundReplayed = 0;
+    this.stateSaveErrors = 0;
+    this.stateCorruptRecoveries = 0;
     this.botById = new Map();
     this.botByThread = new Map();
     this.groupById = new Map();
@@ -181,8 +197,25 @@ export class OpenMausBotBridge {
 
   #loadState() {
     if (!this.stateFile) return;
+    let rawText;
     try {
-      const raw = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
+      rawText = fs.readFileSync(this.stateFile, 'utf8');
+    } catch {
+      return; // 首次启动尚无状态文件
+    }
+    let raw;
+    try {
+      raw = JSON.parse(rawText);
+    } catch (e) {
+      this.stateCorruptRecoveries += 1;
+      try {
+        fs.renameSync(this.stateFile, `${this.stateFile}.corrupt.${this.now()}`);
+      } catch { /* ignore */ }
+      console.error(`[omb-bridge] 状态文件损坏，已自动备份并重置：${e.message}`);
+      this.emitTelemetry('state_corrupt', { summary: e.message });
+      return;
+    }
+    try {
       if (typeof raw?.selfChatId === 'string' && raw.selfChatId) {
         this.learnedSelfChatId = raw.selfChatId;
         if (this.transport && !this.transport.selfChatId) this.transport.selfChatId = raw.selfChatId;
@@ -245,17 +278,48 @@ export class OpenMausBotBridge {
           }
         }
       }
+      const turnCutoff = this.now() - 30 * 60_000;
+      if (Array.isArray(raw?.inFlightTurns)) {
+        for (const [k, v] of raw.inFlightTurns.slice(-20)) {
+          if (k && v?.botId && v?.threadId && (!v.startedAt || v.startedAt >= turnCutoff)) {
+            this.inFlightTurns.set(String(k), v);
+          }
+        }
+      }
+      const draftCutoff = this.now() - (Number(this.draftTtlMs) || 30 * 60_000);
+      if (Array.isArray(raw?.privateDrafts)) {
+        for (const d of raw.privateDrafts.slice(-40)) {
+          if (d?.id && d?.originChatId && (!d.createdAt || d.createdAt >= draftCutoff)) {
+            this.privateDrafts.set(d.id, d);
+            if (d.imMsgId) this.privateDrafts.set(d.imMsgId, d);
+          }
+        }
+        if (raw.lastPrivateDraftId && this.privateDrafts.has(String(raw.lastPrivateDraftId))) {
+          this.lastPrivateDraftId = String(raw.lastPrivateDraftId);
+        }
+      }
       // 防止早期版本遗留的外部会话 threadId 污染自聊 focus
       if (this.focus?.threadId && this.externalThreadIds.has(String(this.focus.threadId))) {
         const recovered = this.selfThreads.get(String(this.focus.botId));
         this.focus = recovered ? { ...recovered } : null;
       }
-    } catch { /* 首次启动尚无状态文件 */ }
+    } catch { /* 状态恢复兼容降级 */ }
   }
 
-  saveState() {
+  #writeStateNow() {
+    clearTimeout(this.stateSaveTimer);
+    this.stateSaveTimer = null;
     if (!this.stateFile) return;
     try {
+      const seenDrafts = new Set();
+      const draftCutoff = this.now() - (Number(this.draftTtlMs) || 30 * 60_000);
+      const uniqueDrafts = [];
+      for (const d of this.privateDrafts.values()) {
+        if (!d?.id || seenDrafts.has(d.id)) continue;
+        if (d.createdAt && d.createdAt < draftCutoff) continue;
+        seenDrafts.add(d.id);
+        uniqueDrafts.push(d);
+      }
       writeJsonAtomic(this.stateFile, {
         selfChatId: this.selfChat,
         focus: this.focus,
@@ -272,8 +336,31 @@ export class OpenMausBotBridge {
           allowed: [...this.chatPolicyOverrides.allowed],
         },
         scheduledSummaries: this.scheduledSummaries.slice(-30),
+        inFlightTurns: [...this.inFlightTurns.entries()].slice(-20),
+        privateDrafts: uniqueDrafts.slice(-40),
+        lastPrivateDraftId: this.lastPrivateDraftId || null,
       });
-    } catch { /* 持久化失败不阻断消息主流程 */ }
+    } catch (e) {
+      this.stateSaveErrors += 1;
+      console.error('[omb-bridge] 状态持久化失败：', e?.message || e);
+      this.emitTelemetry('state_save_error', { summary: e?.message || 'save failed' });
+    }
+  }
+
+  saveState({ immediate = false } = {}) {
+    if (!this.stateFile) return;
+    const delay = Number(this.stateSaveDebounceMs);
+    if (immediate || !(delay > 0)) {
+      this.#writeStateNow();
+      return;
+    }
+    if (this.stateSaveTimer) return;
+    this.stateSaveTimer = setTimeout(() => this.#writeStateNow(), delay);
+    this.stateSaveTimer.unref?.();
+  }
+
+  flushState() {
+    this.saveState({ immediate: true });
   }
 
   rememberOwnId(id) {
@@ -315,12 +402,15 @@ export class OpenMausBotBridge {
   status() {
     let queuedCount = 0;
     for (const arr of this.queuedByThread.values()) queuedCount += arr.length;
+    const uniqueDrafts = new Set();
+    for (const d of this.privateDrafts.values()) if (d?.id) uniqueDrafts.add(d.id);
     return {
       connected: this.sseConnected,
       sseAuthFailed: Boolean(this.sseAuthError),
       proactive: this.proactive !== false,
       quietPending: this.quietQueue.length,
       activeTurns: this.activeTurns.size,
+      inFlightTurns: this.inFlightTurns.size,
       queuedCount,
       pendingCards: this.pendingCards.size,
       stickyActive: this.isStickyActive(),
@@ -330,22 +420,68 @@ export class OpenMausBotBridge {
       chatPolicy: this.getChatPolicy(),
       scheduledSummaries: this.scheduledSummaries.filter((s) => s.enabled !== false).length,
       pendingSendBack: Boolean(this.pendingSendBack && this.now() < this.pendingSendBack.expiresAt),
+      privateDraftsCount: uniqueDrafts.size,
+      outboundBuffered: this.disconnectedBuffer.length,
+      outboundFailures: this.outboundFailures,
+      outboundReplayed: this.outboundReplayed,
+      sseReconnects: this.sseReconnects,
+      stateSaveErrors: this.stateSaveErrors,
+      stateCorruptRecoveries: this.stateCorruptRecoveries,
+      uptimeSec: Math.max(0, Math.round((this.now() - this.startedAt) / 1000)),
       context: this.imContext?.stats?.() ?? this.localContextStore.stats(),
     };
   }
 
-  async start() {
-    if (this.fileRetentionDays > 0) {
-      const ttlMs = this.fileRetentionDays * DAY_MS;
-      pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
-      this.cleanupTimer = setInterval(() => pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() }), DAY_MS);
-      this.cleanupTimer.unref?.();
+  #pruneMemoryCaches() {
+    const now = this.now();
+    for (const [k, ent] of this.fileMsgs) {
+      if ((ent?.at || 0) + FILE_TTL < now) this.fileMsgs.delete(k);
     }
+    for (const [k, exp] of this.pendingOutFiles) {
+      if (exp <= now) this.pendingOutFiles.delete(k);
+    }
+    for (const [k, at] of this.recent) {
+      if (now - at > ECHO_TTL) this.recent.delete(k);
+    }
+    const draftCutoff = now - (Number(this.draftTtlMs) || 30 * 60_000);
+    for (const [k, v] of this.privateDrafts) {
+      if ((v?.createdAt || 0) < draftCutoff) this.privateDrafts.delete(k);
+    }
+  }
+
+  #resumeInFlightTurns() {
+    if (!this.inFlightTurns.size) return;
+    const cutoff = this.now() - 30 * 60_000;
+    for (const [key, meta] of [...this.inFlightTurns.entries()]) {
+      if (!meta?.botId || !meta?.threadId || (meta.startedAt && meta.startedAt < cutoff)) {
+        this.inFlightTurns.delete(key);
+        continue;
+      }
+      if (this.activeTurns.has(key)) continue;
+      const turn = this.#trackTurn(meta);
+      turn.startWatcher();
+      this.emitTelemetry('turn_resumed', {
+        botName: meta.botName || 'MausBot',
+        chatId: meta.chatCtx?.originChatId || this.selfChat || null,
+        summary: `thread=${meta.threadId}`,
+      });
+    }
+  }
+
+  async start() {
+    const ttlMs = this.fileRetentionDays > 0 ? this.fileRetentionDays * DAY_MS : 0;
+    if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+    this.cleanupTimer = setInterval(() => {
+      if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+      this.#pruneMemoryCaches();
+    }, DAY_MS);
+    this.cleanupTimer.unref?.();
     await this.transport.start((ev) => this.onEvent(ev).catch((e) => console.error('[omb-bridge]', e)));
     this.sseAc = new AbortController();
     this.sseTask = this.client.subscribeEvents((evt) => this.#onSseEvent(evt), {
       signal: this.sseAc.signal,
       onError: (e) => {
+        if (this.sseConnected) this.sseReconnects += 1;
         this.sseConnected = false;
         if (e?.status === 401 || e?.status === 403) {
           this.consecutiveSseErrors = 0;
@@ -379,6 +515,10 @@ export class OpenMausBotBridge {
     }, 30_000);
     this.summaryTimer.unref?.();
     await this.refreshMultiBot();
+    this.#resumeInFlightTurns();
+    if (!this.#isTransportDisconnected() && this.disconnectedBuffer.length) {
+      this.flushOutboundBuffer().catch(() => {});
+    }
   }
 
   async stop() {
@@ -392,9 +532,10 @@ export class OpenMausBotBridge {
     this.cleanupTimer = null;
     this.#clearPendingMedia();
     this.sseAc?.abort();
+    await this.drainOutbound(2000).catch(() => {});
     for (const turn of [...this.activeTurns.values()]) turn.dispose();
     this.activeTurns.clear();
-    this.saveState();
+    this.flushState();
     await this.sseTask?.catch(() => {});
     await this.transport.stop?.();
   }
@@ -417,6 +558,7 @@ export class OpenMausBotBridge {
             if (t?.threadId) byThread.set(t.threadId, { ...entry, threadId: t.threadId });
           }
         }
+        while (byThread.size > 500) byThread.delete(byThread.keys().next().value);
       };
       indexEntities(bots, this.botById, this.botByThread, false);
       indexEntities(groups, this.groupById, this.groupByThread, true);
@@ -501,11 +643,13 @@ export class OpenMausBotBridge {
   #recordInboundToContext(ev) {
     if (!ev?.id || !ev?.chat?.id) return;
     const cid = String(ev.chat.id);
+    if (this.externalChatMeta.has(cid)) this.externalChatMeta.delete(cid);
     this.externalChatMeta.set(cid, {
       id: cid,
       type: ev.chat.type,
       name: ev.chat.name ? String(ev.chat.name) : this.externalChatMeta.get(cid)?.name,
     });
+    if (this.externalChatMeta.size > 200) this.externalChatMeta.delete(this.externalChatMeta.keys().next().value);
     if (this.imContext) this.imContext.recordInbound(ev);
     else this.localContextStore.recordInbound(ev);
   }
@@ -727,6 +871,8 @@ export class OpenMausBotBridge {
     let size = 0;
     try { size = fs.statSync(filePath).size; } catch { /* ignore */ }
     const exp = this.now() + 30_000;
+    if (this.pendingOutFiles.size > 200) this.#pruneMemoryCaches();
+    while (this.pendingOutFiles.size > 200) this.pendingOutFiles.delete(this.pendingOutFiles.keys().next().value);
     if (size > 0) this.pendingOutFiles.set(`${safe}:${size}`, exp);
     this.pendingOutFiles.set(safe, exp);
     const caps = this.#channelCaps();
@@ -743,6 +889,67 @@ export class OpenMausBotBridge {
       });
     }
     return fid;
+  }
+
+  #isTransportDisconnected() {
+    return this.transport?.status?.()?.connected === false;
+  }
+
+  #bufferOutbound(item) {
+    const now = this.now();
+    this.disconnectedBuffer = this.disconnectedBuffer.filter((x) => x.expiresAt > now);
+    this.disconnectedBuffer.push(item);
+    const cap = Math.max(1, Number(this.outboundBufferMax) || 30);
+    while (this.disconnectedBuffer.length > cap) this.disconnectedBuffer.shift();
+    this.emitTelemetry('outbound_buffered', {
+      chatId: item.chatId,
+      summary: item.text,
+    });
+  }
+
+  #enqueueOutbound(chatId, fn) {
+    const key = String(chatId || '_default');
+    const prev = this.outboundQueue.get(key) ?? Promise.resolve();
+    const task = prev.then(fn, fn);
+    const tail = task.catch(() => {}).finally(() => {
+      if (this.outboundQueue.get(key) === tail) this.outboundQueue.delete(key);
+    });
+    this.outboundQueue.set(key, tail);
+    return task;
+  }
+
+  async drainOutbound(timeoutMs = 2000) {
+    const pending = [...this.outboundQueue.values()];
+    if (!pending.length) return;
+    let timer;
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((r) => { timer = setTimeout(r, timeoutMs); timer.unref?.(); }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  async flushOutboundBuffer() {
+    if (this.#isTransportDisconnected() || !this.disconnectedBuffer.length) return 0;
+    const now = this.now();
+    const items = this.disconnectedBuffer.splice(0).filter((it) => it.expiresAt > now);
+    let replayed = 0;
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      if (this.#isTransportDisconnected()) {
+        for (const rem of items.slice(i)) this.#bufferOutbound(rem);
+        break;
+      }
+      const sid = await this.say(it.text, it.route, it.replyTo, it.actions, { chatId: it.chatId, noBuffer: true });
+      if (sid != null) {
+        replayed += 1;
+        this.outboundReplayed += 1;
+      }
+    }
+    if (replayed > 0) {
+      this.emitTelemetry('outbound_replayed', { summary: `replayed=${replayed}` });
+    }
+    return replayed;
   }
 
   async say(text, route = null, replyTo = null, actions = null, extra = {}) {
@@ -762,30 +969,59 @@ export class OpenMausBotBridge {
       ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
       ...(Array.isArray(actions) && actions.length && caps?.actions !== false ? { actions } : {}),
     };
-    const retries = Math.max(0, Number(this.sendRetries) || 0);
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const sentId = await this.transport.send(chatId, body, opts);
-        if (sentId != null) {
-          const sid = String(sentId);
-          rememberBounded(this.ownIds, sid, 2000);
-          if (route?.botId) {
-            this.msgRoute.set(sid, route);
-            if (this.msgRoute.size > 500) this.msgRoute.delete(this.msgRoute.keys().next().value);
-            this.saveState();
-          }
-          return sid;
-        }
+
+    return this.#enqueueOutbound(chatId, async () => {
+      if (!extra?.noBuffer && this.#isTransportDisconnected()) {
+        this.#bufferOutbound({
+          chatId,
+          text,
+          route,
+          replyTo,
+          actions,
+          expiresAt: this.now() + (Number(this.outboundBufferTtlMs) || 5 * 60_000),
+        });
         return null;
-      } catch (e) {
-        if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, (Number(this.sendRetryDelayMs) || 400) * (attempt + 1)));
-          continue;
-        }
-        console.error('[omb-send]', e.message);
       }
-    }
-    return null;
+      const retries = Math.max(0, Number(this.sendRetries) || 0);
+      let lastErr = null;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const sentId = await this.transport.send(chatId, body, opts);
+          if (sentId != null) {
+            const sid = String(sentId);
+            rememberBounded(this.ownIds, sid, 2000);
+            if (route?.botId) {
+              this.msgRoute.set(sid, route);
+              if (this.msgRoute.size > 500) this.msgRoute.delete(this.msgRoute.keys().next().value);
+              this.saveState();
+            }
+            return sid;
+          }
+          return null;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < retries) {
+            await new Promise((r) => setTimeout(r, (Number(this.sendRetryDelayMs) || 400) * (attempt + 1)));
+            continue;
+          }
+          this.outboundFailures += 1;
+          this.emitTelemetry('outbound_failed', { chatId, summary: e?.message || 'send failed' });
+          if (!extra?.noBuffer && (this.#isTransportDisconnected() || extra?.bufferOnFail)) {
+            this.#bufferOutbound({
+              chatId,
+              text,
+              route,
+              replyTo,
+              actions,
+              expiresAt: this.now() + (Number(this.outboundBufferTtlMs) || 5 * 60_000),
+            });
+          }
+          console.error('[omb-send]', e.message);
+        }
+      }
+      void lastErr;
+      return null;
+    });
   }
 
   getKnownBotNames() {
@@ -834,6 +1070,9 @@ export class OpenMausBotBridge {
 
   async onEvent(ev) {
     if (!ev || !ev.id || !ev.chat?.id) return;
+    if (this.disconnectedBuffer.length && !this.#isTransportDisconnected()) {
+      this.flushOutboundBuffer().catch(() => {});
+    }
     const chatId = String(ev.chat.id);
     const chatType = ev.chat.type || 'direct';
     const isSelfChat = chatType === 'self';
@@ -1113,6 +1352,19 @@ export class OpenMausBotBridge {
         replyToOmbId = quotedRoute.ombMsgId ?? null;
       }
 
+      const polishSource = isSelfChat && quotedId ? this.privateDrafts.get(quotedId) : null;
+      if (polishSource?.originChatId && polishSource.createdAt >= (this.now() - (Number(this.draftTtlMs) || 30 * 60_000))) {
+        chatCtx.polishDraft = {
+          originChatId: polishSource.originChatId,
+          originChatName: polishSource.originChatName || polishSource.originChatId,
+          originChatType: polishSource.originChatType || 'group',
+          replyToImMsgId: polishSource.replyToImMsgId ?? null,
+        };
+        const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
+        const promptForDraft = `[待润色草稿 · 原目标会话「${chatCtx.polishDraft.originChatName}」]\n${polishSource.rawText}\n\n[改写要求]\n${ask}`;
+        return this.dispatchToBot(targetBot, promptForDraft, mid, quotedId, replyToOmbId, chatCtx);
+      }
+
       if (!bodyText && !atts.length) {
         if (!quotedId) {
           return this.say(buildHelpText(this), { targetChatId: chatCtx.replyChatId }, chatCtx.replyToImMsgId);
@@ -1155,6 +1407,18 @@ export class OpenMausBotBridge {
         privateReply,
         ev,
       });
+      const polishSource = isSelfChat && quotedId ? this.privateDrafts.get(quotedId) : null;
+      if (polishSource?.originChatId && polishSource.createdAt >= (this.now() - (Number(this.draftTtlMs) || 30 * 60_000))) {
+        chatCtx.polishDraft = {
+          originChatId: polishSource.originChatId,
+          originChatName: polishSource.originChatName || polishSource.originChatId,
+          originChatType: polishSource.originChatType || 'group',
+          replyToImMsgId: polishSource.replyToImMsgId ?? null,
+        };
+        const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
+        const promptForDraft = `[待润色草稿 · 原目标会话「${chatCtx.polishDraft.originChatName}」]\n${polishSource.rawText}\n\n[改写要求]\n${ask}`;
+        return this.dispatchToBot(targetBot, promptForDraft, mid, quotedId, replyToOmbId, chatCtx);
+      }
       if (!bodyText && !atts.length) {
         return this.say(buildHelpText(this), { targetChatId: chatCtx.replyChatId }, chatCtx.replyToImMsgId);
       }
@@ -1440,6 +1704,7 @@ export class OpenMausBotBridge {
         const lastAt = this.lastAutoCompactAt.get(threadId) || 0;
         if ((this.now() - lastAt) >= 5 * 60_000) {
           this.lastAutoCompactAt.set(threadId, this.now());
+          if (this.lastAutoCompactAt.size > 200) this.lastAutoCompactAt.delete(this.lastAutoCompactAt.keys().next().value);
           await this.client.compact(botId, threadId);
           this.contextWarnedThreads.delete(threadId);
           const originLabel = chatCtx.chatName || chatCtx.originChatId;
@@ -1452,7 +1717,7 @@ export class OpenMausBotBridge {
       }
 
       if (this.contextWarnedThreads.has(threadId) || ratio < 0.8) return;
-      this.contextWarnedThreads.add(threadId);
+      rememberBounded(this.contextWarnedThreads, threadId, 200);
       const cmdTarget = botCommandTarget(this, botId, bot?.name);
       const compactCmd = chatCtx?.isExternal ? `${cmdTarget} compact ${chatCtx.originChatId}` : `${cmdTarget} compact`;
       const originBanner = chatCtx?.isExternal
@@ -1668,6 +1933,15 @@ export class OpenMausBotBridge {
       chatCtx: compactCtx,
     });
     turn.startWatcher();
+    if (isExternal && ctxInfo.silentProgress && this.chats.externalAckInSelf && this.selfChat) {
+      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${bot.name}` : this.trigger;
+      this.say(
+        `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…`,
+        { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: this.selfChat },
+        null,
+        [{ label: '停止', text: `${cmdTarget} stop`, kind: 'danger' }],
+      ).catch(() => {});
+    }
     return receipt;
   }
 
@@ -1795,12 +2069,28 @@ export class OpenMausBotBridge {
       } : {}),
     };
     const isPrivDraft = Boolean(isExternal && chatCtx?.privateReply && !proactive && chatCtx?.originChatId);
+    const isPolishDraft = Boolean(!proactive && !isExternal && chatCtx?.polishDraft?.originChatId);
+    const draftMeta = isPrivDraft
+      ? {
+          originChatId: chatCtx.originChatId,
+          originName,
+          originChatType: chatCtx.chatType || 'group',
+          replyToImMsgId: chatCtx.originQuoteId ?? null,
+        }
+      : (isPolishDraft
+        ? {
+            originChatId: chatCtx.polishDraft.originChatId,
+            originName: chatCtx.polishDraft.originChatName || chatCtx.polishDraft.originChatId,
+            originChatType: chatCtx.polishDraft.originChatType || 'group',
+            replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
+          }
+        : null);
     const effResult = this.#effectiveResultChars();
     const effSoftSplit = this.#effectiveSoftSplitChars();
 
-    const draftKey = isPrivDraft ? `draft_${this.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
+    const draftKey = draftMeta ? `draft_${this.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
     const draftActions = draftKey
-      ? [{ label: `发回「${clip(originName, 10)}」`, text: `${this.trigger} sendback ${draftKey}` }]
+      ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${this.trigger} sendback ${draftKey}` }]
       : null;
 
     let firstSentId = null;
@@ -1839,14 +2129,14 @@ export class OpenMausBotBridge {
       }
     }
 
-    if (isPrivDraft && draftKey) {
+    if (draftMeta && draftKey) {
       const draftObj = {
         id: draftKey,
         imMsgId: firstSentId || draftKey,
-        originChatId: chatCtx.originChatId,
-        originChatName: originName,
-        originChatType: chatCtx.chatType || 'group',
-        replyToImMsgId: chatCtx.originQuoteId ?? null,
+        originChatId: draftMeta.originChatId,
+        originChatName: draftMeta.originName,
+        originChatType: draftMeta.originChatType,
+        replyToImMsgId: draftMeta.replyToImMsgId,
         rawText: text,
         createdAt: this.now(),
       };

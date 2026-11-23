@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.js';
+import { loadConfig, validateConfig } from './config.js';
 import { Kernel } from './core/kernel.js';
 import { webPlugin } from './plugins/web.js';
 import { loadChannelPlugin } from './plugins/channel-loader.js';
@@ -35,11 +35,28 @@ export async function createApp(cfg, { ensureOmb = false, channelOverride = '' }
  * co-bot 入口：基于插件微内核装配 Web、IM 通道、OpenMausBot 网关与本地只读诊断台。
  */
 async function main() {
+  const cfgPath = fs.existsSync('config.json') ? 'config.json' : null;
+  if (cfgPath) {
+    try {
+      const v = validateConfig(JSON.parse(fs.readFileSync(cfgPath, 'utf8')));
+      for (const w of v.warnings) console.warn(`[co-bot:config] ⚠ ${w}`);
+      for (const e of v.errors) console.error(`[co-bot:config] ✗ ${e}`);
+    } catch (e) {
+      console.error(`[co-bot:config] ✗ 解析 ${cfgPath} 失败：${e.message}`);
+    }
+  }
   const cfg = loadConfig();
   fs.mkdirSync(cfg.dataDir, { recursive: true });
   rotateManagedLogs(cfg.dataDir);
   const logRotateTimer = setInterval(() => rotateManagedLogs(cfg.dataDir), LOG_ROTATE_INTERVAL_MS);
   logRotateTimer.unref?.();
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[co-bot] unhandledRejection:', reason instanceof Error ? (reason.stack || reason.message) : reason);
+  });
+  process.on('uncaughtExceptionMonitor', (err, origin) => {
+    console.error(`[co-bot] ${origin}:`, err?.stack || err?.message || err);
+  });
 
   const ensureOmb = process.argv.includes('--ensure-omb');
   const { kernel, channelName } = await createApp(cfg, { ensureOmb });

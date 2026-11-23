@@ -15,10 +15,11 @@
    ```bash
    npm install
    ```
-2. 后台常驻启动（若本机尚未运行 OpenMausBot，`npm run daemon` 会自动拉起依赖里的 OpenMausBot CLI，并将 CLI 主 Bot 的 `computer` 设为 `off` 以直通本地 `opencode`）：
+2. 后台常驻启动（首次可运行 `npm run setup` 交互式生成 `config.json` 与插件模板；若本机尚未运行 OpenMausBot，`npm run daemon` 会自动拉起依赖里的 OpenMausBot CLI，并将 CLI 主 Bot 的 `computer` 设为 `off` 以直通本地 `opencode`）：
    ```bash
+   npm run setup          # 交互式初始化配置（支持 --non-interactive --mode sim|plugin|ipc）
    npm run daemon         # Linux / macOS / Windows 通用后台启动（先确保 OpenMausBot 就绪，再启动 co-bot）
-   npm run check          # 自检 Node / 本地 openmausbot 依赖 / opencode / OpenMausBot 状态（可选 -- --fix-cli / --apply-style）
+   npm run check          # 自检配置文件（未知字段/端口/时间校验）与 Node/openmausbot/opencode/OpenMausBot 状态（可选 -- --fix-cli / --apply-style）
    npm run status         # 查看 co-bot 与 OpenMausBot 状态
    npm run restart        # 平滑重启 co-bot（不中断 OpenMausBot 里的进行中任务）
    npm run stop           # 仅停止 co-bot（加 -- --all 可一并停止托管的 OpenMausBot CLI）
@@ -40,7 +41,7 @@
 
 - **`@bot <内容>`**（或 `@ai <内容>`）：发给 OpenMausBot 的默认主 Bot（`chiefOfStaff`）。主 Bot 默认不显示 `**[MausBot]**` 名字前缀（`hideChiefPrefix: true`），保持 1v1 私聊纯净感。
 - **短时连续对话与贴图直发（默认 2 分钟）**：主 Bot / 指定 Bot 回复后，`selfChat.followUpWindowMs`（默认 `120000` ms，设为 `0` 可关闭）内不用再打 `@bot`，直接发文字或连续发送图片/文件（`imageBatchMs` 防抖合批，默认 `1500` ms）即可续聊；以 `#`、`备忘`、`记一下`、`笔记`、`todo` 开头的自聊笔记不会被误发；回复 `@bot bye` / `退下` 可随时结束。
-- **`@<Bot名> <内容>`** / **`@<群名> <内容>`** 与 **引用气泡**：随时 `@` OpenMausBot 团队里的其他 Bot（自动标出 `**[Bot名]**`）或协作群组（自动标出 `**[群名 · 发言Bot名]**`，支持群内多 Bot 接力回复、群会话切换 `tasks`/`new` 与 `stop`/`steer`/`cancel`）；点击或引用历史回复气泡可跨线程续聊（`focus`、`msgRoute`、`quietQueue`、`pendingCards`、`deliveredOmbIds` 均持久化在 `data/bridge-state.json`，重启零丢态；临时附件默认保留 7 天自动清理 `fileRetentionDays`）。
+- **`@<Bot名> <内容>`** / **`@<群名> <内容>`** 与 **引用气泡**：随时 `@` OpenMausBot 团队里的其他 Bot（自动标出 `**[Bot名]**`）或协作群组（自动标出 `**[群名 · 发言Bot名]**`，支持群内多 Bot 接力回复、群会话切换 `tasks`/`new` 与 `stop`/`steer`/`cancel`）；点击或引用历史回复气泡可跨线程续聊（`focus`、`msgRoute`、`quietQueue`、`pendingCards`、`deliveredOmbIds`、`inFlightTurns`、`privateDrafts` 均防抖持久化在 `data/bridge-state.json`，损坏自动 `.corrupt` 备份自愈，重启续接在途任务不丢回复；临时附件默认保留 7 天自动清理 `fileRetentionDays`）。
 - **会话创建、切换、检索与导出**：
   - `@bot new [新话题]` / `@bot compact`：新建干净会话 / 压缩当前长会话上下文；
   - `@bot tasks` / `@bot task <序号>`：列出最近 5 个会话并支持数字 `1`～`5` 快速切换；
@@ -60,7 +61,8 @@
 - **忙时排队与插队**：前一条任务仍在执行时新消息自动提示排队状态，可发 **`@bot steer`**（或 **`插队`**）即时插队，或发 **`@bot cancel`** 取消排队；也可随时 `@bot stop` 中断执行。
 - **手机私聊人格预设**：发送 **`@bot style grok`**（或运行 `npm run check -- --apply-style`）可将主 Bot 设为 `conversational` 回复风格与移动端简洁人格（`@bot style default` 可恢复）。
 - **主动通知与免打扰**：OpenMausBot 定时 Routine / 异步推送以 `🔔` 回流；开启 `selfChat.quietHours` 后在夜间先攒成摘要，结束时自动发出或 `@bot digest` 立即汇总。
-- **其他常用指令**：`@bot bots`、`@bot status`、`@bot help`。
+- **其他常用指令与防错**：`@bot bots`、`@bot status`、`@bot help [群聊|定时|会话|模型|全部]`；常见拼错指令自动给出纠错快捷按钮。
+- **稳定性保护**：支持长任务停滞看门狗（`selfChat.turnStallMs`，超时在自聊提醒并附 `stop` 按钮）、IM 断线出站缓冲重放与按会话串行发送队列。
 - **原生附件双向互通**：
   - 手机发来的图片/日志（或 Web 模拟器 `Ctrl+V` 粘贴 / `+` 上传）自动上传至 OpenMausBot 并嵌入原生 `<attached-image>` / `<attached-file>` 标签；
   - OpenMausBot 回复中产生的图片或文件会自动拉取并通过 `sendFile` 发回自聊；超长正文自动附带 `.md` 原文附件。
@@ -77,8 +79,8 @@
 - **出站 `@提及` 自动防误艾特**：在外部群/他人私聊公开回复时，通过 `chats.externalSanitizeMentions`（默认 `"all"`，可选 `"dangerous"` / `"none"`）自动对散落 `@所有人` / `@同事` / `@Bot` 插入零宽空格（`@\u200B...`）防误触发，同时保留邮箱（`ops@example.com`）与代码块原貌；使用 `@bot!` / `-p` 发回**自聊**的私密草稿仍原样保留 `@`。
 - **原地回复 vs 私密起草与确认回发**：
   - `@bot 总结一下刚才的分歧` → 引用你的触发消息原地回复（仅发送干净终稿，中间思考噪声通过 `externalSilentProgress` 自动静音）；引用 Bot 的回复继续追问即可接力该话题；
-  - `@bot! 总结成周报` 或 `@bot -p ...` → 把完整答复加上 `📩 私密回复 · 来自「xxx」` 标签发回你的**自聊**，群里零打扰；
-  - 对自聊收到的私密草稿发送 `@bot sendback`（或直接点草稿下方按钮）→ 在自聊预览确认后再回复 **`确认发送`**（或 `改：<新文本>` / `取消`），确认后自动做 `externalSanitizeMentions` 防误艾特并引用原群触发消息发回原群。
+  - `@bot! 总结成周报` 或 `@bot -p ...` → 把完整答复加上 `📩 私密回复 · 来自「xxx」` 标签发回你的**自聊**，群里零打扰；草稿持久保存（默认 30 分钟），可在自聊引用草稿后 `@bot 改得更委婉简短` 连续润色新版并继承原群路由；
+  - 对自聊收到的私密草稿（初版或润色版）发送 `@bot sendback`（或直接点草稿下方按钮）→ 在自聊预览确认后再回复 **`确认发送`**（或 `改：<新文本>` / `取消`），确认后自动做 `externalSanitizeMentions` 防误艾特并引用原群触发消息发回原群。
 - **结构化 `@提及`、撤回擦除与连发多附件合批**：
   - 支持 `InboundEvent` 结构化 `mentions` 与 `kind: "recall"` 撤回事件（`/sim` 提供 `POST /recall`）；成员撤回消息后即时从内存窗口、历史回填白名单、待传队列及本地附件缓存擦除；
   - 群成员短时间（`chats.recentAttachmentWindowMs`，默认 `120000` ms）内连发多张截图或日志时，只需引用其中一条或直接提问如 `@bot 对比上面两份日志`，系统自动按时间顺序打包同批连续附件（上限 `chats.maxAutoAttachments`，默认 `4`）一并上传给 OpenMausBot。
@@ -124,8 +126,8 @@
 2. 在 `config.json` 中将 `transport` 改为 `"ipc"`，填入 `ipc.selfId`（以及可选 `ipc.selfChatId`，留空将在首次自聊后自动学习并持久化到 `data/bridge-state.json`）。
 3. 运行 `npm run check` 与 `npm run ipc:smoke -- --wait 15` 验证，通过后运行 `npm run daemon`（或 `./start-cobot.sh` / `.\start-cobot.ps1`）。
 
-### 本地只读诊断台（`/debug`）与排障手册
-- 启动后访问 `http://127.0.0.1:8787/debug`（无头 IM 模式下访问 `/` 亦直达此页），可实时查看已加载插件列表、当前通道 `capabilities` 声明、各群/私聊策略与隔离 Thread 列表、**定时跨群纪要（Scheduled Summaries）**、待确认回发草稿状态、OpenMausBot 在线 Bot/群组状态，以及按 `chatId` / `source` / **`type`**（如 `recall`、`sendback`、`dispatch`）筛选的最近 80 条脱敏事件流；Web 模拟器 `/sim` 同步支持气泡一键 **撤回** 与跨群指令快捷提示。
+### 本地诊断与运维台（`/debug`）与排障手册
+- 启动后访问 `http://127.0.0.1:8787/debug`（无头 IM 模式下访问 `/` 亦直达此页），可实时查看进程内存/运行时长、在途续接与断线缓冲指标、已加载插件列表、当前通道 `capabilities` 声明、各群/私聊策略（支持直接点**静音/允许**）与隔离 Thread 列表、**定时跨群纪要（Scheduled Summaries）**（支持直接**试跑 / 启停**）、待确认回发草稿状态、OpenMausBot 在线 Bot/群组状态、一键**导出脱敏诊断包 JSON**，以及按 `chatId` / `source` / **`type`**（含 `recall`、`sendback`、`turn_resumed`、`turn_stalled`、`outbound_buffered` 等）筛选的最近 80 条脱敏事件流；Web 模拟器 `/sim` 同步支持气泡一键 **撤回** 与跨群指令快捷提示。
 - 真实 IM 上线核对与常见问题速查见：[真实 IM 接入与常见排障手册](./docs/TROUBLESHOOTING.md)。
 
 ## 目录结构
@@ -153,7 +155,8 @@ public/                       /sim 自聊模拟页、/debug 只读诊断页与 .
 docs/TROUBLESHOOTING.md       真实 IM 接入上线 Checklist 与常见故障排查手册
 .github/workflows/ci.yml      GitHub Actions CI（单测 + 通道契约自检 + 自启配置预览）
 scripts/channel-test.js       通用 IM 通道契约测试与收发验证器（npm run channel:test）
-scripts/check.js              启动前 Node/openmausbot/opencode/通道插件自检
+scripts/check.js              启动前配置合法性与 Node/openmausbot/opencode/通道插件自检
+scripts/setup.js              零依赖交互式初始化向导（npm run setup）
 scripts/daemon.js             跨平台后台守护进程与自启服务管理（start/stop/restart/status/logs/install-service/uninstall-service）
 scripts/service.js            跨平台开机自启服务生成器（Linux systemd --user / macOS LaunchAgents / Windows 启动项）
 scripts/ipc-smoke.js          IM IPC 联调冒烟测试脚本（npm run ipc:smoke）

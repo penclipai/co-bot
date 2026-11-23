@@ -6,9 +6,10 @@
 
 ## 一、真机上线 Checklist
 
-1. **前置依赖自检**
+1. **交互初始化与前置依赖自检**
    ```bash
    npm install
+   npm run setup -- --mode plugin   # 可选：交互生成 config.json 与 ./im-plugin.js 模板
    npm run check
    ```
    - 确认 `Node.js >= 24`、`openmausbot` 本地依赖就绪、底端引擎（如 `opencode`）正常。

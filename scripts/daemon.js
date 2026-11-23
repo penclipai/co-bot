@@ -89,8 +89,8 @@ async function startDaemon(cfg, { pidFile, logFile, errFile, extraArgs }) {
     logFile,
     errFile,
     healthUrl,
-    timeoutMs: 2500,
-    pollIntervalMs: 100,
+    timeoutMs: 8000,
+    pollIntervalMs: 120,
   });
 
   const outTail = tailLogLines(logFile, 8);

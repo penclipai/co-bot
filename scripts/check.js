@@ -8,7 +8,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadConfig, APP_ROOT } from '../src/config.js';
+import { loadConfig, validateConfig, APP_ROOT } from '../src/config.js';
 import { OpenMausBotClient } from '../src/openmausbot/client.js';
 import { GROK_MOBILE_PROFILE } from '../src/openmausbot/persona.js';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.js';
@@ -19,9 +19,26 @@ const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
 const applyStyle = argv.includes('--apply-style');
 const forceStyle = argv.includes('--force');
+const cfgIdx = argv.indexOf('--config');
+const explicitCfg = cfgIdx >= 0 && argv[cfgIdx + 1] ? argv[cfgIdx + 1] : null;
+const rawCfgPath = explicitCfg ?? (fs.existsSync('config.json') ? 'config.json' : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null));
+let fails = 0;
+
+if (rawCfgPath && fs.existsSync(rawCfgPath)) {
+  try {
+    const rawJson = JSON.parse(fs.readFileSync(rawCfgPath, 'utf8'));
+    const v = validateConfig(rawJson);
+    for (const w of v.warnings) console.log(`⚠ [config] ${w}`);
+    for (const e of v.errors) { console.error(`✗ [config] ${e}`); fails++; }
+    if (v.ok && !v.warnings.length) console.log(`✓ 配置文件校验通过（${rawCfgPath}）`);
+  } catch (e) {
+    console.error(`✗ 配置文件 JSON 解析失败（${rawCfgPath}）：${e.message}`);
+    fails++;
+  }
+}
+
 const cfg = loadConfig(argv);
 const [maj, min] = process.versions.node.split('.').map(Number);
-let fails = 0;
 
 if (maj >= 24) {
   console.log(`✓ Node.js v${process.versions.node}`);

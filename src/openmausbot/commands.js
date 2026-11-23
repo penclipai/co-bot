@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { clip, mdClip, safeAttachmentName } from '../format.js';
 import { fmtTokens, usageBar, fmtSchedule, formatOmbError, parseChoiceIndex } from './cards.js';
+import { levenshtein } from './mentions.js';
 import { GROK_MOBILE_PROFILE } from './persona.js';
 
 const TASK_PICK_TTL = 2 * 60 * 1000;
@@ -49,19 +50,112 @@ export function botCommandTarget(bridge, botId, botName) {
   return bridge.trigger;
 }
 
-/** 构造 `@bot help` 简洁使用说明。 */
-export function buildHelpText(bridge) {
+const CANONICAL_COMMANDS = [
+  'help', 'bots', 'groups', 'status', 'stop', 'steer', 'cancel', 'digest',
+  'chats', 'chat', 'summary', 'schedule', 'sendback', 'find', 'search',
+  'routines', 'context', 'export', 'model', 'memory', 'tasks', 'task', 'style', 'compact',
+];
+const COMMAND_SET = new Set(CANONICAL_COMMANDS);
+const SAFE_ENGLISH_WORDS = new Set([
+  'hello', 'check', 'test', 'write', 'read', 'show', 'list', 'send', 'make', 'create',
+  'update', 'delete', 'thanks', 'please', 'what', 'when', 'where', 'which', 'explain',
+  'review', 'debug', 'build', 'deploy', 'plan', 'code', 'note', 'time', 'date', 'file',
+  'ping', 'echo', 'good', 'nice', 'fine', 'true', 'false', 'null', 'exit', 'quit', 'info',
+  'next', 'back', 'home', 'work', 'call', 'wait', 'done', 'more', 'less', 'sort', 'diff',
+  'stat', 'stats', 'logs', 'sync', 'push', 'pull', 'step', 'shop', 'spot', 'stay', 'mode',
+  'node', 'most', 'rest', 'best', 'fast', 'last', 'look', 'news', 'view', 'mind', 'kind',
+  'bind', 'wind', 'fund', 'hand', 'land', 'hold', 'tell', 'well', 'hell', 'sent', 'went',
+  'that', 'with', 'this', 'from', 'your', 'have', 'will', 'just', 'like', 'take', 'give',
+  'keep', 'turn', 'move', 'copy', 'save', 'load', 'open', 'close', 'start', 'clean', 'clear',
+  'reset', 'verify', 'count', 'parse', 'format', 'print', 'fetch', 'post', 'patch', 'head',
+  'line', 'mine', 'nine', 'disk', 'risk', 'desk', 'boot', 'root', 'soon', 'tool', 'loop',
+  'star', 'form', 'port', 'host', 'cost', 'lost', 'atop', 'stow', 'stops', 'cats', 'that',
+  'than', 'then', 'them', 'they', 'book', 'cool',
+]);
+
+/** 仅当首词明显像是拼错的内建 ASCII 子命令时给出纠错提示，绝不误拦正常英文提问。 */
+export function suggestClosestCommand(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return null;
+  const toks = trimmed.split(/\s+/).filter(Boolean);
+  if (toks.length === 0 || toks.length > 2) return null;
+  const tok = toks[0];
+  if (!/^[a-z]{4,14}$/i.test(tok)) return null;
+  const low = tok.toLowerCase();
+  if (COMMAND_SET.has(low) || SAFE_ENGLISH_WORDS.has(low)) return null;
+
+  let bestCmd = null;
+  let bestDist = Infinity;
+  for (const cmd of CANONICAL_COMMANDS) {
+    const d = levenshtein(low, cmd);
+    if (d < bestDist) {
+      bestDist = d;
+      bestCmd = cmd;
+    }
+  }
+  if (!bestCmd) return null;
+  const accepted = bestDist === 1 || (bestDist === 2 && bestCmd.length >= 6 && low.length >= 5 && low[0] === bestCmd[0]);
+  if (!accepted) return null;
+  return {
+    typo: tok,
+    suggestion: bestCmd,
+    fullSuggestion: toks[1] ? `${bestCmd} ${toks[1]}` : bestCmd,
+  };
+}
+
+/** 构造 `@bot help [分类]` 简洁使用说明（支持 default / 群聊 / 定时 / 会话 / 模型 / 全部）。 */
+export function buildHelpText(bridge, topic = '') {
   const t = bridge.trigger;
+  const key = String(topic ?? '').trim().toLowerCase();
+  const sections = {
+    group: [
+      `💬 **群聊与跨群能力**`,
+      `- 任意群 / 私聊：本人 \`${t} <问题>\` 原地回复；\`${t}!\` 或 \`${t} -p\` 私密起草回自聊（可持久化并引用继续润色）`,
+      `- \`${t} sendback\`：预览确认后防误艾特发回原群（支持 \`确认发送\` / \`改：新文本\` / \`取消\`）`,
+      `- \`${t} chats\` / \`chat mute|allow <群>\` / \`chat mode self_only|everywhere\`：实时管群与静默`,
+      `- \`${t} summary <群名> [条数]\` / \`纪要 <群名>\`、\`${t} find [in:<群>] <关键词>\`：零打扰汇总与跨群检索`,
+    ],
+    schedule: [
+      `🗓️ **定时纪要与巡检**`,
+      `- \`${t} schedule add <群名|id> <HH:MM> [重点]\`：每日定时静默汇总到自聊（支持 \`list | run | on | off | del\`）`,
+      `- \`${t} routines\` / \`routines run <序号>\` / \`on|off <序号>\`：管理 OpenMausBot 定时巡检`,
+      `- \`${t} digest\`：立即汇总免打扰期间积压的通知消息`,
+    ],
+    session: [
+      `🗂 **多会话与连续对话**`,
+      `- 自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)} 秒内可免 \`@\` 续聊或贴图（\`#\`/备忘开头不打扰，\`${t} bye\` 退出）`,
+      `- \`${t} new [话题]\` / \`tasks\` / \`task <序号>\` / \`search <词>\` / \`export\` / \`compact [群名]\``,
+    ],
+    model: [
+      `🤖 **Bot 协同、模型与控制**`,
+      `- \`@<Bot名>\` / \`@<群名>\`：点名其他 Bot 或多 Bot 协作群组；引用气泡续聊`,
+      `- \`${t} bots\` / \`status\` / \`model [关键词|high]\` / \`context [群名]\` / \`memory\` / \`style grok\``,
+      `- \`${t} steer\` / \`cancel\` / \`stop\`；卡片支持 \`ok / always / no / skip\` 与中文序数`,
+    ],
+  };
+
+  if (/^(群聊|群|chat|chats|group|groups|外部群)$/.test(key)) return sections.group.join('\n');
+  if (/^(定时|schedule|schedules|routine|routines|巡检|纪要)$/.test(key)) return sections.schedule.join('\n');
+  if (/^(会话|session|sessions|task|tasks)$/.test(key)) return sections.session.join('\n');
+  if (/^(模型|model|models|bot|bots|控制)$/.test(key)) return sections.model.join('\n');
+  if (/^(全部|all|full)$/.test(key)) {
+    return [
+      `🤖 **co-bot × OpenMausBot 完整指令**`,
+      ...sections.group,
+      ...sections.schedule,
+      ...sections.session,
+      ...sections.model,
+    ].join('\n');
+  }
+
   return [
-    `🤖 **co-bot × OpenMausBot 用法**`,
-    `- \`${t} <一句话>\`：找主 Bot；自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)} 秒内可免 \`@\` 连续对话与贴图（\`#\`/备忘开头不打扰，\`${t} bye\` 退出）`,
-    `- 任意群 / 私聊：本人发送 \`${t} <一句话>\` 原地回复（自动附带引用消息与最近对话）；加 \`${t}!\` 或 \`${t} -p\` 私密发回自聊`,
-    `- 动态管群与跨群汇总：\`${t} chats\` / \`chat mute|allow <群>\` / \`chat mode self_only\`；\`${t} summary <群名>\` / \`schedule\` / \`find <词>\` / \`sendback\``,
-    `- \`@<Bot名> <一句话>\` / \`@<群名> <一句话>\`：点名其他 Bot 或多 Bot 协作群组；引用 Bot 回复可继续追问`,
-    `- \`${t} new [话题]\` / \`tasks\` / \`search <词>\` / \`export\` / \`compact [群名]\`：新建、切换、检索或导出会话`,
-    `- \`${t} model [关键词|high]\` / \`context [群名]\` / \`style grok\`：切换模型与推理深度、查上下文、切私聊风格`,
-    `- \`${t} routines\` / \`memory\` / \`steer\` / \`stop\`：管理定时巡检与记忆、插队或停止运行`,
-    `- 卡片交互：审批回复 \`ok\` / \`always\` / \`no\`；选项/列表支持 \`1\` 或 \`第一个\` / \`选2\`；桌面端卡片支持 \`skip\` / \`跳过\``,
+    `🤖 **co-bot × OpenMausBot 常用指南**`,
+    `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
+    `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
+    `- \`${t} chats\` / \`summary <群>\` / \`schedule\` / \`find <词>\`：动态管群、跨群纪要与检索`,
+    `- \`${t} new\` / \`tasks\` / \`compact\` / \`model\` / \`context\`：新建切换会话、压缩与切模型`,
+    `- \`${t} steer\` / \`cancel\` / \`stop\`：插队、取消排队或停止任务；卡片支持 \`ok/always/no/skip\``,
+    `📖 发送 \`${t} help 群聊 | 定时 | 会话 | 模型 | 全部\` 查看分类详情`,
   ].join('\n');
 }
 
@@ -109,6 +203,8 @@ async function stopTarget(bridge, target, sink = null, { isExternal = false } = 
   if (active && (active.botId === target.botId || active.threadId === target.threadId)) {
     active.dispose();
     bridge.activeTurns.delete(active.key);
+    bridge.inFlightTurns?.delete(active.key);
+    bridge.saveState();
   }
   if (!isExternal) {
     bridge.lastBotReplyAt = 0;
@@ -122,8 +218,9 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
   const replySink = makeCommandSink(bridge, chatCtx, { sensitive: false });
   const sensSink = makeCommandSink(bridge, chatCtx, { sensitive: true });
 
-  if ((!low && !quotedId && !hasAttachments) || /^(help|帮助|\?|？)$/.test(low)) {
-    await replySink.say(buildHelpText(bridge));
+  const helpM = raw.match(/^(?:help|帮助|\?|？)(?:\s+([\s\S]+))?$/i);
+  if ((!low && !quotedId && !hasAttachments) || helpM) {
+    await replySink.say(buildHelpText(bridge, helpM?.[1] ?? ''));
     return true;
   }
 
@@ -337,8 +434,8 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  // 跨群只读纪要：@bot summary <群名|id> [条数] [关注问题] / @bot 汇总 <群名>
-  const sumM = raw.match(/^(?:summary|recap|群汇总|总结群|汇总)(?:\s+([\s\S]+))?$/i);
+  // 跨群只读纪要：@bot summary <群名|id> [条数] [关注问题] / @bot 汇总|纪要 <群名>
+  const sumM = raw.match(/^(?:summary|recap|群汇总|总结群|汇总|纪要)(?:\s+([\s\S]+))?$/i);
   if (sumM) {
     const restRaw = (sumM[1] ?? '').trim();
     const known = bridge.listKnownChats().filter((c) => c.type !== 'self');
@@ -421,7 +518,7 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
   }
 
   // 跨群定时纪要：@bot schedule [add <群名|id> <HH:MM> [关注重点] | run|on|off|del <序号>]
-  const schedM = raw.match(/^(?:schedule|schedules|定时汇总|每日汇总)(?:\s+([\s\S]+))?$/i);
+  const schedM = raw.match(/^(?:schedule|schedules|定时汇总|每日汇总|定时纪要)(?:\s+([\s\S]+))?$/i);
   if (schedM) {
     const sub = (schedM[1] ?? '').trim();
     if (!sub || /^(list|ls|查看|列表)$/i.test(sub)) {
@@ -1140,6 +1237,20 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       await sensSink.say(`❌ 操作失败：${formatOmbError(e)}`);
     }
     return true;
+  }
+
+  if (isDefault) {
+    const typoHit = suggestClosestCommand(raw);
+    if (typoHit) {
+      const fullCmd = `${bridge.trigger} ${typoHit.fullSuggestion}`;
+      await replySink.say(
+        `🤔 未识别指令 \`${typoHit.typo}\`，你是不是想输入 \`${fullCmd}\`？`,
+        null,
+        null,
+        [{ label: fullCmd, text: fullCmd, kind: 'primary' }],
+      );
+      return true;
+    }
   }
 
   return false;

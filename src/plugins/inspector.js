@@ -1,6 +1,32 @@
 import { clipSummary, normalizeCapabilities } from '../core/channel-contract.js';
+import { redactSecrets } from '../core/chat-context.js';
 
 const MAX_RECENT_EVENTS = 80;
+
+function sanitizeConfigSnapshot(cfg = {}) {
+  const redactSecret = (val) => (val ? '[REDACTED]' : '');
+  const clone = JSON.parse(JSON.stringify(cfg, (k, v) => {
+    if (/^(token|secret|password|apikey|selfid|Authorization)$/i.test(k) && typeof v === 'string' && v) {
+      return redactSecret(v);
+    }
+    if (typeof v === 'string') return redactSecrets(v);
+    return v;
+  }));
+  return clone;
+}
+
+function runtimeSnapshot() {
+  const mem = process.memoryUsage();
+  return {
+    pid: process.pid,
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    uptimeSec: Math.round(process.uptime()),
+    memoryRssMB: Math.round(mem.rss / 1048576),
+    heapUsedMB: Math.round(mem.heapUsed / 1048576),
+  };
+}
 
 /** 本地只读可观测性插件：统一提供 `/api/status`、`/api/debug/events` 与 `/debug` 实时诊断页面。 */
 export const inspectorPlugin = {
@@ -53,7 +79,7 @@ export const inspectorPlugin = {
       };
     };
 
-    web.route('GET', '/api/status', async () => {
+    const buildStatusPayload = async () => {
       const ombSvc = ctx.has('openmausbot') ? ctx.get('openmausbot') : null;
       const bridge = ctx.has('bridge') ? ctx.get('bridge') : null;
       const imContext = ctx.has('imContext') ? ctx.get('imContext') : null;
@@ -61,6 +87,7 @@ export const inspectorPlugin = {
       const snap = channelSnapshot();
       return {
         ok: true,
+        runtime: runtimeSnapshot(),
         transport: cfg.transport,
         trigger: cfg.selfChat?.trigger ?? '@bot',
         openmausbot: omb,
@@ -79,6 +106,73 @@ export const inspectorPlugin = {
         plugins: snap.plugins,
         recentEventsCount: events.length,
       };
+    };
+
+    web.route('GET', '/api/status', () => buildStatusPayload());
+
+    web.route('GET', '/api/debug/bundle', async ({ url, res }) => {
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        runtime: runtimeSnapshot(),
+        sanitizedConfig: sanitizeConfigSnapshot(cfg),
+        status: await buildStatusPayload(),
+        events: [...events].reverse(),
+      };
+      if (url?.searchParams?.get('download') === '1') {
+        const body = `${JSON.stringify(payload, null, 2)}\n`;
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(body),
+          'content-disposition': `attachment; filename="co-bot-diag-${Date.now()}.json"`,
+          'cache-control': 'no-store',
+        });
+        res.end(res.req?.method === 'HEAD' ? undefined : body);
+        return;
+      }
+      return payload;
+    });
+
+    web.route('POST', '/api/debug/action', async ({ body }) => {
+      const bridge = ctx.has('bridge') ? ctx.get('bridge') : null;
+      if (!bridge) {
+        const err = new Error('bridge 尚未就绪');
+        err.status = 503;
+        throw err;
+      }
+      const action = String(body?.action || '').trim();
+      if (action === 'chat_mute' || action === 'chat_allow') {
+        const chatId = String(body?.chatId || '').trim();
+        if (!chatId) throw new Error('缺少 chatId');
+        if (action === 'chat_mute') bridge.setChatMuted(chatId, true);
+        else bridge.setChatAllowed(chatId);
+        return { ok: true, action, chatId, chatPolicy: bridge.getChatPolicy() };
+      }
+      if (action === 'chat_mode') {
+        const mode = String(body?.mode || '').trim();
+        if (mode === 'reset') bridge.resetChatPolicy();
+        else if (mode === 'self_only' || mode === 'owner_everywhere') bridge.setChatMode(mode);
+        else throw new Error(`无效模式：${mode}`);
+        return { ok: true, action, chatPolicy: bridge.getChatPolicy() };
+      }
+      if (action === 'schedule_toggle') {
+        const id = String(body?.id || '').trim();
+        if (!id) throw new Error('缺少定时规则 id');
+        const updated = bridge.setScheduledSummaryEnabled(id, Boolean(body?.enabled));
+        if (!updated) throw new Error(`未找到定时规则：${id}`);
+        return { ok: true, action, schedule: updated };
+      }
+      if (action === 'schedule_run') {
+        const id = String(body?.id || '').trim();
+        const picked = bridge.listScheduledSummaries().find((s) => s.id === id);
+        if (!picked) throw new Error(`未找到定时规则：${id}`);
+        const res = await bridge.runScheduledSummary(picked, { manual: true });
+        return { ok: true, action, result: res };
+      }
+      if (action === 'flush_outbound') {
+        const replayed = await bridge.flushOutboundBuffer();
+        return { ok: true, action, replayed };
+      }
+      throw new Error(`未知操作：${action}`);
     });
 
     web.route('GET', '/api/debug/events', ({ url }) => {

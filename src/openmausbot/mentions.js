@@ -3,7 +3,21 @@
  */
 
 export function compactChatCtx(chatCtx) {
-  if (!chatCtx || !chatCtx.isExternal) return null;
+  if (!chatCtx) return null;
+  if (!chatCtx.isExternal) {
+    if (chatCtx.polishDraft?.originChatId) {
+      return {
+        isExternal: false,
+        polishDraft: {
+          originChatId: chatCtx.polishDraft.originChatId,
+          originChatName: chatCtx.polishDraft.originChatName || '',
+          originChatType: chatCtx.polishDraft.originChatType || 'group',
+          replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
+        },
+      };
+    }
+    return null;
+  }
   return {
     isExternal: true,
     originChatId: chatCtx.originChatId,
@@ -16,6 +30,26 @@ export function compactChatCtx(chatCtx) {
     privateReply: Boolean(chatCtx.privateReply),
     silentProgress: Boolean(chatCtx.silentProgress),
   };
+}
+
+/** 计算两个字符串的 Levenshtein 编辑距离（用于配置键名与指令拼写容错提示）。 */
+export function levenshtein(a, b) {
+  const s = String(a ?? '');
+  const t = String(b ?? '');
+  const m = s.length;
+  const n = t.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= n; j += 1) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[n];
 }
 
 export function buildMentionMatcher(trigger = '@bot', aliases = [], knownNames = []) {

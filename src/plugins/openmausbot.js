@@ -84,6 +84,10 @@ export const openmausbotPlugin = {
     });
 
     await bridge.start();
+    const offChanState = ctx.on('channel:state', (p) => {
+      if (p?.connected) bridge.flushOutboundBuffer().catch(() => {});
+    });
+    ctx.effect(() => offChanState());
     ctx.effect(() => bridge.stop());
 
     const ombService = {

@@ -43,6 +43,7 @@
     "maxProgressUpdates": 2,
     "intermediateCoalesceMs": 700,
     "maxIntermediateBubbles": 2,
+    "turnStallMs": 180000,
     "outPrefix": ""
   },
   "chats": {
@@ -57,6 +58,7 @@
     "injectRecentContext": true,
     "isolateThreadsByChat": true,
     "externalSilentProgress": true,
+    "externalAckInSelf": false,
     "routeControlsToSelf": true,
     "privateFlag": true,
     "externalSanitizeMentions": "all",
