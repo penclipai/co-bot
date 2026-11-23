@@ -1,9 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { clip, mdClip, safeAttachmentName } from '../format.js';
-import { fmtTokens, usageBar, fmtSchedule, formatOmbError, parseChoiceIndex } from './cards.js';
-import { levenshtein, parseHHMM } from './mentions.js';
-import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE } from './persona.js';
+import { clip } from '../format.js';
+import { matchProjectSpec } from '../core/projects.js';
+import { fmtTokens, usageBar, formatOmbError, parseChoiceIndex } from './cards.js';
 
 const showBotName = (bridge, id, name, isGroup = false) => (
   typeof bridge.displayBotName === 'function'
@@ -12,7 +9,6 @@ const showBotName = (bridge, id, name, isGroup = false) => (
 );
 
 const TASK_PICK_TTL = 2 * 60 * 1000;
-const VARIANT_EFFORT_RE = /^(low|medium|high|xhigh|max|default)$/i;
 const parseListChoice = (raw) => {
   const s = String(raw ?? '').trim();
   return parseChoiceIndex(s) ?? (/^\d+$/.test(s) ? Number(s) : null);
@@ -56,115 +52,19 @@ export function botCommandTarget(bridge, botId, botName) {
   return bridge.trigger;
 }
 
-const CANONICAL_COMMANDS = [
-  'help', 'bots', 'groups', 'status', 'stop', 'steer', 'cancel', 'digest',
-  'chats', 'chat', 'summary', 'schedule', 'sendback', 'find', 'search',
-  'routines', 'context', 'export', 'model', 'memory', 'tasks', 'task', 'style', 'compact',
-  'approval', 'quiet', 'prefs',
-];
-const COMMAND_SET = new Set(CANONICAL_COMMANDS);
-const SAFE_ENGLISH_WORDS = new Set([
-  'hello', 'check', 'test', 'write', 'read', 'show', 'list', 'send', 'make', 'create',
-  'update', 'delete', 'thanks', 'please', 'what', 'when', 'where', 'which', 'explain',
-  'review', 'debug', 'build', 'deploy', 'plan', 'code', 'note', 'time', 'date', 'file',
-  'ping', 'echo', 'good', 'nice', 'fine', 'true', 'false', 'null', 'exit', 'quit', 'info',
-  'next', 'back', 'home', 'work', 'call', 'wait', 'done', 'more', 'less', 'sort', 'diff',
-  'stat', 'stats', 'logs', 'sync', 'push', 'pull', 'step', 'shop', 'spot', 'stay', 'mode',
-  'node', 'most', 'rest', 'best', 'fast', 'last', 'look', 'news', 'view', 'mind', 'kind',
-  'bind', 'wind', 'fund', 'hand', 'land', 'hold', 'tell', 'well', 'hell', 'sent', 'went',
-  'that', 'with', 'this', 'from', 'your', 'have', 'will', 'just', 'like', 'take', 'give',
-  'keep', 'turn', 'move', 'copy', 'save', 'load', 'open', 'close', 'start', 'clean', 'clear',
-  'reset', 'verify', 'count', 'parse', 'format', 'print', 'fetch', 'post', 'patch', 'head',
-  'line', 'mine', 'nine', 'disk', 'risk', 'desk', 'boot', 'root', 'soon', 'tool', 'loop',
-  'star', 'form', 'port', 'host', 'cost', 'lost', 'atop', 'stow', 'stops', 'cats', 'that',
-  'than', 'then', 'them', 'they', 'book', 'cool',
-]);
-
-/** 仅当首词明显像是拼错的内建 ASCII 子命令时给出纠错提示，绝不误拦正常英文提问。 */
-export function suggestClosestCommand(raw) {
-  const trimmed = String(raw ?? '').trim();
-  if (!trimmed) return null;
-  const toks = trimmed.split(/\s+/).filter(Boolean);
-  if (toks.length === 0 || toks.length > 2) return null;
-  const tok = toks[0];
-  if (!/^[a-z]{4,14}$/i.test(tok)) return null;
-  const low = tok.toLowerCase();
-  if (COMMAND_SET.has(low) || SAFE_ENGLISH_WORDS.has(low)) return null;
-
-  let bestCmd = null;
-  let bestDist = Infinity;
-  for (const cmd of CANONICAL_COMMANDS) {
-    const d = levenshtein(low, cmd);
-    if (d < bestDist) {
-      bestDist = d;
-      bestCmd = cmd;
-    }
-  }
-  if (!bestCmd) return null;
-  const accepted = bestDist === 1 || (bestDist === 2 && bestCmd.length >= 6 && low.length >= 5 && low[0] === bestCmd[0]);
-  if (!accepted) return null;
-  return {
-    typo: tok,
-    suggestion: bestCmd,
-    fullSuggestion: toks[1] ? `${bestCmd} ${toks[1]}` : bestCmd,
-  };
-}
-
-/** 构造 `@bot help [分类]` 简洁使用说明（支持 default / 群聊 / 定时 / 会话 / 模型 / 全部）。 */
-export function buildHelpText(bridge, topic = '') {
+/** 构造 `@bot help` 简洁使用说明。 */
+export function buildHelpText(bridge) {
   const t = bridge.trigger;
   const brand = bridge.botName || 'co-bot';
-  const key = String(topic ?? '').trim().toLowerCase();
-  const sections = {
-    group: [
-      `💬 **群聊与跨群能力**`,
-      `- 任意群 / 私聊：本人 \`${t} <问题>\` 原地回复；\`${t}!\` 或 \`${t} -p\` 私密起草回自聊（可持久化并引用继续润色）`,
-      `- \`${t} sendback\`：预览确认后防误艾特发回原群（支持 \`确认发送\` / \`改：新文本\` / \`取消\`）`,
-      `- \`${t} chats\` / \`chat mute|allow <群>\` / \`chat mode self_only|everywhere\`：实时管群与静默`,
-      `- \`${t} summary <群名> [条数]\` / \`纪要 <群名>\`、\`${t} find [in:<群>] <关键词>\`：零打扰汇总与跨群检索`,
-    ],
-    schedule: [
-      `🗓️ **定时纪要与巡检**`,
-      `- \`${t} schedule add <群名|id> <HH:MM> [重点]\`：每日定时静默汇总到自聊（支持 \`list | run | on | off | del\`）`,
-      `- \`${t} routines\` / \`routines run <序号>\` / \`on|off <序号>\`：管理后台定时巡检`,
-      `- \`${t} digest\`：立即汇总免打扰期间积压的通知消息`,
-    ],
-    session: [
-      `🗂 **多会话与连续对话**`,
-      `- 自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)} 秒内可免 \`@\` 续聊或贴图（\`#\`/备忘开头不打扰，\`${t} bye\` 退出）`,
-      `- \`${t} new [话题]\` / \`tasks\` / \`task <序号>\` / \`search <词>\` / \`export\` / \`compact [群名]\``,
-    ],
-    model: [
-      `🤖 **Bot 协同、模型与控制**`,
-      `- \`@<Bot名>\` / \`@<群名>\`：点名其他 Bot 或多 Bot 协作群组；引用气泡续聊`,
-      `- \`${t} bots\` / \`status\` / \`model [关键词|high]\` / \`approval [ask|auto|full]\` / \`context [群名]\` / \`memory\` / \`style cobot\``,
-      `- \`${t} quiet [on|off|HH:MM-HH:MM]\` / \`prefs [ack on|off | sanitize all|dangerous|none | stall <秒> | reset]\`：免重启热调参`,
-      `- \`${t} steer\` / \`cancel\` / \`stop\`；卡片支持 \`ok / always / no / skip\` 与中文序数`,
-    ],
-  };
-
-  if (/^(群聊|群|chat|chats|group|groups|外部群)$/.test(key)) return sections.group.join('\n');
-  if (/^(定时|schedule|schedules|routine|routines|巡检|纪要)$/.test(key)) return sections.schedule.join('\n');
-  if (/^(会话|session|sessions|task|tasks)$/.test(key)) return sections.session.join('\n');
-  if (/^(模型|model|models|bot|bots|控制)$/.test(key)) return sections.model.join('\n');
-  if (/^(全部|all|full)$/.test(key)) {
-    return [
-      `🤖 **${brand} 完整指令**`,
-      ...sections.group,
-      ...sections.schedule,
-      ...sections.session,
-      ...sections.model,
-    ].join('\n');
-  }
-
   return [
     `🤖 **${brand} 常用指南**`,
     `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
     `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
-    `- \`${t} chats\` / \`summary <群>\` / \`schedule\` / \`find <词>\`：动态管群、跨群纪要与检索`,
-    `- \`${t} new\` / \`tasks\` / \`compact\` / \`model\` / \`context\`：新建切换会话、压缩与切模型`,
+    `- \`${t} chats\` / \`chat mute|allow|mode|reset\` / \`summary <群>\` / \`digest\`：管群、跨群纪要与免打扰汇总`,
+    `- \`${t} bind [项目|unbind]\` / \`delegate <会话> [proj:<项目>] <问题>\`：项目目录绑定与 C2C 协作委托`,
+    `- \`${t} new [话题]\` / \`tasks\` / \`task <序号>\` / \`context [群]\` / \`compact [群]\`：会话与上下文管理`,
+    `- \`${t} bots\` / \`status\` / \`memory\` / \`记住 <内容>\` / \`approval [ask|auto|full]\`：团队成员、记忆与审批`,
     `- \`${t} steer\` / \`cancel\` / \`stop\`：插队、取消排队或停止任务；卡片支持 \`ok/always/no/skip\``,
-    `📖 发送 \`${t} help 群聊 | 定时 | 会话 | 模型 | 全部\` 查看分类详情`,
   ].join('\n');
 }
 
@@ -290,95 +190,6 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
       `协作 Bot：${visible.length} 个${groupNote} · 主协调：**${chiefShown}**（风格：${chief?.replyStyle ?? 'default'}，审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote} · 引擎 v${h.version ?? '?'}` +
       (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : ''),
     );
-    return true;
-  }
-
-  const quietM = raw.match(/^(?:quiet|quietHours|免打扰|勿扰)(?:\s+([\s\S]+))?$/i);
-  if (quietM) {
-    const arg = (quietM[1] ?? '').trim();
-    const cur = bridge.quietHours || {};
-    if (!arg || /^(show|查看|状态)$/i.test(arg)) {
-      await sensSink.say(
-        `🌙 **夜间免打扰**：${cur.enabled ? '已开启' : '未开启'}（时段 \`${cur.start || '22:00'}\` ~ \`${cur.end || '08:30'}\`）\n` +
-        `用法：\`${bridge.trigger} quiet on | off | 23:00-07:30\``,
-        null,
-        null,
-        [
-          cur.enabled
-            ? { label: '关闭免打扰', text: `${bridge.trigger} quiet off` }
-            : { label: '开启免打扰', text: `${bridge.trigger} quiet on`, kind: 'primary' },
-        ],
-      );
-      return true;
-    }
-    if (/^(on|enable|开启|打开)$/i.test(arg)) {
-      const next = bridge.setQuietHours({ enabled: true });
-      await sensSink.say(`🌙 已开启免打扰（\`${next.start}\` ~ \`${next.end}\`），期间主动通知将自动攒成汇总（\`${bridge.trigger} digest\` 可随时查看）。`);
-      return true;
-    }
-    if (/^(off|disable|关闭|取消)$/i.test(arg)) {
-      const next = bridge.setQuietHours({ enabled: false });
-      const flushed = bridge.quietQueue.length ? await bridge.flushQuietDigest() : 0;
-      await sensSink.say(`☀️ 已关闭免打扰（${next.start}~${next.end}）${flushed ? `，已顺带发出积压的 ${flushed} 条通知` : ''}。`);
-      return true;
-    }
-    const winM = arg.match(/^(\d{1,2}:\d{2})\s*[-~到至]\s*(\d{1,2}:\d{2})$/);
-    if (!winM || parseHHMM(winM[1]) == null || parseHHMM(winM[2]) == null) {
-      await sensSink.say(`无效时间格式「${arg}」，请使用 \`${bridge.trigger} quiet 23:00-07:30\`、\`on\` 或 \`off\`。`);
-      return true;
-    }
-    const fmtClock = (s) => {
-      const [h, m] = s.split(':');
-      return `${String(Number(h)).padStart(2, '0')}:${String(Number(m)).padStart(2, '0')}`;
-    };
-    const next = bridge.setQuietHours({ enabled: true, start: fmtClock(winM[1]), end: fmtClock(winM[2]) });
-    await sensSink.say(`🌙 已更新并开启免打扰时段：\`${next.start}\` ~ \`${next.end}\`（无需重启即时生效）。`);
-    return true;
-  }
-
-  const prefsM = raw.match(/^(?:prefs?|pref|偏好|设置)(?:\s+([\s\S]+))?$/i);
-  if (prefsM) {
-    const arg = (prefsM[1] ?? '').trim();
-    if (!arg || /^(show|查看|list)$/i.test(arg)) {
-      const p = bridge.getRuntimePrefs();
-      await sensSink.say(
-        `⚙️ **运行期热偏好（免重启持久化）**\n` +
-        `- 外群后台接单自聊轻提示（\`ack\`）：${p.externalAckInSelf ? '开启' : '关闭'}\n` +
-        `- 外群出站防误艾特（\`sanitize\`）：\`${p.externalSanitizeMentions}\`（all / dangerous / none）\n` +
-        `- 长任务停滞看门狗阈值（\`stall\`）：${p.turnStallMs > 0 ? `${Math.round(p.turnStallMs / 1000)} 秒` : '已关闭'}\n` +
-        `- 免打扰（\`quiet\`）：${p.quietHours?.enabled ? `开启（${p.quietHours.start}~${p.quietHours.end}）` : '关闭'}\n\n` +
-        `示例：\`${bridge.trigger} prefs ack on\`、\`prefs sanitize dangerous\`、\`prefs stall 120\`、\`prefs reset\``,
-      );
-      return true;
-    }
-    const lowArg = arg.toLowerCase();
-    if (/^(reset|重置)$/.test(lowArg)) {
-      bridge.setRuntimePref('reset');
-      await sensSink.say('🔄 已重置所有运行期热偏好，恢复为配置文件默认值。');
-      return true;
-    }
-    const ackM = arg.match(/^ack\s+(on|off|true|false|开启|关闭)$/i);
-    if (ackM) {
-      const enabled = /^(on|true|开启)$/i.test(ackM[1]);
-      bridge.setRuntimePref('externalAckInSelf', enabled);
-      await sensSink.say(`✅ 已${enabled ? '开启' : '关闭'}外群静默接单时的自聊轻提示。`);
-      return true;
-    }
-    const sanM = arg.match(/^sanitize\s+(all|dangerous|none)$/i);
-    if (sanM) {
-      const mode = sanM[1].toLowerCase();
-      bridge.setRuntimePref('externalSanitizeMentions', mode);
-      await sensSink.say(`✅ 已将外群出站防误艾特策略设为 \`${mode}\`。`);
-      return true;
-    }
-    const stallM = arg.match(/^stall\s+(\d+|off|关闭)$/i);
-    if (stallM) {
-      const sec = /^(off|关闭)$/i.test(stallM[1]) ? 0 : Number(stallM[1]);
-      bridge.setRuntimePref('turnStallMs', sec * 1000);
-      await sensSink.say(sec > 0 ? `✅ 已将长任务停滞提醒阈值设为 ${sec} 秒。` : '✅ 已关闭长任务停滞看门狗提醒。');
-      return true;
-    }
-    await sensSink.say(`用法：\`${bridge.trigger} prefs\`、\`prefs ack on|off\`、\`prefs sanitize all|dangerous|none\`、\`prefs stall <秒|off>\` 或 \`prefs reset\``);
     return true;
   }
 
@@ -621,115 +432,6 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  // 跨群定时纪要：@bot schedule [add <群名|id> <HH:MM> [关注重点] | run|on|off|del <序号>]
-  const schedM = raw.match(/^(?:schedule|schedules|定时汇总|每日汇总|定时纪要)(?:\s+([\s\S]+))?$/i);
-  if (schedM) {
-    const sub = (schedM[1] ?? '').trim();
-    if (!sub || /^(list|ls|查看|列表)$/i.test(sub)) {
-      const list = bridge.listScheduledSummaries();
-      if (!list.length) {
-        await sensSink.say(`暂无定时群纪要规则。\n用法：\`${bridge.trigger} schedule add <群名|chatId> <HH:MM> [关注重点]\``);
-        return true;
-      }
-      const lines = list.map((s, i) => {
-        const flag = s.enabled === false ? '⚪ 暂停' : '🟢 启用';
-        const focusNote = s.focus ? ` · 重点：${clip(s.focus, 28)}` : '';
-        const ranNote = s.lastRunDate ? `（最近：${s.lastRunDate}）` : '';
-        return `${i + 1}. ${flag} **${s.chatName || s.chatId}**（\`${s.chatId}\`）· 每日 ${s.time}${focusNote}${ranNote}`;
-      });
-      const first = list[0];
-      const actions = [
-        { label: `立即汇总 1`, text: `${bridge.trigger} schedule run 1` },
-        first.enabled === false
-          ? { label: `启用 1`, text: `${bridge.trigger} schedule on 1` }
-          : { label: `暂停 1`, text: `${bridge.trigger} schedule off 1` },
-      ];
-      await sensSink.say(
-        `🗓️ **定时跨群纪要（${list.length}）**\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} schedule add <群名> <HH:MM> [重点]\`、\`run|on|off|del <序号>\``,
-        null,
-        null,
-        actions,
-      );
-      return true;
-    }
-
-    const addM = sub.match(/^(?:add|添加|新增)\s+([\s\S]+)$/i);
-    if (addM) {
-      const rest = addM[1].trim();
-      let targetChat = null;
-      let timeStr = '';
-      let focus = '';
-      const directTimeM = isExternal ? rest.match(/^(\d{1,2}:\d{2})(?:\s+([\s\S]*))?$/) : null;
-      if (directTimeM) {
-        targetChat = { id: chatCtx.originChatId, name: chatCtx.chatName || chatCtx.originChatId, type: chatCtx.chatType || 'group' };
-        timeStr = directTimeM[1];
-        focus = (directTimeM[2] ?? '').trim();
-      } else {
-        const fullM = rest.match(/^(\S+)\s+(\d{1,2}:\d{2})(?:\s+([\s\S]*))?$/);
-        if (!fullM) {
-          await sensSink.say(`用法：\`${bridge.trigger} schedule add <群名|chatId> <HH:MM> [关注重点]\``);
-          return true;
-        }
-        const chatTok = fullM[1];
-        timeStr = fullM[2];
-        focus = (fullM[3] ?? '').trim();
-        targetChat = resolveChatOrId(bridge, chatTok);
-        if (!targetChat) {
-          await sensSink.say(`未找到匹配会话「${chatTok}」，请先在该群发消息或发 \`${bridge.trigger} chats\` 查看会话 ID。`);
-          return true;
-        }
-      }
-      try {
-        const added = bridge.addScheduledSummary({
-          chatId: targetChat.id,
-          chatName: targetChat.name || targetChat.id,
-          chatType: targetChat.type || 'group',
-          time: timeStr,
-          focus,
-        });
-        await sensSink.say(
-          `✅ 已设置每日 **${added.time}** 定时汇总「${added.chatName}」（仅静默发回自聊${added.focus ? `，关注：${clip(added.focus, 30)}` : ''}）。`,
-          null,
-          null,
-          [{ label: '立即试跑一次', text: `${bridge.trigger} schedule run ${added.id}` }],
-        );
-      } catch (e) {
-        await sensSink.say(`⚠️ 添加定时汇总失败：${e?.message || e}`);
-      }
-      return true;
-    }
-
-    const opM = sub.match(/^(run|执行|触发|立即|on|enable|开启|启用|off|disable|暂停|停用|del|rm|delete|remove|删除|移除)\s+(.+)$/i);
-    if (!opM) {
-      await sensSink.say(`用法：\`${bridge.trigger} schedule [add <群> <HH:MM> [重点] | run|on|off|del <序号>]\``);
-      return true;
-    }
-    const op = opM[1].toLowerCase();
-    const arg = opM[2].trim();
-    if (/^(run|执行|触发|立即)$/.test(op)) {
-      const list = bridge.listScheduledSummaries();
-      let picked = /^\d+$/.test(arg) ? list[Number(arg) - 1] : list.find((s) => s.id === arg || s.chatId === arg || String(s.chatName || '').toLowerCase() === arg.toLowerCase());
-      if (!picked) {
-        await sensSink.say(`未找到第/名为「${arg}」的定时汇总规则。`);
-        return true;
-      }
-      const res = await bridge.runScheduledSummary(picked, { manual: true });
-      if (!res.ok) {
-        await sensSink.say(`会话「${res.chatName || picked.chatName}」暂无可汇总的对话记录。`);
-      }
-      return true;
-    }
-    if (/^(del|rm|delete|remove|删除|移除)$/.test(op)) {
-      const removed = bridge.removeScheduledSummary(arg);
-      await sensSink.say(removed ? `🗑 已删除「${removed.chatName}」（${removed.time}）的定时汇总。` : `未找到定时汇总规则「${arg}」。`);
-      return true;
-    }
-    const enabled = /^(on|enable|开启|启用)$/.test(op);
-    const updated = bridge.setScheduledSummaryEnabled(arg, enabled);
-    await sensSink.say(updated ? `${enabled ? '✅ 已启用' : '⏸ 已暂停'}「${updated.chatName}」（${updated.time}）的定时汇总。` : `未找到定时汇总规则「${arg}」。`);
-    return true;
-  }
-
   // 自聊私密草稿确认回发：@bot sendback [draftId | 改写内容 | confirm]
   const sendbackM = raw.match(/^(?:sendback|发回原群|发回)(?:\s+([\s\S]+))?$/i);
   if (sendbackM) {
@@ -758,254 +460,109 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
     return true;
   }
 
-  // 跨群只读记忆检索：@bot find [in:<群名|id>] <关键词>
-  const findM = raw.match(/^(?:find|跨群查|查群|搜群)(?:\s+([\s\S]+))?$/i);
-  if (findM) {
-    const rest = (findM[1] ?? '').trim();
-    let chatQuery = '';
-    let query = rest;
-    const inM = rest.match(/^in:(\S+)(?:\s+([\s\S]*))?$/i);
-    if (inM) {
-      chatQuery = inM[1].trim();
-      query = (inM[2] ?? '').trim();
-    }
-    if (!query) {
-      await sensSink.say(`用法：\`${bridge.trigger} find <关键词>\` 或 \`${bridge.trigger} find in:<群名> <关键词>\`（结果仅私密返回自聊）`);
+  // 项目目录绑定：@bot bind [项目名|路径 | unbind [群]]
+  const bindM = raw.match(/^(?:bind|绑定)(?:\s+([\s\S]+))?$/i);
+  if (bindM) {
+    const sub = (bindM[1] ?? '').trim();
+    const curChatId = isExternal ? chatCtx.originChatId : bridge.selfChat;
+    const curChatName = isExternal ? (chatCtx.chatName || curChatId) : '自聊';
+    if (!sub || /^(show|list|ls|查看|列表)$/i.test(sub)) {
+      const bindings = bridge.listProjectBindings();
+      const cur = bindings.find((b) => b.chatId === curChatId);
+      const cfgList = Array.isArray(bridge.projects) ? bridge.projects : [];
+      const cfgText = cfgList.length
+        ? cfgList.map((p) => `- \`${p.name}\` → \`${p.path}\`${p.aliases?.length ? `（别名：${p.aliases.join('、')}）` : ''}`).join('\n')
+        : '（未在 config.json 配置 projects 白名单，可直接绑定本地目录路径）';
+      const bindLines = bindings.length
+        ? bindings.map((b) => `- \`${b.chatId}\` → **${b.name}**（\`${b.path}\`）`).join('\n')
+        : '暂无会话绑定记录';
+      await sensSink.say(
+        `📂 **当前会话（${curChatName}）项目绑定**：${cur ? `**${cur.name}**（\`${cur.path}\`）` : '未绑定'}\n\n` +
+        `**已绑定会话（${bindings.length}）**：\n${bindLines}\n\n` +
+        `**可选项目列表**：\n${cfgText}\n\n` +
+        `用法：\`${bridge.trigger} bind <项目|路径>\`、\`bind <会话> <项目|路径>\` 或 \`bind unbind\``,
+      );
       return true;
     }
-    const { hits, scopedChat, missingChat } = await bridge.searchAcrossChats(query, { chatQuery, limit: 10 });
-    if (missingChat) {
-      await sensSink.say(`未找到匹配会话「${missingChat}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+    const unbindM = sub.match(/^(?:unbind|clear|off|del|remove|解绑|清除)(?:\s+([\s\S]+))?$/i);
+    if (unbindM) {
+      const who = (unbindM[1] ?? '').trim();
+      const targetChat = who
+        ? resolveChatOrId(bridge, who, { isExternal, chatCtx })
+        : { id: curChatId, name: curChatName };
+      if (!targetChat?.id) {
+        await sensSink.say(`未找到匹配会话「${who}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+        return true;
+      }
+      const removed = bridge.unbindChatProject(targetChat.id);
+      await sensSink.say(removed
+        ? `🔓 已解除「${targetChat.name || targetChat.id}」的项目绑定。`
+        : `会话「${targetChat.name || targetChat.id}」当前未绑定项目。`);
       return true;
     }
-    if (!hits.length) {
-      await sensSink.say(`未在${scopedChat ? `「${scopedChat.name}」` : '已缓存群/私聊'}中找到包含「${clip(query, 30)}」的消息。`);
+    let targetChat = { id: curChatId, name: curChatName };
+    let spec = sub;
+    if (!isExternal) {
+      const twoM = sub.match(/^(\S+)\s+([\s\S]+)$/);
+      if (twoM) {
+        const maybeChat = resolveChatOrId(bridge, twoM[1]);
+        if (maybeChat) {
+          targetChat = maybeChat;
+          spec = twoM[2].trim();
+        }
+      }
+    }
+    const matched = matchProjectSpec(spec, bridge.projects);
+    if (!matched.ok) {
+      await sensSink.say(`⚠️ 绑定失败：${matched.error}`);
       return true;
     }
-    const lines = hits.map((h, i) => {
-      const d = new Date(Number(h.ts) || Date.now());
-      const stamp = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      const who = h.isBotReply ? `${h.senderName || 'Bot'}[bot]` : (h.senderName || h.senderId || '成员');
-      const attNote = h.attachments?.length ? ` [附件: ${h.attachments.map((a) => a.name).join(', ')}]` : '';
-      const body = clip(String(h.text || '').replace(/\s+/g, ' '), 80);
-      return `${i + 1}. **[${h.chatName || h.chatId}]** · ${who}（${stamp}）\n   > ${body}${attNote}`;
-    });
-    const topChat = hits[0];
-    const actions = topChat?.chatId
-      ? [{ label: `汇总「${clip(topChat.chatName || topChat.chatId, 10)}」`, text: `${bridge.trigger} summary ${topChat.chatId}` }]
-      : [];
+    if (!targetChat?.id) {
+      await sensSink.say('尚未获知目标会话 ID，请先发一条消息或显式指定会话。');
+      return true;
+    }
+    bridge.bindChatProject(targetChat.id, matched.project);
+    await sensSink.say(`🔗 已将「${targetChat.name || targetChat.id}」绑定到项目 **${matched.project.name}**（\`${matched.project.path}\`）。`);
+    return true;
+  }
+
+  // 极简 2 态 C2C 委托：@bot delegate <会话名|chatId> [proj:<项目>] <问题>
+  const delM = raw.match(/^(?:delegate|委托|协作)(?:\s+([\s\S]+))?$/i);
+  if (delM) {
+    const rest = (delM[1] ?? '').trim();
+    const m = rest.match(/^(\S+)\s+([\s\S]+)$/);
+    if (!m) {
+      await sensSink.say(`用法：\`${bridge.trigger} delegate <会话名|chatId> [proj:<项目>] <问题>\``);
+      return true;
+    }
+    const targetChat = resolveChatOrId(bridge, m[1], { isExternal, chatCtx });
+    if (!targetChat?.id || targetChat.id === bridge.selfChat) {
+      await sensSink.say(`未找到可委托的外部群/联系人「${m[1]}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+      return true;
+    }
+    let qRest = m[2].trim();
+    let project = '';
+    const projM = qRest.match(/^proj:(\S+)\s+([\s\S]+)$/i);
+    if (projM) {
+      project = projM[1].trim();
+      qRest = projM[2].trim();
+    }
+    if (!qRest) {
+      await sensSink.say(`请提供具体的协作问题，例如：\`${bridge.trigger} delegate ${targetChat.id} 帮忙看下 order 项目的超时原因\``);
+      return true;
+    }
+    const sentRes = await bridge.sendDelegation(targetChat, qRest, { project });
+    if (!sentRes?.ok) {
+      await sensSink.say(`❌ 发起委托失败：${sentRes?.error || '发送失败'}`);
+      return true;
+    }
     await sensSink.say(
-      `🔍 **跨群检索「${clip(query, 24)}」命中 ${hits.length} 条**\n${lines.join('\n')}`,
-      null,
-      null,
-      actions,
+      `🤝 已向「${targetChat.name || targetChat.id}」发起协作委托 \`${sentRes.id}\`${project ? `（项目：\`${project}\`）` : ''}；对方如启用协作者响应将自动回传结果，否则将保留为普通 IM 消息。`,
     );
     return true;
   }
 
-  // search / 搜索 / 搜历史 / 查历史（保留“找 xxx”给普通代码搜索对话，避免误劫持）
-  const searchM = raw.match(/^(?:search|搜历史|查历史|搜索)(?:\s+([\s\S]+))?$/i);
-  if (searchM) {
-    const q = (searchM[1] ?? '').trim();
-    if (!q) { await sensSink.say(`用法：\`${bridge.trigger} search <关键词>\``); return true; }
-    try {
-      const { hits } = await bridge.client.search(q, { limit: 15 });
-      const deduped = [];
-      const seenTid = new Set();
-      for (const h of hits) {
-        if (!h?.threadId || seenTid.has(h.threadId)) continue;
-        seenTid.add(h.threadId);
-        deduped.push(h);
-        if (deduped.length >= 5) break;
-      }
-      if (!deduped.length) {
-        await sensSink.say(`未找到包含「${clip(q, 30)}」的聊天记录。`);
-        return true;
-      }
-      const tasks = deduped.map((h) => ({
-        threadId: h.threadId,
-        title: h.task || h.name || '历史会话',
-        botId: h.botId,
-        botName: showBotName(bridge, h.botId, h.name),
-      }));
-      bridge.clearPickers();
-      bridge.pendingTaskPick = {
-        botId: tasks[0].botId,
-        botName: tasks[0].botName,
-        tasks,
-        expiresAt: bridge.now() + TASK_PICK_TTL,
-      };
-      const lines = deduped.map((h, i) => `${i + 1}. **${clip(h.task || h.name || '会话', 30)}**（${showBotName(bridge, h.botId, h.name)}）\n   > ${clip(String(h.snippet ?? '').replace(/\s+/g, ' '), 80)}`);
-      const actions = deduped.map((_, i) => ({ label: `切到 ${i + 1}`, text: String(i + 1) }));
-      await sensSink.say(
-        `🔎 搜索「${clip(q, 24)}」命中 ${deduped.length} 个会话：\n${lines.join('\n')}\n\n回复数字 \`1\`～\`${deduped.length}\` 立即切换过去`,
-        null,
-        null,
-        actions,
-      );
-    } catch (e) {
-      await sensSink.say(`❌ 搜索失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
-  // routines / 定时 / 巡检
-  const routM = raw.match(/^(?:routines?|定时|巡检)(?:\s+([\s\S]+))?$/i);
-  if (routM) {
-    const sub = (routM[1] ?? '').trim();
-    try {
-      let list = bridge.pendingRoutineList && bridge.now() < bridge.pendingRoutineList.expiresAt && sub
-        ? bridge.pendingRoutineList.routines
-        : null;
-      if (!list || !sub) {
-        const res = await bridge.client.listRoutines();
-        list = res.routines;
-        bridge.pendingRoutineList = { routines: list, expiresAt: bridge.now() + TASK_PICK_TTL };
-      }
-      if (!sub) {
-        if (!list.length) { await sensSink.say('当前没有配置定时巡检任务（可在管理后台创建）。'); return true; }
-        const shown = list.slice(0, 8);
-        const lines = shown.map((r, i) => `${i + 1}. ${r.enabled === false ? '⚪ 暂停' : '🟢 启用'} **${clip(r.name || '未命名任务', 32)}** · ${fmtSchedule(r.schedule)}`);
-        const actions = shown.slice(0, 3).map((_, i) => ({
-          label: `立即跑 ${i + 1}`,
-          text: `${bridge.trigger} routines run ${i + 1}`,
-        }));
-        await sensSink.say(
-          `⏰ **定时巡检任务（${list.length}）**\n${lines.join('\n')}\n\n发 \`${bridge.trigger} routines run <序号>\` 立即执行，或 \`on/off <序号>\` 启停`,
-          null,
-          null,
-          actions,
-        );
-        return true;
-      }
-      const actM = sub.match(/^(run|执行|触发|on|enable|开启|启用|off|disable|暂停|关闭)\s+(.+)$/i);
-      const actChoice = actM ? parseListChoice(actM[2]) : null;
-      if (!actM || !actChoice) {
-        await sensSink.say(`用法：\`${bridge.trigger} routines\` 查看，或 \`${bridge.trigger} routines run/on/off <序号>\``);
-        return true;
-      }
-      const op = actM[1].toLowerCase();
-      const picked = list[actChoice - 1];
-      if (!picked) {
-        await sensSink.say(`未找到第 ${actChoice} 号定时任务（共有 ${list.length} 条）。`);
-        return true;
-      }
-      if (/^(run|执行|触发)$/.test(op)) {
-        await bridge.client.runRoutine(picked.id);
-        await sensSink.say(`▶️ 已触发定时任务「${picked.name}」，结果完成后会直接推送。`);
-      } else {
-        const enabled = /^(on|enable|开启|启用)$/.test(op);
-        await bridge.client.patchRoutine(picked.id, { enabled });
-        picked.enabled = enabled;
-        await sensSink.say(`${enabled ? '✅ 已开启' : '⏸ 已暂停'}定时任务「${picked.name}」。`);
-      }
-    } catch (e) {
-      await sensSink.say(`❌ 定时任务操作失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
   return false;
-}
-
-async function handleModelCommand(bridge, activeTarget, arg, sensSink) {
-  const say = sensSink?.say ?? ((t, r, rt, a) => bridge.say(t, r, rt, a));
-  const cmdTarget = botCommandTarget(bridge, activeTarget.id, activeTarget.name);
-  try {
-    const [{ bots }, instRes] = await Promise.all([
-      bridge.client.listBots(),
-      bridge.withCliLoopbackFallback((c) => c.listInstances()).catch(() => ({ instances: [] })),
-    ]);
-    const fresh = bots.find((b) => b.id === activeTarget.id) ?? activeTarget;
-    const freshName = showBotName(bridge, fresh.id, fresh.name);
-    const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === activeTarget.threadId);
-    const sel = task?.modelSelection ?? fresh.modelSelection ?? {};
-    const instances = Array.isArray(instRes?.instances) ? instRes.instances : [];
-    const curIns = instances.find((i) => i.instanceId === sel.instanceId)
-      ?? instances.find((i) => i.snapshot?.state === 'available')
-      ?? instances[0];
-    const curOpts = (Array.isArray(curIns?.models?.options) ? curIns.models.options : [])
-      .map((o) => ({ ...o, instanceId: curIns.instanceId }));
-
-    if (!arg) {
-      const topOpts = curOpts.slice(0, 8);
-      bridge.clearPickers();
-      bridge.pendingModelPick = {
-        botId: fresh.id,
-        botName: freshName,
-        threadId: activeTarget.threadId,
-        options: topOpts,
-        expiresAt: bridge.now() + TASK_PICK_TTL,
-      };
-      const lines = topOpts.map((o, i) => {
-        const mark = o.id === sel.model ? '（当前）' : '';
-        return `${i + 1}. \`${o.id}\`${mark}${o.label ? ` · ${clip(o.label, 30)}` : ''}`;
-      });
-      const actions = topOpts.slice(0, 6).map((o, i) => ({
-        label: `${i + 1}. ${clip(o.id.split('/').pop(), 16)}`,
-        text: String(i + 1),
-        ...(o.id === sel.model ? { kind: 'primary' } : {}),
-      }));
-      await say(
-        `🧠 **${freshName}** 当前模型：\`${sel.model || '未设置'}\`${sel.variant || sel.effort ? `（深度：${sel.variant || sel.effort}）` : ''}\n` +
-        (lines.length ? `${lines.join('\n')}\n\n回复序号 \`1\`～\`${topOpts.length}\` 或 \`${cmdTarget} model <关键词|high>\` 切换` : `暂未读到可选模型列表，可直接发 \`${cmdTarget} model <模型名>\``),
-        { botId: fresh.id, botName: freshName, threadId: activeTarget.threadId },
-        null,
-        actions,
-      );
-      return true;
-    }
-
-    if (VARIANT_EFFORT_RE.test(arg)) {
-      if (!sel.model) {
-        await say(`当前会话尚未选定模型，请先发 \`${cmdTarget} model\` 选择模型后再调整思考深度。`);
-        return true;
-      }
-      const lowArg = arg.toLowerCase();
-      const curMeta = curOpts.find((o) => o.id === sel.model);
-      const hasVariants = Array.isArray(curMeta?.variants) && curMeta.variants.length > 0;
-      const nextSel = {
-        instanceId: sel.instanceId,
-        model: sel.model,
-        ...(hasVariants ? { variant: lowArg } : { effort: lowArg }),
-      };
-      await bridge.applyModelSelection(fresh, activeTarget.threadId, nextSel, `${sel.model} · ${lowArg}`, sensSink?.chatId);
-      return true;
-    }
-
-    const argChoice = parseListChoice(arg);
-    if (argChoice) {
-      const idx = argChoice - 1;
-      const pool = bridge.pendingModelPick?.botId === fresh.id && bridge.now() < bridge.pendingModelPick.expiresAt
-        ? bridge.pendingModelPick.options
-        : curOpts;
-      const chosen = pool[idx];
-      if (!chosen) {
-        await say(`未找到第 ${argChoice} 号模型，发 \`${cmdTarget} model\` 查看可用列表。`);
-        return true;
-      }
-      await bridge.applyModelSelection(fresh, activeTarget.threadId, { instanceId: chosen.instanceId, model: chosen.id }, chosen.id, sensSink?.chatId);
-      return true;
-    }
-
-    const qLow = arg.toLowerCase();
-    const availPool = [
-      ...curOpts,
-      ...instances
-        .filter((i) => i.instanceId !== curIns?.instanceId && (!i.snapshot?.state || i.snapshot.state === 'available'))
-        .flatMap((i) => (Array.isArray(i.models?.options) ? i.models.options : []).map((o) => ({ ...o, instanceId: i.instanceId }))),
-    ];
-    const chosen = availPool.find((o) => String(o.id).toLowerCase() === qLow)
-      ?? availPool.find((o) => String(o.id).toLowerCase().includes(qLow) || String(o.label ?? '').toLowerCase().includes(qLow));
-    if (!chosen) {
-      await say(`未找到匹配「${arg}」的可用模型，发 \`${cmdTarget} model\` 查看可选列表。`);
-      return true;
-    }
-    await bridge.applyModelSelection(fresh, activeTarget.threadId, { instanceId: chosen.instanceId, model: chosen.id }, chosen.id, sensSink?.chatId);
-  } catch (e) {
-    await say(`❌ 切换模型失败：${formatOmbError(e)}`);
-  }
-  return true;
 }
 
 /** 处理 @bot / @<BotName> / @<GroupName> 后的内建控制命令，命中返回 true。 */
@@ -1107,37 +664,6 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     }
     return true;
   }
-
-  if (/^(export|导出)$/i.test(raw)) {
-    try {
-      const exp = await bridge.client.exportThread(activeTarget.threadId, 'markdown');
-      if (!exp.text) {
-        await sensSink.say('当前会话暂无可导出的对话内容。');
-        return true;
-      }
-      if (typeof bridge.transport.sendFile === 'function' && bridge.transport.canFiles !== false) {
-        fs.mkdirSync(bridge.inDir, { recursive: true });
-        const safeBase = safeAttachmentName(exp.name, 'conversation.md');
-        const fileName = safeBase.endsWith('.md') ? safeBase : `${safeBase}.md`;
-        const dest = path.join(bridge.inDir, `export-${Date.now()}-${fileName}`);
-        fs.writeFileSync(dest, exp.text, 'utf8');
-        await sensSink.sendFile(dest, fileName, {});
-        await sensSink.say(`📦 已导出 **${shownTargetName}** 当前会话（${fileName}）。`, {
-          botId: activeTarget.id, botName: shownTargetName, threadId: activeTarget.threadId,
-        });
-      } else {
-        await sensSink.say(mdClip(exp.text, bridge.resultChars).text, {
-          botId: activeTarget.id, botName: shownTargetName, threadId: activeTarget.threadId,
-        });
-      }
-    } catch (e) {
-      await sensSink.say(`❌ 导出会话失败：${formatOmbError(e)}`);
-    }
-    return true;
-  }
-
-  const modelM = raw.match(/^(?:model|模型)(?:\s+([\s\S]+))?$/i);
-  if (modelM) return isGroup ? singleBotOnlyHint() : handleModelCommand(bridge, activeTarget, (modelM[1] ?? '').trim(), sensSink);
 
   const apvM = raw.match(/^(?:approval|审批模式|审批)(?:\s+([\s\S]+))?$/i);
   if (apvM) {
@@ -1272,48 +798,6 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
     return true;
   }
 
-  const styleM = raw.match(/^(?:style|风格)(?:\s+(.*))?$/i);
-  if (styleM) {
-    if (isGroup) return singleBotOnlyHint();
-    const arg = (styleM[1] ?? '').trim().toLowerCase();
-    if (!arg || arg === 'show' || arg === '查看') {
-      const curStyle = activeTarget.replyStyle ?? 'default';
-      const hasSoul = Boolean(String(activeTarget.soul ?? '').trim());
-      await sensSink.say(
-        `🎨 **${shownTargetName}** 当前对话风格：\`${curStyle}\`（人格预设：${hasSoul ? '已配置' : '未配置'}）\n` +
-        `发送 \`${cmdTarget} style cobot\` 开启协调助手风格，或 \`${cmdTarget} style default\` 恢复默认。`,
-      );
-      return true;
-    }
-    if (/^(cobot|co-bot|coordinator|grok|chat|conversational|mobile|私聊)$/.test(arg)) {
-      try {
-        const isChiefOrDefaultName = (bridge.chiefBotId && activeTarget.id === bridge.chiefBotId)
-          || activeTarget.chiefOfStaff
-          || /^(open)?mausbot$/i.test(String(activeTarget.name || '').trim());
-        const profilePatch = {
-          ...COBOT_COORDINATOR_PROFILE,
-          ...(isChiefOrDefaultName ? { name: bridge.botName || 'co-bot', title: COBOT_COORDINATOR_TITLE } : {}),
-        };
-        await bridge.withCliLoopbackFallback((c) => c.patchBot(activeTarget.id, profilePatch));
-        await bridge.refreshMultiBot();
-        await sensSink.say(`✨ 已为 **${shownTargetName}** 应用协调助手风格（\`conversational\` + co-bot 精炼人格）。`);
-      } catch (e) {
-        await sensSink.say(`❌ 设置风格失败：${formatOmbError(e)}`);
-      }
-      return true;
-    }
-    if (/^(default|reset|默认|重置)$/.test(arg)) {
-      try {
-        await bridge.withCliLoopbackFallback((c) => c.patchBot(activeTarget.id, { replyStyle: 'default', soul: '' }));
-        await bridge.refreshMultiBot();
-        await sensSink.say(`🔄 已将 **${shownTargetName}** 恢复为默认风格。`);
-      } catch (e) {
-        await sensSink.say(`❌ 重置风格失败：${formatOmbError(e)}`);
-      }
-      return true;
-    }
-  }
-
   const newM = raw.match(/^(?:new|新会话|fresh)(?:\s+([\s\S]+))?$/i);
   if (newM) {
     const prompt = (newM[1] ?? '').trim();
@@ -1342,7 +826,6 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       bridge.setChatThread(chatCtx.originChatId, nextTarget);
     } else {
       bridge.pendingTaskPick = null;
-      bridge.pendingModelPick = null;
       bridge.setSelfThread?.(nextTarget);
       bridge.focus = { botId: nextTarget.id, botName: nextTarget.name, threadId: newThreadId, ...(isGroup ? { isGroup: true } : {}) };
       bridge.lastBotReplyAt = bridge.now();
@@ -1395,20 +878,6 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       await sensSink.say(`❌ 操作失败：${formatOmbError(e)}`);
     }
     return true;
-  }
-
-  if (isDefault) {
-    const typoHit = suggestClosestCommand(raw);
-    if (typoHit) {
-      const fullCmd = `${bridge.trigger} ${typoHit.fullSuggestion}`;
-      await replySink.say(
-        `🤔 未识别指令 \`${typoHit.typo}\`，你是不是想输入 \`${fullCmd}\`？`,
-        null,
-        null,
-        [{ label: fullCmd, text: fullCmd, kind: 'primary' }],
-      );
-      return true;
-    }
   }
 
   return false;

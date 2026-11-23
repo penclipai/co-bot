@@ -141,7 +141,7 @@ function makeRichMockClient({
       },
       async getJob() { return { state: 'completed', version: 'v1', needsInput: [] }; },
       async getMessages(tid) { return { messages: threadMsgs.get(tid) ?? [] }; },
-      async createTask(botId) {
+      async createTask(_botId) {
         const tid = `t_new_${++newTaskSeq}`;
         return { task: { threadId: tid } };
       },
@@ -160,7 +160,7 @@ function makeRichMockClient({
 
 test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing replies, cards, commands & filenames', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-brand-'));
-  let nowMs = new Date(2026, 10, 20, 10, 0, 0).getTime();
+  const nowMs = new Date(2026, 10, 20, 10, 0, 0).getTime();
   const tr = makeTransport();
   const mock = makeRichMockClient();
 
@@ -220,7 +220,7 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     assert.match(tr.sent.at(-1).text, /^🔔 \*\*Plum 通知\*\*/);
 
     // 免打扰汇总
-    bridge.setQuietHours({ enabled: true, start: '09:00', end: '12:00' });
+    bridge.quietHours = { enabled: true, start: '09:00', end: '12:00' };
     mock.emitSse({
       kind: 'message',
       threadId: 't_chief',
@@ -230,7 +230,7 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     await tr.emitUser('@bot digest');
     await until(() => tr.sent.some((m) => m.text.includes('静默期间主协调消息')));
     assert.ok(tr.sent.some((m) => m.text.includes('- **co-bot**：静默期间主协调消息')));
-    bridge.setQuietHours({ enabled: false });
+    bridge.quietHours = { enabled: false, start: '22:00', end: '08:30' };
 
     // 5. 阻塞卡片（secret/connector/signIn）提示「管理后台」，绝不出现 OpenMausBot
     mock.emitSse({
@@ -241,21 +241,19 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     await until(() => tr.sent.some((m) => m.text.includes('API Key')));
     assert.ok(tr.sent.at(-1).text.includes('管理后台'));
 
-    // 6. 所有内建控制命令（help/help all/bots/status/routines/style/new/tasks/memory/compact/export）均零泄露
+    // 6. 所有内建控制命令（help/help all/bots/status/new/tasks/context/memory/approval/compact/chats）均零泄露
     const cmds = [
       '@bot help',
       '@bot help all',
       '@bot bots',
       '@bot status',
-      '@bot routines',
-      '@bot style',
-      '@bot style cobot',
-      '@bot style default',
       '@bot new',
       '@bot tasks',
+      '@bot context',
       '@bot memory',
+      '@bot approval',
       '@bot compact',
-      '@bot export',
+      '@bot chats',
     ];
     for (const c of cmds) {
       const before = tr.sent.length;

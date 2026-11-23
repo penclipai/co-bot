@@ -112,7 +112,7 @@ if (probe) {
       const upRes = spawnSync(npmCmd, npmArgs, { timeout: 3500, encoding: 'utf8' });
       const latestVer = upRes.status === 0 ? String(upRes.stdout || '').trim().split(/\r?\n/)[0].trim() : '';
       if (latestVer && latestVer !== ombHealth.version) {
-        console.log(`⬆ 发现 OpenMausBot 新版本 v${latestVer}（当前 v${ombHealth.version}），可运行 \`npm run omb -- upgrade\` 平滑升级。`);
+        console.log(`⬆ 发现 OpenMausBot 新版本 v${latestVer}（当前 v${ombHealth.version}），可运行 \`npm install openmausbot@latest && npm run restart\` 升级。`);
       } else if (latestVer) {
         console.log(`✓ OpenMausBot 已是最新版 v${ombHealth.version}`);
       }
@@ -176,19 +176,14 @@ if (probe) {
 }
 
 const chanSpec = resolveChannelSpec(cfg);
-if (chanSpec.kind === 'external') {
+if (chanSpec.kind === 'external' || chanSpec.name === 'ipc') {
   const res = await runChannelContractTest(cfg, { dry: true, log: () => {} });
   if (res.ok) {
-    console.log(`✓ 自定义通道插件「${res.channelName}」契约检查通过（诊断台 http://${cfg.web.host}:${cfg.web.port}/debug）`);
+    console.log(`✓ 通道插件「${res.channelName}」契约检查通过（诊断台 http://${cfg.web.host}:${cfg.web.port}/debug）`);
   } else {
     for (const err of res.errors) console.error(`✗ 通道插件「${chanSpec.spec}」：${err}`);
     fails++;
   }
-} else if (chanSpec.name === 'ipc') {
-  if (!cfg.ipc.selfId) { console.error('✗ ipc.selfId 未配置'); fails++; }
-  else console.log(`✓ ipc.selfId = ${cfg.ipc.selfId}`);
-  if (!cfg.ipc.client || !fs.existsSync(cfg.ipc.client)) { console.error(`✗ 找不到 ipc.client：${cfg.ipc.client || '(未填写)'}`); fails++; }
-  else console.log(`✓ ipc.client = ${cfg.ipc.client}（诊断台 http://${cfg.web.host}:${cfg.web.port}/debug）`);
 } else {
   console.log(`✓ 传输模式：${cfg.transport}（Web 自聊模拟器 http://${cfg.web.host}:${cfg.web.port}/sim）`);
 }

@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeCollaborators } from './core/inbound-policy.js';
+import { normalizeProjectsConfig } from './core/projects.js';
 import { levenshtein, parseHHMM } from './openmausbot/mentions.js';
 
 export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,6 +60,9 @@ export const defaults = {
   },
   chats: {
     mode: 'owner_everywhere',
+    externalReplyMode: 'inline',
+    externalBotPrefix: '🤖 ',
+    collaborators: [],
     enabledTypes: ['self', 'group', 'direct'],
     allowChatIds: [],
     denyChatIds: [],
@@ -75,10 +80,12 @@ export const defaults = {
     recentAttachmentWindowMs: 120_000,
     maxAutoAttachments: 4,
     autoCompactThreshold: 0.92,
-    scheduledSummaries: [],
     maxQuotedSnippetChars: 800,
     maxRecentMessageChars: 280,
   },
+  projects: [],
+  sharedContextDir: '',
+  sharedContextPullIntervalMs: 300_000,
   dataDir: './data',
 };
 
@@ -185,6 +192,24 @@ export function validateConfig(rawConfig = {}) {
     if (ch.mode !== undefined && ch.mode !== 'owner_everywhere' && ch.mode !== 'self_only') {
       errors.push(`chats.mode 必须为 owner_everywhere 或 self_only，当前为「${ch.mode}」`);
     }
+    if (ch.externalReplyMode !== undefined && ch.externalReplyMode !== 'inline' && ch.externalReplyMode !== 'draft_first') {
+      errors.push(`chats.externalReplyMode 必须为 inline 或 draft_first，当前为「${ch.externalReplyMode}」`);
+    }
+    if (ch.externalBotPrefix !== undefined && typeof ch.externalBotPrefix !== 'string') {
+      errors.push('chats.externalBotPrefix 必须为字符串');
+    }
+    if (ch.collaborators !== undefined) {
+      if (typeof ch.collaborators !== 'object' || ch.collaborators === null) {
+        errors.push('chats.collaborators 必须为数组或对象');
+      } else {
+        const items = Array.isArray(ch.collaborators) ? ch.collaborators : Object.values(ch.collaborators);
+        for (const col of items) {
+          if (col && typeof col === 'object' && col.policy !== undefined && !['confirm_in_self', 'auto_readonly'].includes(col.policy)) {
+            errors.push(`chats.collaborators[].policy 必须为 confirm_in_self 或 auto_readonly，当前为「${col.policy}」`);
+          }
+        }
+      }
+    }
     if (ch.externalSanitizeMentions !== undefined && !['all', 'dangerous', 'none'].includes(ch.externalSanitizeMentions)) {
       errors.push(`chats.externalSanitizeMentions 必须为 all / dangerous / none，当前为「${ch.externalSanitizeMentions}」`);
     }
@@ -194,15 +219,29 @@ export function validateConfig(rawConfig = {}) {
         errors.push(`chats.autoCompactThreshold 必须为 0 或 0.5～1 之间，当前为「${ch.autoCompactThreshold}」`);
       }
     }
-    if (Array.isArray(ch.scheduledSummaries)) {
-      ch.scheduledSummaries.forEach((item, idx) => {
-        if (!item?.chatId) {
-          errors.push(`chats.scheduledSummaries[${idx}] 缺少必填字段 chatId`);
+  }
+
+  if (rawConfig.projects !== undefined) {
+    if (typeof rawConfig.projects !== 'object' || rawConfig.projects === null) {
+      errors.push('projects 必须为数组或对象');
+    } else {
+      const list = Array.isArray(rawConfig.projects)
+        ? rawConfig.projects
+        : Object.entries(rawConfig.projects).map(([k, v]) => (typeof v === 'string' ? { name: k, path: v } : { name: k, ...(v || {}) }));
+      for (const p of list) {
+        if (!p || typeof p !== 'object' || typeof p.path !== 'string' || !p.path.trim()) {
+          errors.push('projects 中的每项都必须包含非空字符串 path');
         }
-        if (parseHHMM(item?.time) == null) {
-          errors.push(`chats.scheduledSummaries[${idx}].time 格式无效（应为 HH:MM）：「${item?.time ?? ''}」`);
-        }
-      });
+      }
+    }
+  }
+  if (rawConfig.sharedContextDir !== undefined && typeof rawConfig.sharedContextDir !== 'string') {
+    errors.push('sharedContextDir 必须为字符串');
+  }
+  if (rawConfig.sharedContextPullIntervalMs !== undefined) {
+    const ms = Number(rawConfig.sharedContextPullIntervalMs);
+    if (!Number.isFinite(ms) || ms < 0) {
+      errors.push(`sharedContextPullIntervalMs 必须为非负数字，当前为「${rawConfig.sharedContextPullIntervalMs}」`);
     }
   }
 
@@ -247,12 +286,17 @@ export function loadConfig(argv = process.argv.slice(2), explicitFile) {
     chats: {
       ...defaults.chats,
       ...raw.chats,
+      collaborators: normalizeCollaborators(raw.chats?.collaborators ?? defaults.chats.collaborators),
       enabledTypes: Array.isArray(raw.chats?.enabledTypes) ? raw.chats.enabledTypes : defaults.chats.enabledTypes,
       allowChatIds: Array.isArray(raw.chats?.allowChatIds) ? raw.chats.allowChatIds : defaults.chats.allowChatIds,
       denyChatIds: Array.isArray(raw.chats?.denyChatIds) ? raw.chats.denyChatIds : defaults.chats.denyChatIds,
       triggerAliases: Array.isArray(raw.chats?.triggerAliases) ? raw.chats.triggerAliases : defaults.chats.triggerAliases,
-      scheduledSummaries: Array.isArray(raw.chats?.scheduledSummaries) ? raw.chats.scheduledSummaries : defaults.chats.scheduledSummaries,
     },
+    projects: normalizeProjectsConfig(raw.projects ?? defaults.projects, base),
+    sharedContextDir: raw.sharedContextDir ? path.resolve(base, String(raw.sharedContextDir).trim()) : defaults.sharedContextDir,
+    sharedContextPullIntervalMs: raw.sharedContextPullIntervalMs !== undefined
+      ? Math.max(0, Number(raw.sharedContextPullIntervalMs) || 0)
+      : defaults.sharedContextPullIntervalMs,
     dataDir: raw.dataDir ?? defaults.dataDir,
   };
 

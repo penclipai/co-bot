@@ -88,16 +88,6 @@
     </section>
 
     <section class="card">
-      <h2>定时跨群纪要（Scheduled Summaries）</h2>
-      <table>
-        <thead>
-          <tr><th>目标会话</th><th>chatId</th><th>时间</th><th>状态</th><th>关注重点</th><th>最近执行</th><th>操作</th></tr>
-        </thead>
-        <tbody id="schedBody"></tbody>
-      </table>
-    </section>
-
-    <section class="card">
       <h2>已挂载插件（Kernel）</h2>
       <table>
         <thead>
@@ -123,6 +113,12 @@
             <option value="sendback">sendback</option>
             <option value="card">card</option>
             <option value="proactive">proactive</option>
+            <option value="security_redacted">security_redacted</option>
+            <option value="policy_denied">policy_denied</option>
+            <option value="project_bound">project_bound</option>
+            <option value="shared_context_sync">shared_context_sync</option>
+            <option value="delegation_req">delegation_req</option>
+            <option value="delegation_res">delegation_res</option>
             <option value="turn_resumed">turn_resumed</option>
             <option value="turn_stalled">turn_stalled</option>
             <option value="outbound_buffered">outbound_buffered</option>
@@ -188,15 +184,14 @@
       if (st.bridge) {
         addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}`);
         addLine(ombBox, '连续对话粘性', st.bridge.stickyActive ? '激活中' : '未激活');
-        addLine(ombBox, '定时跨群纪要', `${st.bridge.scheduledSummaries ?? 0} 条规则`);
         addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : `无（缓存 ${st.bridge.privateDraftsCount ?? 0}）`);
+        addLine(ombBox, '安全脱敏 / 越权拦截', `${st.bridge.securityRedactions ?? 0} / ${st.bridge.policyDenials ?? 0}`);
+        addLine(ombBox, '项目绑定 / C2C 委托', `${st.bridge.boundProjectsCount ?? 0} 会话 / 收:${st.bridge.delegations?.receivedCount ?? 0} 发:${st.bridge.delegations?.sentCount ?? 0}`);
+        if (st.sharedContext?.configured) {
+          addLine(ombBox, '共享目录同步', `${st.sharedContext.available ? st.sharedContext.lastStatus : '目录不可用'} (${st.sharedContext.dir})`);
+        }
         addLine(ombBox, '在途续接 / 断线缓冲', `${st.bridge.inFlightTurns ?? 0} / ${st.bridge.outboundBuffered ?? 0}（补发 ${st.bridge.outboundReplayed ?? 0}）`);
         addLine(ombBox, '出站失败 / 状态自愈', `${st.bridge.outboundFailures ?? 0} / ${st.bridge.stateCorruptRecoveries ?? 0}`);
-        if (st.bridge.runtimePrefs) {
-          const rp = st.bridge.runtimePrefs;
-          const qText = rp.quietHours?.enabled ? `${rp.quietHours.start}-${rp.quietHours.end}` : '关闭';
-          addLine(ombBox, '运行期热偏好', `免打扰:${qText} · 接单提示:${rp.externalAckInSelf ? '开' : '关'} · 脱敏:${rp.externalSanitizeMentions || 'all'}`);
-        }
       }
       if (st.runtime) {
         addLine(ombBox, '进程内存 / 运行时长', `${st.runtime.memoryRssMB} MB / ${st.runtime.uptimeSec}s`);
@@ -269,55 +264,6 @@
           }
           tr.append(td1, td2, td3, td4, td5, td6, td7);
           cBody.appendChild(tr);
-        }
-      }
-
-      const sBody = el('schedBody');
-      sBody.replaceChildren();
-      const scheds = st.scheduledSummaries || [];
-      if (!scheds.length) {
-        const tr = document.createElement('tr');
-        const td = document.createElement('td');
-        td.colSpan = 7;
-        td.textContent = '暂无定时跨群纪要规则（可在自聊发送 `@bot schedule add <群名> <HH:MM>` 添加）。';
-        tr.appendChild(td);
-        sBody.appendChild(tr);
-      } else {
-        for (const s of scheds) {
-          const tr = document.createElement('tr');
-          const td1 = document.createElement('td');
-          td1.textContent = s.chatName || s.chatId;
-          const td2 = document.createElement('td');
-          const sCode = document.createElement('code');
-          sCode.textContent = s.chatId;
-          td2.appendChild(sCode);
-          const td3 = document.createElement('td');
-          td3.textContent = s.time || '-';
-          const td4 = document.createElement('td');
-          td4.appendChild(badge(s.enabled === false ? '暂停' : '启用', s.enabled === false ? 'off' : 'ok'));
-          const td5 = document.createElement('td');
-          td5.textContent = s.focus || '-';
-          const td6 = document.createElement('td');
-          td6.textContent = s.lastRunDate || '-';
-          const td7 = document.createElement('td');
-          const runBtn = document.createElement('button');
-          runBtn.type = 'button';
-          runBtn.textContent = '试跑';
-          runBtn.style.marginRight = '6px';
-          runBtn.addEventListener('click', () => {
-            runDebugAction({ action: 'schedule_run', id: s.id })
-              .catch((err) => { el('updatedAt').textContent = `试跑失败：${err.message}`; });
-          });
-          const toggleSchedBtn = document.createElement('button');
-          toggleSchedBtn.type = 'button';
-          toggleSchedBtn.textContent = s.enabled === false ? '启用' : '暂停';
-          toggleSchedBtn.addEventListener('click', () => {
-            runDebugAction({ action: 'schedule_toggle', id: s.id, enabled: s.enabled === false })
-              .catch((err) => { el('updatedAt').textContent = `操作失败：${err.message}`; });
-          });
-          td7.append(runBtn, toggleSchedBtn);
-          tr.append(td1, td2, td3, td4, td5, td6, td7);
-          sBody.appendChild(tr);
         }
       }
 

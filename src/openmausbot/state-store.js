@@ -1,29 +1,12 @@
 /**
- * OpenMausBotBridge 状态持久化、防抖落盘、损坏自动备份、运行时偏好热恢复与有界缓存清理器。
+ * OpenMausBotBridge 状态持久化、防抖落盘、损坏自动备份与有界缓存清理器。
  */
 import fs from 'node:fs';
 import { writeJsonAtomic } from '../format.js';
-import { normalizeScheduleEntry, parseHHMM, rememberBounded } from './mentions.js';
+import { rememberBounded } from './mentions.js';
 
 const FILE_TTL = 10 * 60 * 1000;
 const ECHO_TTL = 3 * 60 * 1000;
-
-export function applyRuntimePrefs(bridge, prefs) {
-  if (!prefs || typeof prefs !== 'object') return;
-  bridge.runtimePrefs = { ...prefs };
-  if (prefs.quietHours && typeof prefs.quietHours === 'object') {
-    bridge.quietHours = { ...(bridge.quietHours || {}), ...prefs.quietHours };
-  }
-  if (typeof prefs.externalAckInSelf === 'boolean') {
-    bridge.chats.externalAckInSelf = prefs.externalAckInSelf;
-  }
-  if (['all', 'dangerous', 'none'].includes(prefs.externalSanitizeMentions)) {
-    bridge.chats.externalSanitizeMentions = prefs.externalSanitizeMentions;
-  }
-  if (Number.isFinite(Number(prefs.turnStallMs)) && Number(prefs.turnStallMs) >= 0) {
-    bridge.turnStallMs = Number(prefs.turnStallMs);
-  }
-}
 
 export function loadBridgeState(bridge) {
   if (!bridge.stateFile) return;
@@ -93,21 +76,6 @@ export function loadBridgeState(bridge) {
       for (const id of raw.chatPolicy.muted ?? []) if (id) bridge.chatPolicyOverrides.muted.add(String(id));
       for (const id of raw.chatPolicy.allowed ?? []) if (id) bridge.chatPolicyOverrides.allowed.add(String(id));
     }
-    if (Array.isArray(raw?.scheduledSummaries)) {
-      const byId = new Map(bridge.scheduledSummaries.map((s) => [s.id, s]));
-      for (const s of raw.scheduledSummaries.slice(-30)) {
-        if (!s?.id || !s?.chatId || parseHHMM(s.time) == null) continue;
-        const existing = byId.get(String(s.id));
-        if (existing) {
-          if (typeof s.enabled === 'boolean') existing.enabled = s.enabled;
-          if (s.lastRunDate) existing.lastRunDate = String(s.lastRunDate);
-          if (Number(s.lastRunTs) > 0) existing.lastRunTs = Number(s.lastRunTs);
-        } else if (!s.fromConfig) {
-          const entry = normalizeScheduleEntry(s, { fromConfig: false, fallbackId: String(s.id) });
-          if (entry) bridge.scheduledSummaries.push(entry);
-        }
-      }
-    }
     const turnCutoff = bridge.now() - 30 * 60_000;
     if (Array.isArray(raw?.inFlightTurns)) {
       for (const [k, v] of raw.inFlightTurns.slice(-20)) {
@@ -128,8 +96,18 @@ export function loadBridgeState(bridge) {
         bridge.lastPrivateDraftId = String(raw.lastPrivateDraftId);
       }
     }
-    if (raw?.runtimePrefs && typeof raw.runtimePrefs === 'object') {
-      applyRuntimePrefs(bridge, raw.runtimePrefs);
+    if (Array.isArray(raw?.chatProjects) && bridge.chatProjects) {
+      for (const [k, v] of raw.chatProjects.slice(-200)) {
+        if (k && v?.path) {
+          bridge.chatProjects.set(String(k), {
+            name: String(v.name || v.path),
+            path: String(v.path),
+          });
+        }
+      }
+    }
+    if (raw?.delegations && bridge.delegations) {
+      bridge.delegations.hydrate(raw.delegations);
     }
     // 防止早期版本遗留的外部会话 threadId 污染自聊 focus
     if (bridge.focus?.threadId && bridge.externalThreadIds.has(String(bridge.focus.threadId))) {
@@ -168,11 +146,11 @@ export function writeBridgeStateNow(bridge) {
         muted: [...bridge.chatPolicyOverrides.muted],
         allowed: [...bridge.chatPolicyOverrides.allowed],
       },
-      scheduledSummaries: bridge.scheduledSummaries.slice(-30),
       inFlightTurns: [...bridge.inFlightTurns.entries()].slice(-20),
       privateDrafts: uniqueDrafts.slice(-40),
       lastPrivateDraftId: bridge.lastPrivateDraftId || null,
-      ...(bridge.runtimePrefs && Object.keys(bridge.runtimePrefs).length ? { runtimePrefs: bridge.runtimePrefs } : {}),
+      chatProjects: bridge.chatProjects ? [...bridge.chatProjects.entries()].slice(-200) : [],
+      delegations: bridge.delegations ? bridge.delegations.snapshot() : undefined,
     });
   } catch (e) {
     bridge.stateSaveErrors += 1;

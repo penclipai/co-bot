@@ -1,9 +1,10 @@
 /**
- * 跨群策略、定时跨群汇总、外部 Thread 治理、自聊草稿确认回发与跨群检索状态管理器。
+ * 跨群策略、外部 Thread 治理与自聊草稿确认回发管理器。
  */
 import { clip } from '../format.js';
 import { formatImContextBlock, sanitizeExternalMentions } from '../core/chat-context.js';
-import { localDateKey, normalizeScheduleEntry, parseHHMM } from './mentions.js';
+import { formatExternalBotPrefix } from '../core/security.js';
+import { formatDelegationResponse } from './delegation.js';
 
 export function isExternalChatAllowed(bridge, chatId, chatType) {
   if (chatType === 'self') return true;
@@ -120,70 +121,12 @@ export async function compactExternalChat(bridge, targetChat, preferredBot = nul
   return compacted;
 }
 
-export function hydrateConfigSummaries(bridge) {
-  const rawList = Array.isArray(bridge.chats.scheduledSummaries) ? bridge.chats.scheduledSummaries : [];
-  for (let i = 0; i < rawList.length; i += 1) {
-    const entry = normalizeScheduleEntry(rawList[i], { fromConfig: true, fallbackId: `cfg_${i + 1}` });
-    if (entry) bridge.scheduledSummaries.push(entry);
-  }
-}
-
-function resolveScheduleIndex(bridge, idxOrId) {
-  const raw = String(idxOrId ?? '').trim();
-  if (!raw) return -1;
-  if (/^\d+$/.test(raw)) {
-    const i = Number(raw) - 1;
-    if (i >= 0 && i < bridge.scheduledSummaries.length) return i;
-  }
-  return bridge.scheduledSummaries.findIndex((s) => s.id === raw || s.chatId === raw);
-}
-
-export function addScheduledSummary(bridge, { chatId, chatName = '', chatType = 'group', time, days = null, limit = 40, focus = '' }) {
-  const tStr = String(time ?? '').trim();
-  if (parseHHMM(tStr) == null) throw new Error(`无效时间格式「${tStr}」，请使用 HH:MM（例如 18:00）`);
-  const cid = String(chatId);
-  const existing = bridge.scheduledSummaries.find((s) => s.chatId === cid && s.time === tStr);
-  if (existing) {
-    existing.chatName = chatName || existing.chatName;
-    existing.focus = focus || existing.focus;
-    existing.limit = Math.max(5, Math.min(80, Number(limit) || existing.limit));
-    existing.enabled = true;
-    bridge.saveState();
-    return { ...existing };
-  }
-  const entry = normalizeScheduleEntry(
-    { chatId: cid, chatName, chatType, time: tStr, days, limit, focus },
-    { fromConfig: false, fallbackId: `sched_${bridge.now().toString(36)}_${bridge.scheduledSummaries.length + 1}` },
-  );
-  bridge.scheduledSummaries.push(entry);
-  if (bridge.scheduledSummaries.length > 30) bridge.scheduledSummaries.shift();
-  bridge.saveState();
-  return { ...entry };
-}
-
-export function setScheduledSummaryEnabled(bridge, idxOrId, enabled) {
-  const idx = resolveScheduleIndex(bridge, idxOrId);
-  if (idx < 0) return null;
-  bridge.scheduledSummaries[idx].enabled = Boolean(enabled);
-  bridge.saveState();
-  return { ...bridge.scheduledSummaries[idx] };
-}
-
-export function removeScheduledSummary(bridge, idxOrId) {
-  const idx = resolveScheduleIndex(bridge, idxOrId);
-  if (idx < 0) return null;
-  const [removed] = bridge.scheduledSummaries.splice(idx, 1);
-  bridge.saveState();
-  return removed;
-}
-
 export async function buildExternalSummaryPrompt(bridge, targetChat, { limit = 30, focusQuestion = '' } = {}) {
   const maxMsgs = Math.max(5, Math.min(80, Number(limit) || 30));
   const recentMsgs = bridge.imContext
     ? await bridge.imContext.getHistory(targetChat.id, { limit: maxMsgs })
     : bridge.localContextStore.getRecent(targetChat.id, { limit: maxMsgs });
   if (!recentMsgs.length) return { count: 0, header: '', text: '' };
-  const contextApi = bridge.imContext?.issueContextApiUrls?.(targetChat.id) ?? null;
   const header = formatImContextBlock({
     triggerEvent: {
       id: 'summary_req',
@@ -193,88 +136,11 @@ export async function buildExternalSummaryPrompt(bridge, targetChat, { limit = 3
     chatMeta: targetChat,
     recentMsgs,
     privateReply: true,
-    contextApi,
     maxRecentChars: Math.max(350, Number(bridge.chats.maxRecentMessageChars) || 280),
   });
   const extra = focusQuestion ? `\n\n请额外重点回答：${focusQuestion}` : '';
-  const text = `请基于上述 <im-context> 中的「${targetChat.name || targetChat.id}」最近 ${recentMsgs.length} 条对话，用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人\n若需翻看更早记录或附件细节，可调用 more_context_api。${extra}`;
+  const text = `请基于上述 <im-context> 中的「${targetChat.name || targetChat.id}」最近 ${recentMsgs.length} 条对话，用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
   return { count: recentMsgs.length, header, text };
-}
-
-export async function runScheduledSummary(bridge, sched, { manual = false } = {}) {
-  if (!sched?.chatId) return { ok: false, reason: 'invalid' };
-  const known = resolveKnownChat(bridge, sched.chatId);
-  const targetChat = known ?? {
-    id: sched.chatId,
-    name: sched.chatName || sched.chatId,
-    type: sched.chatType || 'group',
-  };
-  const latestList = bridge.imContext
-    ? await bridge.imContext.getHistory(targetChat.id, { limit: 1 })
-    : bridge.localContextStore.getRecent(targetChat.id, { limit: 1 });
-  const latestMsg = latestList.at(-1);
-  if (!latestMsg) return { ok: false, reason: 'empty', chatName: targetChat.name };
-  if (!manual && latestMsg.ts <= (sched.lastRunTs || 0)) {
-    return { ok: false, reason: 'no_new_messages', chatName: targetChat.name };
-  }
-
-  const built = await buildExternalSummaryPrompt(bridge, targetChat, {
-    limit: sched.limit || 40,
-    focusQuestion: sched.focus || '',
-  });
-  if (!built.count) return { ok: false, reason: 'empty', chatName: targetChat.name };
-
-  const nowMs = bridge.now();
-  sched.lastRunDate = localDateKey(nowMs);
-  sched.lastRunTs = Math.max(nowMs, Number(latestMsg.ts) || 0);
-  bridge.saveState();
-
-  if (!bridge.selfChat) return { ok: false, reason: 'no_self_chat', chatName: targetChat.name };
-  const chief = await bridge.client.resolveBot('');
-  if (!chief) return { ok: false, reason: 'no_bot', chatName: targetChat.name };
-  const selfBot = await bridge.resolveSelfBotThread(chief);
-  const prefix = manual
-    ? `📋 **汇总 · 「${targetChat.name || targetChat.id}」**\n`
-    : `🗓️ **定时群纪要 · 「${targetChat.name || targetChat.id}」**\n`;
-  await bridge.dispatchToBot(
-    selfBot,
-    `${prefix}${built.text}`,
-    null,
-    null,
-    null,
-    {
-      isExternal: false,
-      originChatId: bridge.selfChat,
-      chatType: 'self',
-      replyChatId: bridge.selfChat,
-      controlChatId: bridge.selfChat,
-      preformattedHeader: built.header,
-      ev: null,
-    },
-  );
-  return { ok: true, count: built.count, chatName: targetChat.name };
-}
-
-export async function tickScheduledSummaries(bridge, nowMs = bridge.now()) {
-  if (!bridge.scheduledSummaries.length) return [];
-  const d = new Date(Number(nowMs) || Date.now());
-  const curMin = d.getHours() * 60 + d.getMinutes();
-  const day = d.getDay();
-  const dateKey = localDateKey(nowMs);
-  const triggered = [];
-  for (const sched of bridge.scheduledSummaries) {
-    if (sched.enabled === false) continue;
-    if (Array.isArray(sched.days) && sched.days.length && !sched.days.includes(day)) continue;
-    if (sched.lastRunDate === dateKey) continue;
-    const targetMin = parseHHMM(sched.time);
-    if (targetMin == null) continue;
-    if (curMin >= targetMin && (curMin - targetMin) <= 5) {
-      sched.lastRunDate = dateKey;
-      const res = await runScheduledSummary(bridge, sched, { manual: false });
-      if (res.ok) triggered.push(res);
-    }
-  }
-  return triggered;
 }
 
 export function resolvePrivateDraft(bridge, { quotedId = null, draftId = null } = {}) {
@@ -329,10 +195,15 @@ export async function confirmSendBack(bridge) {
   }
   bridge.pendingSendBack = null;
   const { draft, text } = pending;
-  const safeBody = sanitizeExternalMentions(text, {
+  let safeBody = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
   });
+  if (draft.delegationRe) {
+    safeBody = formatDelegationResponse({ re: draft.delegationRe, text: safeBody });
+  } else if (draft.addBotPrefix) {
+    safeBody = formatExternalBotPrefix(safeBody, bridge.chats.externalBotPrefix ?? '🤖 ');
+  }
   const sentId = await bridge.say(safeBody, { targetChatId: draft.originChatId }, draft.replyToImMsgId);
   if (!sentId) {
     await bridge.say(`❌ 发回「${draft.originChatName || draft.originChatId}」失败，请检查通道连接。`);
@@ -344,23 +215,20 @@ export async function confirmSendBack(bridge) {
     replyTo: draft.replyToImMsgId,
     senderId: 'me',
     senderName: '我',
-    isBotReply: false,
+    isBotReply: Boolean(draft.delegationRe || draft.addBotPrefix),
   });
+  if (draft.delegationRe) {
+    bridge.emitTelemetry('delegation_res', {
+      chatId: draft.originChatId,
+      chatType: draft.originChatType,
+      summary: `outbound re=${draft.delegationRe}`,
+    });
+  }
   bridge.emitTelemetry('sendback', {
     chatId: draft.originChatId,
     chatType: draft.originChatType,
     summary: safeBody,
   });
-  await bridge.say(`✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特处理）。`);
+  await bridge.say(`✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特与安全脱敏处理）。`);
   return sentId;
-}
-
-export async function searchAcrossChats(bridge, query, { chatQuery = '', limit = 10 } = {}) {
-  const scopedChat = chatQuery ? resolveKnownChat(bridge, chatQuery, { includeSelf: true }) : null;
-  if (chatQuery && !scopedChat) return { hits: [], scopedChat: null, missingChat: chatQuery };
-  const chatId = scopedChat?.id ?? null;
-  const hits = bridge.imContext?.searchAllChats
-    ? await bridge.imContext.searchAllChats(query, { limit, chatId, excludeSelf: true })
-    : bridge.localContextStore.searchAll(query, { limit, chatId, excludeSelf: true });
-  return { hits, scopedChat, missingChat: null };
 }

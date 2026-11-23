@@ -14,6 +14,7 @@
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>')
       .replace(/~~(.+?)~~/g, '<del>$1</del>');
+    // eslint-disable-next-line no-control-regex
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
   }
 

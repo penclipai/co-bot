@@ -13,6 +13,8 @@ export function compactChatCtx(chatCtx) {
           originChatName: chatCtx.polishDraft.originChatName || '',
           originChatType: chatCtx.polishDraft.originChatType || 'group',
           replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
+          addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
+          ...(chatCtx.polishDraft.delegationRe ? { delegationRe: chatCtx.polishDraft.delegationRe } : {}),
         },
       };
     }
@@ -29,6 +31,11 @@ export function compactChatCtx(chatCtx) {
     originQuoteId: chatCtx.originQuoteId ?? null,
     privateReply: Boolean(chatCtx.privateReply),
     silentProgress: Boolean(chatCtx.silentProgress),
+    readonly: Boolean(chatCtx.readonly),
+    draftFirst: Boolean(chatCtx.draftFirst),
+    ...(chatCtx.collaborator ? { collaborator: chatCtx.collaborator } : {}),
+    ...(Array.isArray(chatCtx.allowedProjects) ? { allowedProjects: [...chatCtx.allowedProjects] } : {}),
+    ...(chatCtx.delegationReq ? { delegationReq: { ...chatCtx.delegationReq } } : {}),
   };
 }
 
@@ -180,32 +187,6 @@ export function parseHHMM(s) {
   const mm = Number(m[2]);
   if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
   return hh * 60 + mm;
-}
-
-export function localDateKey(ms) {
-  const d = new Date(Number(ms) || Date.now());
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-export function normalizeScheduleEntry(raw, { fromConfig = false, fallbackId = '' } = {}) {
-  if (!raw?.chatId || parseHHMM(raw.time) == null) return null;
-  return {
-    id: String(raw.id || fallbackId),
-    chatId: String(raw.chatId),
-    chatName: raw.chatName ? String(raw.chatName) : String(raw.chatId),
-    chatType: raw.chatType || 'group',
-    time: String(raw.time).trim().padStart(5, '0'),
-    days: Array.isArray(raw.days) ? raw.days.map(Number).filter((d) => d >= 0 && d <= 6) : null,
-    limit: Math.max(5, Math.min(80, Number(raw.limit) || 40)),
-    focus: raw.focus ? String(raw.focus).trim() : '',
-    enabled: raw.enabled !== false,
-    fromConfig: Boolean(fromConfig),
-    lastRunDate: raw.lastRunDate ? String(raw.lastRunDate) : null,
-    lastRunTs: Number(raw.lastRunTs) || 0,
-  };
 }
 
 /** 判断指定时间戳是否落在免打扰时段（支持跨午夜，如 22:00 ~ 08:30）。 */

@@ -64,6 +64,7 @@ export const inspectorPlugin = {
     ctx.on('channel:inbound', (p) => pushEvent('channel', 'inbound', p));
     ctx.on('channel:outbound', (p) => pushEvent('channel', 'outbound', p));
     ctx.on('channel:state', (p) => pushEvent('channel', 'state', p));
+    ctx.on('channel:notify', (p) => pushEvent('channel', 'notify', p));
     ctx.on('bridge:event', (p) => pushEvent('bridge', p?.type || 'event', p));
 
     const channelSnapshot = () => {
@@ -97,7 +98,9 @@ export const inspectorPlugin = {
         chats: bridge?.listKnownChats?.() ?? [],
         chatPolicy: bridge?.getChatPolicy?.() ?? null,
         chatThreads: bridge?.listChatThreads?.() ?? [],
-        scheduledSummaries: bridge?.listScheduledSummaries?.() ?? [],
+        boundProjects: bridge?.listProjectBindings?.() ?? [],
+        sharedContext: bridge?.getSharedContextStatus?.() ?? null,
+        delegations: bridge?.delegations?.stats?.() ?? null,
         channel: {
           name: snap.name,
           capabilities: snap.capabilities,
@@ -153,20 +156,6 @@ export const inspectorPlugin = {
         else if (mode === 'self_only' || mode === 'owner_everywhere') bridge.setChatMode(mode);
         else throw new Error(`无效模式：${mode}`);
         return { ok: true, action, chatPolicy: bridge.getChatPolicy() };
-      }
-      if (action === 'schedule_toggle') {
-        const id = String(body?.id || '').trim();
-        if (!id) throw new Error('缺少定时规则 id');
-        const updated = bridge.setScheduledSummaryEnabled(id, Boolean(body?.enabled));
-        if (!updated) throw new Error(`未找到定时规则：${id}`);
-        return { ok: true, action, schedule: updated };
-      }
-      if (action === 'schedule_run') {
-        const id = String(body?.id || '').trim();
-        const picked = bridge.listScheduledSummaries().find((s) => s.id === id);
-        if (!picked) throw new Error(`未找到定时规则：${id}`);
-        const res = await bridge.runScheduledSummary(picked, { manual: true });
-        return { ok: true, action, result: res };
       }
       if (action === 'flush_outbound') {
         const replayed = await bridge.flushOutboundBuffer();

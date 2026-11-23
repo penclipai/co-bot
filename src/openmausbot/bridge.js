@@ -1,71 +1,58 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { defaults } from '../config.js';
-import { formatLinkCardSnippet, isAudioAttachment } from '../core/channel-contract.js';
-import { formatAttachmentTag, messageNeedsInput } from './client.js';
-import { assemblePromptContext, ChatContextStore, sanitizeExternalMentions } from '../core/chat-context.js';
-import { extractCardInfo, fmtTokens, formatCardPrompt, formatOmbError, parseChoiceIndex } from './cards.js';
-import { botCommandTarget, buildHelpText, handleCommand } from './commands.js';
-import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE, LEGACY_GROK_SOUL_RE } from './persona.js';
+import { ChatContextStore } from '../core/chat-context.js';
+import { normalizeCollaborators } from '../core/inbound-policy.js';
+import { normalizeProjectsConfig } from '../core/projects.js';
+import { SharedContextManager } from '../core/shared-context.js';
+import { clip, pruneExpiredFiles, safeAttachmentName } from '../format.js';
+import { extractCardInfo, formatOmbError } from './cards.js';
 import {
-  compactChatCtx,
-  hasNonBotMention,
-  inQuietHours,
-  parseInlineTriggerMention,
-  parseStartMention,
-  parseStructuredBotMention,
-  rememberBounded,
-} from './mentions.js';
-import { createTurnTracker } from './turn-tracker.js';
+  buildExternalSummaryPrompt,
+  compactExternalChat,
+  confirmSendBack,
+  getChatPolicy,
+  listKnownChats,
+  requestSendBack,
+  resolveKnownChat,
+  resolvePrivateDraft,
+} from './chat-manager.js';
+import { DelegationTracker } from './delegation.js';
 import {
-  flushBridgeState,
-  loadBridgeState,
-  pruneBridgeMemoryCaches,
-  saveBridgeState,
-  writeBridgeStateNow,
-} from './state-store.js';
+  deliverBotReply,
+  emitCard,
+  flushQuietDigest,
+  forwardBotMedia,
+  maybeWarnHighContext,
+  sendOutboundFile,
+} from './delivery.js';
+import {
+  cancelLatestQueue,
+  collectBotTasks,
+  dispatchToBot,
+  handleSseEvent,
+  steerLatestQueue,
+  switchTask,
+} from './dispatch.js';
+import { handleInboundEvent, sendDelegation } from './inbound-router.js';
+import { inQuietHours, rememberBounded } from './mentions.js';
 import {
   drainOutboundQueue,
   flushOutboundBuffer as flushOutboundQueueBuffer,
   isTransportDisconnected,
   sendBridgeText,
 } from './outbound-queue.js';
+import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE, LEGACY_GROK_SOUL_RE } from './persona.js';
 import {
-  addScheduledSummary,
-  buildExternalSummaryPrompt,
-  compactExternalChat,
-  confirmSendBack,
-  getChatPolicy,
-  hydrateConfigSummaries,
-  isExternalChatAllowed,
-  listKnownChats,
-  removeScheduledSummary,
-  requestSendBack,
-  resolveKnownChat,
-  resolvePrivateDraft,
-  runScheduledSummary,
-  searchAcrossChats,
-  setScheduledSummaryEnabled,
-  tickScheduledSummaries,
-} from './chat-manager.js';
-import {
-  clip, fileSafe, mdClip, mdSplit,
-  pruneExpiredFiles, safeAttachmentName,
-} from '../format.js';
+  flushBridgeState,
+  loadBridgeState,
+  pruneBridgeMemoryCaches,
+  saveBridgeState,
+} from './state-store.js';
+import { createTurnTracker } from './turn-tracker.js';
 
 export { extractCardInfo, inQuietHours };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const APPROVE_RE = /^(ok|okay|yes|y|好|好的|可以|允许|同意|通过|执行|批准)$/i;
-const ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都允许)$/i;
-const DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$/i;
-const SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
-const NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
-const BYE_RE = /^(bye|退下|结束对话|退出对话)$/i;
-const IMAGE_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-const MIME_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
-
 const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
 /**
@@ -74,7 +61,7 @@ const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
  *   - 连续对话短时粘性（followUpWindowMs）+ 连续纯发图防抖合批 + 笔记前缀保护
  *   - 中间口语即时流式上屏 + 中文工具进度去噪 + 适中长回复软拆分两段
  *   - 审批卡（ok / always / no）与选项/提问卡（1 / 2 / 3）快捷交互 + 模拟器按钮
- *   - 忙时排队感知、全量状态原子持久化与发送退避重试（子命令分发见 commands.js）
+ *   - 出站安全脱敏门禁、外部协作白名单策略、项目绑定与 2 态 C2C 委托
  */
 export class OpenMausBotBridge {
   constructor({
@@ -112,6 +99,10 @@ export class OpenMausBotBridge {
     outPrefix = '',
     imContext = null,
     chats = {},
+    projects = [],
+    sharedContextDir = '',
+    sharedContextPullIntervalMs = 300_000,
+    execGit = null,
     transcribeAudio = null,
     now = () => Date.now(),
   } = {}) {
@@ -133,13 +124,20 @@ export class OpenMausBotBridge {
       ...defaults.chats,
       ...(chats && typeof chats === 'object' ? chats : {}),
     };
-    this.basePrefs = {
-      quietHours: { ...(this.quietHours || defaults.selfChat.quietHours) },
-      externalAckInSelf: Boolean(this.chats.externalAckInSelf),
-      externalSanitizeMentions: this.chats.externalSanitizeMentions || 'all',
-      turnStallMs: this.turnStallMs,
-    };
-    this.runtimePrefs = {};
+    this.chats.collaborators = normalizeCollaborators(this.chats.collaborators);
+    const projectBaseDir = dataDir ? path.dirname(path.resolve(dataDir)) : process.cwd();
+    this.projects = normalizeProjectsConfig(projects, projectBaseDir);
+    this.chatProjects = new Map();
+    this.sharedContext = new SharedContextManager({
+      dir: sharedContextDir,
+      pullIntervalMs: sharedContextPullIntervalMs,
+      now: () => this.now(),
+      execGit,
+      onTelemetry: (type, p) => this.emitTelemetry(type, p),
+    });
+    this.delegations = new DelegationTracker({ now: () => this.now() });
+    this.securityRedactions = 0;
+    this.policyDenials = 0;
     this.localContextStore = imContext?.store ?? new ChatContextStore({
       maxPerChat: this.chats.contextMaxMessagesPerChat,
       ttlMs: this.chats.contextTtlMs,
@@ -168,8 +166,6 @@ export class OpenMausBotBridge {
     this.queuedByThread = new Map();
     this.steeredQueue = new Map();
     this.pendingTaskPick = null;
-    this.pendingModelPick = null;
-    this.pendingRoutineList = null;
     this.pendingMediaIds = [];
     this.pendingMediaTimer = null;
     this.pendingMediaTarget = null;
@@ -178,8 +174,6 @@ export class OpenMausBotBridge {
     this.privateDrafts = new Map();
     this.lastPrivateDraftId = null;
     this.pendingSendBack = null;
-    this.scheduledSummaries = [];
-    this.summaryTimer = null;
     this.inFlightTurns = new Map();
     this.outboundQueue = new Map();
     this.disconnectedBuffer = [];
@@ -212,7 +206,6 @@ export class OpenMausBotBridge {
     this.consecutiveSseErrors = 0;
     this.lastAutoHealAt = 0;
     this.multiBotCache = null;
-    hydrateConfigSummaries(this);
     this.#loadState();
   }
 
@@ -221,10 +214,10 @@ export class OpenMausBotBridge {
   }
 
   #loadState() { loadBridgeState(this); }
-  #writeStateNow() { writeBridgeStateNow(this); }
   saveState(opts) { saveBridgeState(this, opts); }
   flushState() { flushBridgeState(this); }
-  #pruneMemoryCaches() { pruneBridgeMemoryCaches(this); }
+  pruneMemoryCaches() { pruneBridgeMemoryCaches(this); }
+
   #syncQuietTimer() {
     clearInterval(this.quietTimer);
     this.quietTimer = null;
@@ -238,60 +231,16 @@ export class OpenMausBotBridge {
     }
   }
 
-  setQuietHours(patch = {}) {
-    const next = { ...(this.quietHours || defaults.selfChat.quietHours), ...patch };
-    this.quietHours = next;
-    this.runtimePrefs = { ...this.runtimePrefs, quietHours: { ...next } };
-    this.#syncQuietTimer();
-    this.saveState();
-    return { ...this.quietHours };
-  }
-
-  setRuntimePref(key, value) {
-    if (key === 'reset') {
-      this.quietHours = { ...this.basePrefs.quietHours };
-      this.chats.externalAckInSelf = this.basePrefs.externalAckInSelf;
-      this.chats.externalSanitizeMentions = this.basePrefs.externalSanitizeMentions;
-      this.turnStallMs = this.basePrefs.turnStallMs;
-      this.runtimePrefs = {};
-      this.#syncQuietTimer();
-      this.saveState();
-      return { ...this.basePrefs };
-    }
-    if (key === 'externalAckInSelf') {
-      this.chats.externalAckInSelf = Boolean(value);
-      this.runtimePrefs.externalAckInSelf = this.chats.externalAckInSelf;
-    } else if (key === 'externalSanitizeMentions') {
-      this.chats.externalSanitizeMentions = value;
-      this.runtimePrefs.externalSanitizeMentions = value;
-    } else if (key === 'turnStallMs') {
-      this.turnStallMs = Math.max(0, Number(value) || 0);
-      this.runtimePrefs.turnStallMs = this.turnStallMs;
-    }
-    this.saveState();
-    return this.getRuntimePrefs();
-  }
-
-  getRuntimePrefs() {
-    return {
-      quietHours: { ...(this.quietHours || {}) },
-      externalAckInSelf: Boolean(this.chats.externalAckInSelf),
-      externalSanitizeMentions: this.chats.externalSanitizeMentions || 'all',
-      turnStallMs: this.turnStallMs,
-    };
-  }
-
   rememberOwnId(id) {
     if (id != null) rememberBounded(this.ownIds, id, 2000);
   }
 
   clearPickers() {
     this.pendingTaskPick = null;
-    this.pendingModelPick = null;
     this.pendingSendBack = null;
   }
 
-  #clearPendingMedia() {
+  clearPendingMedia() {
     clearTimeout(this.pendingMediaTimer);
     this.pendingMediaTimer = null;
     this.pendingMediaIds = [];
@@ -365,9 +314,13 @@ export class OpenMausBotBridge {
       multiBot: this.multiBotCache,
       chatThreads: this.chatThreads.size,
       chatPolicy: this.getChatPolicy(),
-      scheduledSummaries: this.scheduledSummaries.filter((s) => s.enabled !== false).length,
       pendingSendBack: Boolean(this.pendingSendBack && this.now() < this.pendingSendBack.expiresAt),
       privateDraftsCount: uniqueDrafts.size,
+      securityRedactions: this.securityRedactions,
+      policyDenials: this.policyDenials,
+      boundProjectsCount: this.chatProjects.size,
+      sharedContext: this.sharedContext.status(),
+      delegations: this.delegations.stats(),
       outboundBuffered: this.disconnectedBuffer.length,
       outboundFailures: this.outboundFailures,
       outboundReplayed: this.outboundReplayed,
@@ -375,7 +328,6 @@ export class OpenMausBotBridge {
       stateSaveErrors: this.stateSaveErrors,
       stateCorruptRecoveries: this.stateCorruptRecoveries,
       uptimeSec: Math.max(0, Math.round((this.now() - this.startedAt) / 1000)),
-      runtimePrefs: this.getRuntimePrefs(),
       context: this.imContext?.stats?.() ?? this.localContextStore.stats(),
     };
   }
@@ -389,7 +341,7 @@ export class OpenMausBotBridge {
         continue;
       }
       if (this.activeTurns.has(key)) continue;
-      const turn = this.#trackTurn(meta);
+      const turn = this.trackTurn(meta);
       turn.startWatcher();
       this.emitTelemetry('turn_resumed', {
         botName: this.displayBotName(meta.botId, meta.botName, { isGroup: Boolean(meta.isGroup) }),
@@ -404,12 +356,12 @@ export class OpenMausBotBridge {
     if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
     this.cleanupTimer = setInterval(() => {
       if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
-      this.#pruneMemoryCaches();
+      this.pruneMemoryCaches();
     }, DAY_MS);
     this.cleanupTimer.unref?.();
     await this.transport.start((ev) => this.onEvent(ev).catch((e) => console.error('[omb-bridge]', e)));
     this.sseAc = new AbortController();
-    this.sseTask = this.client.subscribeEvents((evt) => this.#onSseEvent(evt), {
+    this.sseTask = this.client.subscribeEvents((evt) => handleSseEvent(this, evt), {
       signal: this.sseAc.signal,
       onError: (e) => {
         if (this.sseConnected) this.sseReconnects += 1;
@@ -434,13 +386,9 @@ export class OpenMausBotBridge {
       },
     }).catch((e) => { if (!this.sseAc?.signal.aborted) console.error('[omb-sse]', e); });
     this.#syncQuietTimer();
-    this.summaryTimer = setInterval(() => {
-      this.tickScheduledSummaries().catch(() => {});
-    }, 30_000);
-    this.summaryTimer.unref?.();
     await this.refreshMultiBot();
     this.#resumeInFlightTurns();
-    if (!this.#isTransportDisconnected() && this.disconnectedBuffer.length) {
+    if (!this.isTransportDisconnected() && this.disconnectedBuffer.length) {
       this.flushOutboundBuffer().catch(() => {});
     }
   }
@@ -450,11 +398,9 @@ export class OpenMausBotBridge {
     this.sseAuthError = null;
     clearInterval(this.quietTimer);
     this.quietTimer = null;
-    clearInterval(this.summaryTimer);
-    this.summaryTimer = null;
     clearInterval(this.cleanupTimer);
     this.cleanupTimer = null;
-    this.#clearPendingMedia();
+    this.clearPendingMedia();
     this.sseAc?.abort();
     await this.drainOutbound(2000).catch(() => {});
     for (const turn of [...this.activeTurns.values()]) turn.dispose();
@@ -539,7 +485,7 @@ export class OpenMausBotBridge {
     }
   }
 
-  async #resolveOwnerByThread(threadId) {
+  async resolveOwnerByThread(threadId) {
     if (this.botByThread.has(threadId)) return this.botByThread.get(threadId);
     if (this.groupByThread.has(threadId)) return this.groupByThread.get(threadId);
     await this.refreshMultiBot();
@@ -554,7 +500,7 @@ export class OpenMausBotBridge {
     for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
   }
 
-  #isEcho(text) {
+  isEcho(text) {
     if (this.outPrefix && text.startsWith(this.outPrefix.trim())) return true;
     const now = this.now();
     for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
@@ -562,10 +508,11 @@ export class OpenMausBotBridge {
   }
 
   channelCaps() {
-    return this.#channelCaps();
+    const caps = this.transport?.capabilities;
+    return caps && typeof caps === 'object' ? caps : null;
   }
 
-  #isPendingOutFile(att) {
+  isPendingOutFile(att) {
     if (!this.pendingOutFiles.size) return false;
     const now = this.now();
     for (const [k, exp] of this.pendingOutFiles) {
@@ -580,33 +527,28 @@ export class OpenMausBotBridge {
     return true;
   }
 
-  #channelCaps() {
-    const caps = this.transport?.capabilities;
-    return caps && typeof caps === 'object' ? caps : null;
-  }
-
-  #effectiveResultChars() {
-    const maxChars = Number(this.#channelCaps()?.maxChars ?? 0);
+  effectiveResultChars() {
+    const maxChars = Number(this.channelCaps()?.maxChars ?? 0);
     return maxChars > 0 ? Math.min(this.resultChars, maxChars) : this.resultChars;
   }
 
-  #effectiveSoftSplitChars() {
-    const maxChars = Number(this.#channelCaps()?.maxChars ?? 0);
-    const effRes = this.#effectiveResultChars();
+  effectiveSoftSplitChars() {
+    const maxChars = Number(this.channelCaps()?.maxChars ?? 0);
+    const effRes = this.effectiveResultChars();
     if (maxChars > 0) return Math.min(this.softSplitChars, maxChars);
     return Math.max(effRes, this.softSplitChars);
   }
 
-  #supportsFiles() {
-    const caps = this.#channelCaps();
+  supportsFiles() {
+    const caps = this.channelCaps();
     return typeof this.transport.sendFile === 'function'
       && this.transport.canFiles !== false
       && caps?.files !== false;
   }
 
-  #supportsImages() {
-    const caps = this.#channelCaps();
-    return this.#supportsFiles() && caps?.images !== false;
+  supportsImages() {
+    const caps = this.channelCaps();
+    return this.supportsFiles() && caps?.images !== false;
   }
 
   emitTelemetry(type, data = {}) {
@@ -615,7 +557,7 @@ export class OpenMausBotBridge {
     } catch { /* ignore telemetry errors */ }
   }
 
-  #recordInboundToContext(ev) {
+  recordInboundToContext(ev) {
     if (!ev?.id || !ev?.chat?.id) return;
     const cid = String(ev.chat.id);
     if (this.externalChatMeta.has(cid)) this.externalChatMeta.delete(cid);
@@ -684,17 +626,50 @@ export class OpenMausBotBridge {
     this.saveState();
   }
 
+  listProjectBindings() {
+    return [...this.chatProjects.entries()].map(([chatId, info]) => ({ chatId, ...info }));
+  }
+
+  bindChatProject(chatId, project) {
+    const cid = String(chatId || '').trim();
+    if (!cid || !project?.path) return null;
+    const entry = {
+      name: String(project.name || path.basename(project.path)),
+      path: String(project.path),
+    };
+    this.chatProjects.set(cid, entry);
+    this.saveState();
+    this.emitTelemetry('project_bound', { chatId: cid, summary: `${entry.name} -> ${entry.path}` });
+    return entry;
+  }
+
+  unbindChatProject(chatId) {
+    const cid = String(chatId || '').trim();
+    if (!cid || !this.chatProjects.has(cid)) return false;
+    this.chatProjects.delete(cid);
+    this.saveState();
+    this.emitTelemetry('project_bound', { chatId: cid, summary: 'unbind' });
+    return true;
+  }
+
+  getSharedContextStatus() {
+    return this.sharedContext.status();
+  }
+
+  notifySelf({ title, body, chatId, urgent = false } = {}) {
+    if (typeof this.transport?.notify !== 'function') return;
+    Promise.resolve(this.transport.notify({
+      title: title || this.botName || 'co-bot',
+      body: clip(String(body || '').replace(/\s+/g, ' '), 120),
+      chatId: chatId || this.selfChat || '',
+      urgent: Boolean(urgent),
+    })).catch(() => {});
+  }
+
   compactExternalChat(targetChat, preferredBot = null) { return compactExternalChat(this, targetChat, preferredBot); }
-  listScheduledSummaries() { return this.scheduledSummaries.map((s) => ({ ...s })); }
-  addScheduledSummary(spec) { return addScheduledSummary(this, spec); }
-  setScheduledSummaryEnabled(idxOrId, enabled) { return setScheduledSummaryEnabled(this, idxOrId, enabled); }
-  removeScheduledSummary(idxOrId) { return removeScheduledSummary(this, idxOrId); }
-  runScheduledSummary(sched, opts) { return runScheduledSummary(this, sched, opts); }
-  tickScheduledSummaries(nowMs = this.now()) { return tickScheduledSummaries(this, nowMs); }
   resolvePrivateDraft(opts) { return resolvePrivateDraft(this, opts); }
   requestSendBack(draft, overrideText = '') { return requestSendBack(this, draft, overrideText); }
   confirmSendBack() { return confirmSendBack(this); }
-  searchAcrossChats(query, opts) { return searchAcrossChats(this, query, opts); }
   buildExternalSummaryPrompt(targetChat, opts) { return buildExternalSummaryPrompt(this, targetChat, opts); }
 
   getChatThread(chatId, targetBot) {
@@ -704,7 +679,7 @@ export class OpenMausBotBridge {
   }
 
   setSelfThread(targetBot) {
-    if (!targetBot?.id || !targetBot?.threadId || this.#isExternalThread(targetBot.threadId)) return;
+    if (!targetBot?.id || !targetBot?.threadId || this.isExternalThread(targetBot.threadId)) return;
     this.selfThreads.set(String(targetBot.id), {
       botId: targetBot.id,
       botName: targetBot.name,
@@ -715,7 +690,7 @@ export class OpenMausBotBridge {
     this.saveState();
   }
 
-  #isExternalThread(threadId) {
+  isExternalThread(threadId) {
     if (!threadId) return false;
     const tid = String(threadId);
     if (this.externalThreadIds.has(tid)) return true;
@@ -727,15 +702,15 @@ export class OpenMausBotBridge {
 
   async resolveSelfBotThread(targetBot) {
     if (!targetBot) return targetBot;
-    if (!this.#isExternalThread(targetBot.threadId)) {
+    if (!this.isExternalThread(targetBot.threadId)) {
       this.setSelfThread(targetBot);
       return targetBot;
     }
     const saved = this.selfThreads.get(String(targetBot.id));
-    if (saved?.threadId && !this.#isExternalThread(saved.threadId)) {
+    if (saved?.threadId && !this.isExternalThread(saved.threadId)) {
       return { ...targetBot, threadId: saved.threadId };
     }
-    if (this.focus?.botId === targetBot.id && this.focus?.threadId && !this.#isExternalThread(this.focus.threadId)) {
+    if (this.focus?.botId === targetBot.id && this.focus?.threadId && !this.isExternalThread(this.focus.threadId)) {
       const next = { ...targetBot, threadId: this.focus.threadId };
       this.setSelfThread(next);
       return next;
@@ -747,7 +722,7 @@ export class OpenMausBotBridge {
           ? await this.client.createTask(targetBot.id, { title: '自聊主线', select: true })
           : null);
       const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
-      if (newTid && !this.#isExternalThread(newTid)) {
+      if (newTid && !this.isExternalThread(newTid)) {
         const next = { ...targetBot, threadId: newTid };
         this.setSelfThread(next);
         return next;
@@ -775,7 +750,7 @@ export class OpenMausBotBridge {
     this.saveState();
   }
 
-  async #ensureChatThread(chatId, chatType, chatName, targetBot) {
+  async ensureChatThread(chatId, chatType, chatName, targetBot) {
     if (!chatId || chatType === 'self' || !targetBot || this.chats.isolateThreadsByChat === false) {
       return targetBot;
     }
@@ -806,720 +781,11 @@ export class OpenMausBotBridge {
     return nextTarget;
   }
 
-  async #buildPromptContext(ev, chatCtx, { skipSelfQuote = false } = {}) {
-    if (!ev?.chat?.id) return { header: '', quotedMsg: null, recentMsgs: [], quotedAttachments: [], contextAttachments: [] };
-    const common = {
-      ev,
-      privateReply: Boolean(chatCtx?.privateReply),
-      contextWindow: this.chats.contextWindow,
-      injectRecent: this.chats.injectRecentContext !== false,
-      maxQuotedChars: this.chats.maxQuotedSnippetChars,
-      maxRecentChars: this.chats.maxRecentMessageChars,
-      skipSelfQuote,
-      recentAttachmentWindowMs: this.chats.recentAttachmentWindowMs,
-      maxAutoAttachments: this.chats.maxAutoAttachments,
-    };
-    if (this.imContext) return this.imContext.buildPromptContext(common);
-    return assemblePromptContext({
-      ...common,
-      store: this.localContextStore,
-      resolveMessage: async (cid, msgId) => {
-        const cached = this.localContextStore.getMessage(cid, msgId);
-        if (cached) return cached;
-        if (typeof this.transport?.getMessage === 'function') {
-          try {
-            const remote = await this.transport.getMessage(cid, msgId);
-            if (remote) return this.localContextStore.recordInbound(remote);
-          } catch { /* ignore */ }
-        }
-        return null;
-      },
-      getHistory: async (cid, { limit, excludeMsgId } = {}) => this.localContextStore.getRecent(cid, { limit, excludeMsgId }),
-    });
-  }
-
-  async sendOutboundFile(filePath, name, opts = {}) {
-    const { chatId: targetChatId, recordContext, ...passOpts } = opts || {};
-    const chatId = targetChatId || this.selfChat;
-    if (!chatId || !this.#supportsFiles()) return null;
-    const safe = safeAttachmentName(name || path.basename(filePath), 'file');
-    let size = 0;
-    try { size = fs.statSync(filePath).size; } catch { /* ignore */ }
-    const exp = this.now() + 30_000;
-    if (this.pendingOutFiles.size > 200) this.#pruneMemoryCaches();
-    while (this.pendingOutFiles.size > 200) this.pendingOutFiles.delete(this.pendingOutFiles.keys().next().value);
-    if (size > 0) this.pendingOutFiles.set(`${safe}:${size}`, exp);
-    this.pendingOutFiles.set(safe, exp);
-    const caps = this.#channelCaps();
-    const safeOpts = caps?.replyTo === false && passOpts?.replyTo
-      ? { ...passOpts, replyTo: undefined }
-      : passOpts;
-    const fid = await this.transport.sendFile(chatId, { path: filePath, name }, safeOpts);
-    this.rememberOwnId(fid);
-    if (recordContext) {
-      this.recordOutboundToContext(chatId, {
-        id: fid,
-        text: `[附件: ${name || safe}]`,
-        replyTo: safeOpts?.replyTo,
-      });
-    }
-    return fid;
-  }
-
-  #isTransportDisconnected() { return isTransportDisconnected(this); }
-  async drainOutbound(timeoutMs = 2000) { return drainOutboundQueue(this, timeoutMs); }
-  async flushOutboundBuffer() { return flushOutboundQueueBuffer(this); }
-  async say(text, route = null, replyTo = null, actions = null, extra = {}) {
-    return sendBridgeText(this, text, route, replyTo, actions, extra);
-  }
-
   getKnownBotNames() {
     const names = [this.trigger, ...this.getEffectiveTriggerAliases()];
     for (const b of this.botById.values()) if (b?.name) names.push(b.name);
     for (const g of this.groupById.values()) if (g?.name) names.push(g.name);
     return names;
-  }
-
-  async #resolveBotTarget(mention, isDefault, ev) {
-    let targetBot = null;
-    let resolvedDefault = isDefault;
-    if (isDefault) {
-      targetBot = await this.client.resolveBot('');
-    } else {
-      targetBot = await this.client.resolveBot(mention);
-      if (!targetBot && typeof this.client.resolveGroup === 'function') {
-        const grp = await this.client.resolveGroup(mention);
-        if (grp) targetBot = { ...grp, isGroup: true };
-      }
-      // 原生 IM `@自己` 触发时（mentionsMe=true），回退路由到默认主 Bot
-      if (!targetBot && ev?.mentionsMe) {
-        resolvedDefault = true;
-        targetBot = await this.client.resolveBot('');
-      }
-    }
-    return { targetBot, isDefault: resolvedDefault };
-  }
-
-  #buildExternalChatCtx({ isSelfChat, chatId, chatType, chatName, mid, privateReply, ev }) {
-    const replyChatId = isSelfChat ? this.selfChat : (privateReply ? this.selfChat : chatId);
-    return {
-      isExternal: !isSelfChat,
-      originChatId: chatId,
-      chatType,
-      chatName: chatName || this.externalChatMeta.get(chatId)?.name || '',
-      replyChatId,
-      controlChatId: !isSelfChat && this.chats.routeControlsToSelf !== false && this.selfChat ? this.selfChat : replyChatId,
-      replyToImMsgId: !isSelfChat && !privateReply ? mid : null,
-      originQuoteId: ev?.replyTo != null ? String(ev.replyTo) : null,
-      privateReply: Boolean(!isSelfChat && privateReply),
-      silentProgress: Boolean(!isSelfChat && this.chats.externalSilentProgress !== false),
-      ev,
-    };
-  }
-
-  async onEvent(ev) {
-    if (!ev || !ev.id || !ev.chat?.id) return;
-    if (this.disconnectedBuffer.length && !this.#isTransportDisconnected()) {
-      this.flushOutboundBuffer().catch(() => {});
-    }
-    const chatId = String(ev.chat.id);
-    const chatType = ev.chat.type || 'direct';
-    const isSelfChat = chatType === 'self';
-    const isSelfSender = Boolean(ev.sender?.isSelf);
-
-    if (isSelfChat && isSelfSender && chatId !== this.learnedSelfChatId) {
-      this.learnedSelfChatId = chatId;
-      this.warnedMissingSelfChat = false;
-      if (this.transport && !this.transport.selfChatId) this.transport.selfChatId = this.learnedSelfChatId;
-      this.saveState();
-    }
-
-    const mid = String(ev.id);
-    if (this.ownIds.has(mid)) return;
-    if (this.seen.has(mid)) return;
-    this.seen.add(mid);
-    if (this.seen.size > 5000) this.seen.delete(this.seen.values().next().value);
-
-    // 撤回事件：同步从内存上下文窗口、待用附件队列、消息路由和磁盘缓存擦除
-    if (ev.kind === 'recall' && ev.recalledMsgId) {
-      const recalledId = String(ev.recalledMsgId);
-      if (this.imContext?.recallMessage) this.imContext.recallMessage(chatId, recalledId);
-      else this.localContextStore.recallMessage(chatId, recalledId);
-      this.fileMsgs.delete(recalledId);
-      this.msgRoute.delete(recalledId);
-      try {
-        fs.rmSync(path.join(this.inDir, fileSafe(recalledId) || 'f'), { recursive: true, force: true });
-      } catch { /* ignore */ }
-      this.emitTelemetry('recall', { chatId, chatType, summary: `recall:${recalledId}` });
-      return;
-    }
-
-    const rawText = String(ev.text ?? '').trim();
-    if (isSelfSender && rawText && this.#isEcho(rawText)) return;
-
-    const atts = Array.isArray(ev.attachments) ? ev.attachments : [];
-    if (!rawText && atts.length && atts.every((a) => this.#isPendingOutFile(a))) {
-      this.rememberOwnId(mid);
-      return;
-    }
-
-    // 先将所有成员与本人的合法入站消息写入内存环形上下文，供引用与多轮对话理解使用
-    this.#recordInboundToContext(ev);
-
-    // 安全门槛：仅账号本人（sender.isSelf）可触发 Bot 执行或控制指令
-    if (!isSelfSender) return;
-
-    if (Array.isArray(this.commandDevices) && this.commandDevices.length) {
-      const dev = ev.device ?? {};
-      if (!this.commandDevices.some((d) => d === dev.type || d === dev.id)) return;
-    }
-
-    if (!isSelfChat && !isExternalChatAllowed(this, chatId, chatType)) return;
-
-    if (atts.length) {
-      this.fileMsgs.set(mid, { chatId, atts, at: this.now(), used: false });
-      if (this.fileMsgs.size > 50) this.fileMsgs.delete(this.fileMsgs.keys().next().value);
-    }
-
-    const quotedId = ev.replyTo != null ? String(ev.replyTo) : null;
-    const quotedCard = quotedId ? this.pendingCards.get(quotedId) : null;
-    const quotedRoute = quotedId ? this.msgRoute.get(quotedId) : null;
-
-    if (!rawText) {
-      if (!atts.length && !ev.linkCard) return;
-      const bareMsg = ev.linkCard && !atts.length ? '请查看并总结我转发的这张卡片。' : '请查看我发送的附件。';
-      if (quotedRoute) {
-        this.#clearPendingMedia();
-        const chatCtx = this.#buildExternalChatCtx({
-          isSelfChat,
-          chatId,
-          chatType,
-          chatName: ev.chat?.name,
-          mid,
-          privateReply: false,
-          ev,
-        });
-        await this.dispatchToBot(
-          {
-            id: quotedRoute.botId,
-            name: quotedRoute.botName,
-            threadId: quotedRoute.threadId,
-            isGroup: Boolean(quotedRoute.isGroup),
-          },
-          bareMsg,
-          mid,
-          quotedId,
-          quotedRoute.ombMsgId,
-          chatCtx,
-        );
-      } else if (isSelfChat && this.isStickyActive()) {
-        if (ev.linkCard && !atts.length) {
-          await this.dispatchToBot(
-            {
-              id: this.focus.botId,
-              name: this.focus.botName,
-              threadId: this.focus.threadId,
-              isGroup: Boolean(this.focus.isGroup),
-            },
-            bareMsg,
-            mid,
-            quotedId,
-            null,
-            this.#buildExternalChatCtx({ isSelfChat: true, chatId, chatType, chatName: ev.chat?.name, mid, privateReply: false, ev }),
-          );
-          return;
-        }
-        if (this.imageBatchMs > 0 && atts.length) {
-          this.pendingMediaIds.push(mid);
-          this.pendingMediaTarget = {
-            id: this.focus.botId,
-            name: this.focus.botName,
-            threadId: this.focus.threadId,
-            isGroup: Boolean(this.focus.isGroup),
-          };
-          clearTimeout(this.pendingMediaTimer);
-          this.pendingMediaTimer = setTimeout(() => {
-            const target = this.pendingMediaTarget;
-            const ids = [...this.pendingMediaIds];
-            this.#clearPendingMedia();
-            const hasUnused = ids.some((id) => {
-              const ent = this.fileMsgs.get(id);
-              return ent && !ent.used;
-            });
-            if (target && hasUnused) {
-              this.dispatchToBot(target, '请查看我发送的图片/文件。', null, null, null).catch(() => {});
-            }
-          }, this.imageBatchMs);
-          this.pendingMediaTimer.unref?.();
-        }
-      }
-      return;
-    }
-
-    if (isSelfChat) this.#clearPendingMedia();
-
-    // 1. 待处理 OpenMausBot 审批卡、选项/提问卡或阻塞卡（仅在卡片对应会话或自聊裸回复触发）
-    const activeCard = quotedCard ?? (isSelfChat && this.pendingCards.size === 1 ? [...this.pendingCards.values()][0] : null);
-    if (activeCard && !rawText.startsWith('@')) {
-      if (activeCard.cardKind && activeCard.cardKind !== 'card') {
-        if (SKIP_RE.test(rawText)) return this.#dismissBlockCard(activeCard);
-      } else if (activeCard.isQuestion) {
-        const choice = parseChoiceIndex(rawText);
-        if (choice) {
-          const picked = activeCard.options?.[choice - 1];
-          if (picked) return this.#answerCard(activeCard, 'answer', picked.label);
-        }
-        if (DENY_RE.test(rawText)) return this.#answerCard(activeCard, 'deny');
-        if (quotedCard || !NOTE_PREFIX_RE.test(rawText)) {
-          return this.#answerCard(activeCard, 'answer', rawText);
-        }
-      } else {
-        if (ALWAYS_RE.test(rawText)) {
-          return this.#answerCard(activeCard, 'allow', undefined, {
-            always: true,
-            rememberCommand: activeCard.canRememberCommand,
-          });
-        }
-        if (APPROVE_RE.test(rawText)) return this.#answerCard(activeCard, 'allow');
-        if (DENY_RE.test(rawText)) return this.#answerCard(activeCard, 'deny');
-        if (quotedCard) return this.#answerCard(quotedCard, 'answer', rawText);
-      }
-    }
-
-    // 1b. @bot tasks / @bot search 列表待选择序号（仅自聊）
-    if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && this.pendingTaskPick && this.now() < this.pendingTaskPick.expiresAt) {
-      const choice = parseChoiceIndex(rawText);
-      if (choice) {
-        const picked = this.pendingTaskPick.tasks[choice - 1];
-        if (picked) {
-          return this.switchTask(
-            this.pendingTaskPick.botId,
-            this.pendingTaskPick.botName,
-            picked,
-            { isGroup: Boolean(this.pendingTaskPick.isGroup) },
-          );
-        }
-      }
-    }
-
-    // 1c. @bot model 列表待选择序号（仅自聊）
-    if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && this.pendingModelPick && this.now() < this.pendingModelPick.expiresAt) {
-      const choice = parseChoiceIndex(rawText);
-      if (choice) {
-        const picked = this.pendingModelPick.options[choice - 1];
-        if (picked) {
-          return this.applyModelSelection(
-            { id: this.pendingModelPick.botId, name: this.pendingModelPick.botName },
-            this.pendingModelPick.threadId,
-            { instanceId: picked.instanceId, model: picked.id },
-            picked.id,
-          );
-        }
-      }
-    }
-
-    // 1c-bis. 自聊私密草稿确认回发（确认发送 / 取消 / 改：...）
-    if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && this.pendingSendBack && this.now() < this.pendingSendBack.expiresAt) {
-      if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return this.confirmSendBack();
-      if (/^(?:取消|算了|不要|cancel|no)$/i.test(rawText)) {
-        this.pendingSendBack = null;
-        return this.say('❎ 已取消发回原群。');
-      }
-      const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
-      if (editM && editM[1].trim()) {
-        return this.requestSendBack(this.pendingSendBack.draft, editM[1].trim());
-      }
-    }
-
-    // 1d. 有排队中消息时，允许在自聊裸回复 steer/插队 或 取消排队
-    if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && this.queuedByThread.size > 0) {
-      if (/^(steer|插队)$/i.test(rawText)) return this.steerLatestQueue(this.focus?.threadId);
-      if (/^(取消排队)$/i.test(rawText)) return this.cancelLatestQueue(this.focus?.threadId);
-    }
-
-    // 2. 解析 @bot / @bot! / 句中 @bot / 结构化 mentions / @<BotName> / @<GroupName>、引用气泡、或自聊连续对话粘性窗口
-    const knownNames = this.getKnownBotNames();
-    const triggerAliases = this.getEffectiveTriggerAliases();
-    let targetBot = null;
-    let bodyText = '';
-    let replyToOmbId = null;
-    let privateReply = false;
-
-    let parsed = parseStartMention(rawText, this.trigger, triggerAliases, knownNames);
-    if (parsed) {
-      const resolved = await this.#resolveBotTarget(parsed.mention, parsed.isDefault, ev);
-      if (resolved.targetBot) {
-        targetBot = resolved.targetBot;
-        parsed = { ...parsed, isDefault: resolved.isDefault };
-      } else {
-        // 句首 @他人（如「@Alice 别急，@bot 帮查下」）：尝试在句中继续查找 @bot/@<BotName>
-        parsed = null;
-      }
-    }
-    if (!parsed) {
-      const inlineParsed = parseInlineTriggerMention(rawText, this.trigger, triggerAliases, knownNames);
-      if (inlineParsed) {
-        const resolved = await this.#resolveBotTarget(inlineParsed.mention, inlineParsed.isDefault, ev);
-        if (resolved.targetBot) {
-          targetBot = resolved.targetBot;
-          parsed = { ...inlineParsed, isDefault: resolved.isDefault };
-        }
-      }
-    }
-    if (!parsed && Array.isArray(ev.mentions) && ev.mentions.length) {
-      const structParsed = parseStructuredBotMention(rawText, ev.mentions, this.trigger, triggerAliases, knownNames);
-      if (structParsed) {
-        const resolved = await this.#resolveBotTarget(structParsed.mention, structParsed.isDefault, ev);
-        if (resolved.targetBot) {
-          targetBot = resolved.targetBot;
-          parsed = { ...structParsed, isDefault: resolved.isDefault };
-        }
-      }
-    }
-
-    if (parsed && targetBot) {
-      bodyText = parsed.bodyText;
-      privateReply = Boolean(!isSelfChat && parsed.bang);
-      if (!isSelfChat && this.chats.privateFlag !== false && bodyText) {
-        const privM = bodyText.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
-        if (privM) {
-          privateReply = true;
-          bodyText = (privM[1] ?? '').trim();
-        }
-      }
-      if (!isSelfChat && privateReply && !this.selfChat) {
-        console.warn('[omb-bridge] 收到私密回复指令（@bot! / -p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 ipc.selfChatId');
-        return;
-      }
-
-      const scopedTarget = !isSelfChat
-        ? this.getChatThread(chatId, targetBot)
-        : await this.resolveSelfBotThread(targetBot);
-      const chatCtx = this.#buildExternalChatCtx({
-        isSelfChat,
-        chatId,
-        chatType,
-        chatName: ev.chat?.name,
-        mid,
-        privateReply,
-        ev,
-      });
-
-      if (parsed.atStart && await handleCommand(this, bodyText, {
-        isDefault: parsed.isDefault,
-        targetBot: scopedTarget,
-        quotedRoute,
-        mid,
-        quotedId,
-        hasAttachments: atts.length > 0,
-        chatCtx,
-      })) {
-        return;
-      }
-      targetBot = !isSelfChat ? await this.#ensureChatThread(chatId, chatType, chatCtx.chatName, targetBot) : scopedTarget;
-      if (quotedRoute && quotedRoute.botId === targetBot.id && quotedRoute.threadId === targetBot.threadId) {
-        replyToOmbId = quotedRoute.ombMsgId ?? null;
-      }
-
-      const polishSource = isSelfChat && quotedId ? this.privateDrafts.get(quotedId) : null;
-      if (polishSource?.originChatId && polishSource.createdAt >= (this.now() - (Number(this.draftTtlMs) || 30 * 60_000))) {
-        chatCtx.polishDraft = {
-          originChatId: polishSource.originChatId,
-          originChatName: polishSource.originChatName || polishSource.originChatId,
-          originChatType: polishSource.originChatType || 'group',
-          replyToImMsgId: polishSource.replyToImMsgId ?? null,
-        };
-        const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
-        const promptForDraft = `[待润色草稿 · 原目标会话「${chatCtx.polishDraft.originChatName}」]\n${polishSource.rawText}\n\n[改写要求]\n${ask}`;
-        return this.dispatchToBot(targetBot, promptForDraft, mid, quotedId, replyToOmbId, chatCtx);
-      }
-
-      if (!bodyText && !atts.length) {
-        if (!quotedId) {
-          return this.say(buildHelpText(this), { targetChatId: chatCtx.replyChatId }, chatCtx.replyToImMsgId);
-        }
-        return this.dispatchToBot(targetBot, '请查看并回复我引用的这条消息。', mid, quotedId, replyToOmbId, chatCtx);
-      }
-      return this.dispatchToBot(targetBot, bodyText || '请查看附件', mid, quotedId, replyToOmbId, chatCtx);
-    }
-
-    if (quotedRoute) {
-      // 外部群里引用 Bot 回复但显式 @同事（未再 @bot），视作向同事交接/讨论，不重触发 Bot
-      if (!isSelfChat && hasNonBotMention(rawText, this.trigger, triggerAliases, knownNames, ev.mentions)) {
-        return;
-      }
-      bodyText = rawText;
-      if (!isSelfChat && this.chats.privateFlag !== false) {
-        const privM = bodyText.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
-        if (privM) {
-          privateReply = true;
-          bodyText = (privM[1] ?? '').trim();
-        }
-      }
-      if (!isSelfChat && privateReply && !this.selfChat) {
-        console.warn('[omb-bridge] 收到私密回复指令（-p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 ipc.selfChatId');
-        return;
-      }
-      targetBot = {
-        id: quotedRoute.botId,
-        name: quotedRoute.botName,
-        threadId: quotedRoute.threadId,
-        isGroup: Boolean(quotedRoute.isGroup),
-      };
-      replyToOmbId = quotedRoute.ombMsgId ?? null;
-      const chatCtx = this.#buildExternalChatCtx({
-        isSelfChat,
-        chatId,
-        chatType,
-        chatName: ev.chat?.name,
-        mid,
-        privateReply,
-        ev,
-      });
-      const polishSource = isSelfChat && quotedId ? this.privateDrafts.get(quotedId) : null;
-      if (polishSource?.originChatId && polishSource.createdAt >= (this.now() - (Number(this.draftTtlMs) || 30 * 60_000))) {
-        chatCtx.polishDraft = {
-          originChatId: polishSource.originChatId,
-          originChatName: polishSource.originChatName || polishSource.originChatId,
-          originChatType: polishSource.originChatType || 'group',
-          replyToImMsgId: polishSource.replyToImMsgId ?? null,
-        };
-        const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
-        const promptForDraft = `[待润色草稿 · 原目标会话「${chatCtx.polishDraft.originChatName}」]\n${polishSource.rawText}\n\n[改写要求]\n${ask}`;
-        return this.dispatchToBot(targetBot, promptForDraft, mid, quotedId, replyToOmbId, chatCtx);
-      }
-      if (!bodyText && !atts.length) {
-        return this.say(buildHelpText(this), { targetChatId: chatCtx.replyChatId }, chatCtx.replyToImMsgId);
-      }
-      return this.dispatchToBot(targetBot, bodyText || '请查看附件', mid, quotedId, replyToOmbId, chatCtx);
-    }
-
-    if (isSelfChat && this.isStickyActive() && !NOTE_PREFIX_RE.test(rawText)) {
-      if (BYE_RE.test(rawText)) {
-        this.lastBotReplyAt = 0;
-        return this.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');
-      }
-      bodyText = rawText;
-      targetBot = {
-        id: this.focus.botId,
-        name: this.focus.botName,
-        threadId: this.focus.threadId,
-        isGroup: Boolean(this.focus.isGroup),
-      };
-      targetBot = await this.resolveSelfBotThread(targetBot);
-      return this.dispatchToBot(
-        targetBot,
-        bodyText || '请查看附件',
-        mid,
-        quotedId,
-        replyToOmbId,
-        this.#buildExternalChatCtx({ isSelfChat: true, chatId, chatType, chatName: ev.chat?.name, mid, privateReply: false, ev }),
-      );
-    }
-  }
-
-  #deleteCard(card) {
-    for (const [k, v] of this.pendingCards) {
-      const sameReq = card.requestId && v.requestId === card.requestId;
-      const sameMsg = card.ombMsgId && v.ombMsgId && v.ombMsgId === card.ombMsgId;
-      if (sameReq || sameMsg || k === card.imMsgId) {
-        this.pendingCards.delete(k);
-      }
-    }
-    this.saveState();
-  }
-
-  async #dismissBlockCard(card) {
-    const cardBotId = card.cardBotId || card.botId;
-    const ctrlChatId = this.resolveControlChatId(card.chatCtx);
-    const route = {
-      botId: card.botId,
-      botName: card.botName,
-      threadId: card.threadId,
-      ombMsgId: card.ombMsgId,
-      ...(card.isGroup ? { isGroup: true } : {}),
-      ...(ctrlChatId ? { targetChatId: ctrlChatId } : {}),
-    };
-    try {
-      try {
-        if (card.cardKind === 'secret') {
-          await this.client.dismissSecretCard(cardBotId, card.ombMsgId, card.threadId);
-        } else if (card.cardKind === 'connector') {
-          await this.client.dismissConnectorCard(cardBotId, card.ombMsgId, card.threadId);
-        } else if (card.cardKind === 'signIn') {
-          await this.client.cancelSignInCard(cardBotId, card.ombMsgId, card.threadId);
-        }
-      } catch (e) {
-        if (e?.status === 404 || e?.status === 409 || e?.status === 410) this.#deleteCard(card);
-        throw e;
-      }
-      this.#deleteCard(card);
-      this.emitTelemetry('card_dismiss', { botName: card.botName, kind: card.cardKind });
-      if (!card.chatCtx?.isExternal) this.lastBotReplyAt = this.now();
-      await this.say('⏭ 已跳过该步骤，继续执行。', route);
-    } catch (e) {
-      await this.say(`⚠️ 跳过操作失败：${formatOmbError(e)}`, route);
-    }
-  }
-
-  async #answerCard(card, behavior, message, opts = {}) {
-    const ctrlChatId = this.resolveControlChatId(card.chatCtx);
-    const route = {
-      botId: card.botId,
-      botName: card.botName,
-      threadId: card.threadId,
-      ombMsgId: card.ombMsgId,
-      ...(card.isGroup ? { isGroup: true } : {}),
-      ...(ctrlChatId ? { targetChatId: ctrlChatId } : {}),
-    };
-    try {
-      if (!card.requestId) {
-        this.#deleteCard(card);
-        const text = message ?? (behavior === 'allow' ? 'ok' : 'no');
-        return this.dispatchToBot(
-          { id: card.botId, name: card.botName, threadId: card.threadId, isGroup: Boolean(card.isGroup) },
-          text,
-          null,
-          null,
-          card.ombMsgId,
-          card.chatCtx ?? null,
-        );
-      }
-
-      const payload = {
-        requestId: card.requestId,
-        behavior,
-        ...(message !== undefined ? { message } : {}),
-        ...(opts.always ? { always: true } : {}),
-        ...(opts.rememberCommand ? { rememberCommand: true } : {}),
-      };
-      try {
-        await this.client.respond(card.threadId, payload);
-      } catch (e) {
-        if (opts.rememberCommand && e?.status === 403) {
-          delete payload.rememberCommand;
-          await this.client.respond(card.threadId, payload);
-        } else {
-          if (e?.status === 404 || e?.status === 409 || e?.status === 410) this.#deleteCard(card);
-          throw e;
-        }
-      }
-      this.#deleteCard(card);
-      this.emitTelemetry('card_answer', { botName: card.botName, kind: behavior });
-      if (!card.chatCtx?.isExternal) this.lastBotReplyAt = this.now();
-      const label = behavior === 'allow'
-        ? (opts.always ? '已设为总是允许，继续执行' : '已允许，继续执行')
-        : behavior === 'deny'
-          ? '已拒绝该操作'
-          : (message ? `已选择「${clip(message, 40)}」，继续执行` : '已提交回复，继续执行');
-      await this.say(`✅ ${label}`, route);
-    } catch (e) {
-      await this.say(`⚠️ 审批提交失败：${formatOmbError(e)}`, route);
-    }
-  }
-
-  #pickQueuedEntry(preferredThreadId) {
-    if (preferredThreadId && this.queuedByThread.get(preferredThreadId)?.length) {
-      return { threadId: preferredThreadId, list: this.queuedByThread.get(preferredThreadId) };
-    }
-    for (const [tid, list] of this.queuedByThread) {
-      if (list.length) return { threadId: tid, list };
-    }
-    return null;
-  }
-
-  #removeQueued(threadId, queueId) {
-    const list = this.queuedByThread.get(threadId);
-    if (!list) return null;
-    const idx = list.findIndex((q) => q.queueId === queueId);
-    if (idx < 0) return null;
-    const [removed] = list.splice(idx, 1);
-    if (!list.length) this.queuedByThread.delete(threadId);
-    return removed;
-  }
-
-  async steerLatestQueue(preferredThreadId, targetChatId = null) {
-    const hit = this.#pickQueuedEntry(preferredThreadId);
-    if (!hit) {
-      await this.say('当前没有排队中的消息。', targetChatId ? { targetChatId } : null);
-      return;
-    }
-    const q = hit.list.at(-1);
-    const outChatId = targetChatId || q.chatCtx?.controlChatId || this.selfChat;
-    const route = { botId: q.botId, botName: q.botName, threadId: q.threadId, ...(q.isGroup ? { isGroup: true } : {}), ...(outChatId ? { targetChatId: outChatId } : {}) };
-    try {
-      const res = q.isGroup && typeof this.client.steerGroupQueued === 'function'
-        ? await this.client.steerGroupQueued(q.botId, q.queueId, q.threadId)
-        : await this.client.steerQueued(q.botId, q.queueId, q.threadId);
-      if (res?.queued) {
-        await this.say(`⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`, route);
-        return;
-      }
-      this.#removeQueued(q.threadId, q.queueId);
-      this.steeredQueue.set(q.sendId, q);
-      if (this.steeredQueue.size > 50) this.steeredQueue.delete(this.steeredQueue.keys().next().value);
-      await this.say(`⚡ 已插队注入当前任务：「${clip(q.text, 50)}」`, route);
-    } catch (e) {
-      await this.say(`❌ 插队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
-    }
-  }
-
-  async cancelLatestQueue(preferredThreadId, targetChatId = null) {
-    const hit = this.#pickQueuedEntry(preferredThreadId);
-    if (!hit) {
-      await this.say('当前没有排队中的消息。', targetChatId ? { targetChatId } : null);
-      return;
-    }
-    const q = hit.list.at(-1);
-    const outChatId = targetChatId || q.chatCtx?.controlChatId || this.selfChat;
-    const route = { botId: q.botId, botName: q.botName, threadId: q.threadId, ...(q.isGroup ? { isGroup: true } : {}), ...(outChatId ? { targetChatId: outChatId } : {}) };
-    try {
-      if (q.isGroup && typeof this.client.cancelGroupQueued === 'function') {
-        await this.client.cancelGroupQueued(q.botId, q.queueId);
-      } else {
-        await this.client.cancelQueued(q.botId, q.queueId, q.threadId);
-      }
-      this.#removeQueued(q.threadId, q.queueId);
-      await this.say(`🗑 已取消排队消息：「${clip(q.text, 50)}」`, route);
-    } catch (e) {
-      await this.say(`❌ 取消排队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
-    }
-  }
-
-  async collectBotTasks(target) {
-    const { bots = [], groups = [] } = await this.client.listBots();
-    const isGroup = Boolean(target.isGroup);
-    const fresh = (isGroup ? groups.find((g) => g.id === target.id) : bots.find((b) => b.id === target.id)) ?? target;
-    const list = Array.isArray(fresh.tasks) ? [...fresh.tasks] : [];
-    list.sort((a, b) => (b.updatedAt ?? b.lastThreadOrderAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.lastThreadOrderAt ?? a.createdAt ?? 0));
-    const top = list.slice(0, 5);
-    return { fresh, top };
-  }
-
-  async switchTask(defaultBotId, defaultBotName, task, { isGroup = false, chatId = null } = {}) {
-    const botId = task.botId ?? defaultBotId;
-    const botName = task.botName ?? defaultBotName;
-    const tid = task.threadId ?? task.id;
-    this.clearPickers();
-    const route = { botId, botName, threadId: tid, ...(isGroup ? { isGroup: true } : {}), ...(chatId ? { targetChatId: chatId } : {}) };
-    try {
-      if (isGroup && typeof this.client.selectGroupTask === 'function') {
-        await this.client.selectGroupTask(botId, tid);
-        this.groupByThread.set(tid, { id: botId, name: botName, threadId: tid, isGroup: true });
-      } else {
-        await this.client.selectTask(botId, tid);
-        this.botByThread.set(tid, { id: botId, name: botName, threadId: tid });
-      }
-      this.focus = { botId, botName, threadId: tid, ...(isGroup ? { isGroup: true } : {}) };
-      this.setSelfThread({ id: botId, name: botName, threadId: tid, isGroup });
-      this.lastBotReplyAt = this.now();
-      this.saveState();
-      const title = clip(task.title || '未命名会话', 50);
-      const shownName = this.displayBotName(botId, botName, { isGroup });
-      await this.say(`🔀 已切换到 **${shownName}** 的会话「${title}」，直接发消息即可续聊。`, route);
-    } catch (e) {
-      await this.say(`❌ 切换会话失败：${formatOmbError(e)}`, chatId ? { targetChatId: chatId } : null);
-    }
   }
 
   async withCliLoopbackFallback(fn) {
@@ -1534,718 +800,32 @@ export class OpenMausBotBridge {
     }
   }
 
-  async applyModelSelection(bot, threadId, selection, labelDesc, targetChatId = null) {
-    this.clearPickers();
-    try {
-      await this.withCliLoopbackFallback(async (c) => {
-        if (typeof c.patchTask === 'function' && threadId) {
-          try {
-            return await c.patchTask(bot.id, threadId, { modelSelection: selection });
-          } catch (err) {
-            if (err?.status !== 404) throw err;
-          }
-        }
-        return c.patchBot(bot.id, { modelSelection: selection });
-      });
-      await this.refreshMultiBot();
-      if (!targetChatId || targetChatId === this.selfChat) this.lastBotReplyAt = this.now();
-      const shownName = this.displayBotName(bot.id, bot.name);
-      await this.say(`🧠 已将 **${shownName}** 当前会话模型切换为 \`${labelDesc}\`。`, {
-        botId: bot.id, botName: shownName, threadId, ...(targetChatId ? { targetChatId } : {}),
-      });
-    } catch (e) {
-      await this.say(`❌ 切换模型失败：${formatOmbError(e)}`, targetChatId ? { targetChatId } : null);
-    }
+  isTransportDisconnected() { return isTransportDisconnected(this); }
+  async drainOutbound(timeoutMs = 2000) { return drainOutboundQueue(this, timeoutMs); }
+  async flushOutboundBuffer() { return flushOutboundQueueBuffer(this); }
+
+  async say(text, route = null, replyTo = null, actions = null, extra = {}) {
+    return sendBridgeText(this, text, route, replyTo, actions, extra);
   }
 
-  async #maybeWarnHighContext(botId, threadId, chatCtx = null) {
-    if (!threadId) return;
-    if (chatCtx?.isExternal && !this.selfChat) return;
-    try {
-      const bots = await this.refreshMultiBot();
-      const bot = bots.find((b) => b.id === botId);
-      const task = (bot?.tasks ?? []).find((t) => (t.threadId ?? t.id) === threadId) ?? bot?.tasks?.[0];
-      const ctx = task?.usage?.context;
-      if (!ctx?.window || !ctx?.tokens) return;
-      const ratio = ctx.tokens / ctx.window;
-      const pct = Math.min(100, Math.round(ratio * 100));
-      const autoThresh = Number(this.chats.autoCompactThreshold ?? 0.92);
-
-      if (chatCtx?.isExternal && autoThresh > 0 && ratio >= autoThresh && typeof this.client.compact === 'function') {
-        const lastAt = this.lastAutoCompactAt.get(threadId) || 0;
-        if ((this.now() - lastAt) >= 5 * 60_000) {
-          this.lastAutoCompactAt.set(threadId, this.now());
-          if (this.lastAutoCompactAt.size > 200) this.lastAutoCompactAt.delete(this.lastAutoCompactAt.keys().next().value);
-          await this.client.compact(botId, threadId);
-          this.contextWarnedThreads.delete(threadId);
-          const originLabel = chatCtx.chatName || chatCtx.originChatId;
-          await this.say(
-            `📍 **来自「${originLabel}」的会话维护**\n🗜️ 该群隔离上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），已自动后台压缩，群内零打扰。`,
-            { botId, botName: this.displayBotName(botId, bot?.name), threadId, targetChatId: this.selfChat },
-          );
-        }
-        return;
-      }
-
-      if (this.contextWarnedThreads.has(threadId) || ratio < 0.8) return;
-      rememberBounded(this.contextWarnedThreads, threadId, 200);
-      const cmdTarget = botCommandTarget(this, botId, bot?.name);
-      const compactCmd = chatCtx?.isExternal ? `${cmdTarget} compact ${chatCtx.originChatId}` : `${cmdTarget} compact`;
-      const originBanner = chatCtx?.isExternal
-        ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」的会话提醒**\n`
-        : '';
-      await this.say(
-        `${originBanner}💡 当前会话上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），建议发 \`${compactCmd}\` 压缩以保持准确度。`,
-        { botId, botName: this.displayBotName(botId, bot?.name), threadId, ...(chatCtx?.isExternal && this.selfChat ? { targetChatId: this.selfChat } : {}) },
-        null,
-        [{ label: chatCtx?.isExternal ? '压缩该群会话' : '立即压缩', text: compactCmd, kind: 'primary' }],
-      );
-    } catch { /* 上下文提醒失败不影响主回复 */ }
+  sendDelegation(targetChat, question, opts) { return sendDelegation(this, targetChat, question, opts); }
+  sendOutboundFile(filePath, name, opts) { return sendOutboundFile(this, filePath, name, opts); }
+  onEvent(ev) { return handleInboundEvent(this, ev); }
+  steerLatestQueue(preferredThreadId, targetChatId = null) { return steerLatestQueue(this, preferredThreadId, targetChatId); }
+  cancelLatestQueue(preferredThreadId, targetChatId = null) { return cancelLatestQueue(this, preferredThreadId, targetChatId); }
+  collectBotTasks(target) { return collectBotTasks(this, target); }
+  switchTask(defaultBotId, defaultBotName, task, opts) { return switchTask(this, defaultBotId, defaultBotName, task, opts); }
+  dispatchToBot(bot, text, imMsgId, quotedId, replyToOmbId, chatCtx = null) {
+    return dispatchToBot(this, bot, text, imMsgId, quotedId, replyToOmbId, chatCtx);
   }
+  flushQuietDigest() { return flushQuietDigest(this); }
 
-  async #claimUploads(mid, quotedId, originChatId = null, contextAttachments = [], errChatId = null) {
-    const ids = [];
-    if (mid && this.fileMsgs.has(mid)) ids.push(mid);
-    if (quotedId && this.fileMsgs.has(quotedId)) ids.push(quotedId);
-    if (!ids.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
-      const now = this.now();
-      for (const [id, entry] of this.fileMsgs) {
-        if (!entry.used && now - entry.at < 10 * 60 * 1000 && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
-          ids.push(id);
-        }
-      }
-    }
-    const uploaded = [];
-    const transcripts = [];
-    const seenKeys = new Set();
-    const processOne = async (attIdKey, msgIdForPath, a) => {
-      if (!a || a.id == null) return;
-      if (seenKeys.has(attIdKey)) return;
-      seenKeys.add(attIdKey);
-      const isAudio = isAudioAttachment(a);
-      let directTranscript = a.transcript ? String(a.transcript).trim() : '';
-      if (typeof this.transport.download !== 'function') {
-        if (isAudio && directTranscript) {
-          transcripts.push({ name: a.name || '语音', durationSec: a.durationSec, text: directTranscript });
-        }
-        return;
-      }
-      const safe = safeAttachmentName(a.name, 'file');
-      const dest = path.join(this.inDir, fileSafe(msgIdForPath) || 'f', safe);
-      try {
-        if (!fs.existsSync(dest)) {
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          await this.transport.download(a, dest);
-        }
-        if (isAudio && !directTranscript && typeof this.transcribeAudio === 'function') {
-          try {
-            const t = await this.transcribeAudio(dest, a);
-            if (typeof t === 'string' && t.trim()) directTranscript = t.trim();
-          } catch { /* 语音转写失败不阻断原音频附件上传 */ }
-        }
-        if (isAudio && directTranscript) {
-          transcripts.push({ name: a.name || safe, durationSec: a.durationSec, text: directTranscript });
-        }
-        const buf = fs.readFileSync(dest);
-        const ext = path.extname(safe).toLowerCase();
-        const mime = a.mime || IMAGE_MIME[ext] || 'application/octet-stream';
-        const isImg = mime.startsWith('image/') && Boolean(IMAGE_MIME[ext] || MIME_EXT[mime.toLowerCase()]);
-        const res = isImg
-          ? await this.client.uploadImage(buf, mime)
-          : await this.client.uploadFile(a.name || safe, buf, mime);
-        uploaded.push({
-          kind: isImg ? 'image' : 'file',
-          name: a.name || safe,
-          path: res?.path || res?.url || dest,
-        });
-      } catch (e) {
-        if (isAudio && directTranscript) {
-          transcripts.push({ name: a.name || safe, durationSec: a.durationSec, text: directTranscript });
-        }
-        const failTarget = errChatId || this.selfChat;
-        if (failTarget) {
-          await this.say(`📎 附件 ${a.name} 上传失败：${formatOmbError(e)}`, { targetChatId: failTarget });
-        }
-      }
-    };
-
-    for (const id of ids) {
-      const entry = this.fileMsgs.get(id);
-      if (!entry) continue;
-      entry.used = true;
-      for (const a of entry.atts) {
-        await processOne(`${a.msgId ?? id}:${a.id}`, id, a);
-      }
-    }
-    if (Array.isArray(contextAttachments) && contextAttachments.length) {
-      for (const a of contextAttachments) {
-        const msgIdForPath = a.msgId || quotedId || 'q';
-        await processOne(`${msgIdForPath}:${a.id}`, msgIdForPath, a);
-      }
-    }
-    return { uploads: uploaded, transcripts };
-  }
-
-  async dispatchToBot(bot, text, imMsgId, quotedId, replyToOmbId, chatCtx = null) {
-    const ctxInfo = chatCtx ?? this.#buildExternalChatCtx({
-      isSelfChat: true,
-      chatId: this.selfChat,
-      chatType: 'self',
-      mid: null,
-      privateReply: false,
-      ev: null,
-    });
-    const isExternal = Boolean(ctxInfo.isExternal);
-    const isGroup = Boolean(bot.isGroup);
-    let threadId = bot.threadId;
-
-    const promptCtx = ctxInfo.preformattedHeader !== undefined
-      ? { header: ctxInfo.preformattedHeader, quotedMsg: null, recentMsgs: [], quotedAttachments: [], contextAttachments: [] }
-      : await this.#buildPromptContext(ctxInfo.ev, ctxInfo, {
-          skipSelfQuote: Boolean(!isExternal && replyToOmbId),
-        });
-    const { uploads, transcripts } = await this.#claimUploads(
-      imMsgId,
-      quotedId,
-      ctxInfo.originChatId,
-      promptCtx.contextAttachments ?? promptCtx.quotedAttachments,
-      ctxInfo.controlChatId,
-    );
-    const extras = [];
-    const linkSnippet = formatLinkCardSnippet(ctxInfo.ev?.linkCard);
-    if (linkSnippet) extras.push(linkSnippet);
-    if (transcripts.length) {
-      for (const tr of transcripts) {
-        const dur = tr.durationSec ? `（${tr.durationSec}秒）` : '';
-        extras.push(`[语音转写 · ${tr.name}${dur}] ${tr.text}`);
-      }
-    }
-    let outboundText = `${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}${text}`;
-    if (uploads.length) {
-      const tags = uploads.map((u) => formatAttachmentTag(u));
-      outboundText = `${outboundText}\n\n${tags.join('\n')}`;
-    }
-
-    const sendId = `cobot_${crypto.randomUUID().replace(/-/g, '')}`;
-    const shownName = this.displayBotName(bot.id, bot.name, { isGroup });
-    if (!isExternal) {
-      this.focus = { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}) };
-      this.setSelfThread({ ...bot, threadId });
-      this.saveState();
-    }
-    await this.refreshMultiBot();
-    this.emitTelemetry('dispatch', {
-      botName: shownName,
-      isGroup,
-      chatId: ctxInfo.originChatId || null,
-      chatType: ctxInfo.chatType || 'self',
-      privateReply: Boolean(ctxInfo.privateReply),
-      summary: text,
-    });
-
-    const sendReq = (tid) => (isGroup && typeof this.client.sendGroupMessage === 'function'
-      ? this.client.sendGroupMessage(bot.id, { text: outboundText, threadId: tid, sendId, replyToId: replyToOmbId })
-      : this.client.sendMessage(bot.id, { text: outboundText, threadId: tid, sendId, replyToId: replyToOmbId }));
-
-    let receipt;
-    this.pendingThreads.add(threadId);
-    try {
-      try {
-        receipt = await sendReq(threadId);
-      } catch (e) {
-        if (isExternal && e?.status === 404 && ctxInfo.originChatId) {
-          this.pendingThreads.delete(threadId);
-          this.chatThreads.delete(`${ctxInfo.originChatId}:${bot.id}`);
-          const refreshed = await this.#ensureChatThread(ctxInfo.originChatId, ctxInfo.chatType, ctxInfo.chatName, bot);
-          threadId = refreshed.threadId;
-          this.pendingThreads.add(threadId);
-          receipt = await sendReq(threadId);
-        } else {
-          throw e;
-        }
-      }
-    } catch (e) {
-      const errTarget = ctxInfo.controlChatId || ctxInfo.replyChatId || this.selfChat;
-      const errBanner = isExternal && errTarget === this.selfChat
-        ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n`
-        : '';
-      return this.say(`${errBanner}❌ 发送给 **${shownName}** 失败：${formatOmbError(e)}`, errTarget ? { targetChatId: errTarget } : null);
-    } finally {
-      this.pendingThreads.delete(threadId);
-    }
-
-    const alreadyTracking = [...this.activeTurns.values()].some((t) => t.threadId === threadId);
-    const compactCtx = compactChatCtx(ctxInfo);
-    const route = {
-      botId: bot.id,
-      botName: bot.name,
-      threadId,
-      ...(isGroup ? { isGroup: true } : {}),
-      ...(ctxInfo.replyChatId ? { targetChatId: ctxInfo.replyChatId } : {}),
-      ...(compactCtx ? {
-        originChatId: compactCtx.originChatId,
-        originChatName: compactCtx.chatName,
-        originChatType: compactCtx.chatType,
-        privateReply: compactCtx.privateReply,
-      } : {}),
-    };
-
-    if (receipt?.queued === true) {
-      const queueId = receipt.queueId || sendId;
-      const list = this.queuedByThread.get(threadId) ?? [];
-      list.push({ queueId, botId: bot.id, botName: bot.name, threadId, isGroup, text, sendId, at: this.now(), chatCtx: compactCtx });
-      this.queuedByThread.set(threadId, list);
-      const who = this.botPrefix(bot.id, bot.name, { isGroup });
-      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${shownName}` : this.trigger;
-      const ctrlChat = this.resolveControlChatId(ctxInfo);
-      const ctrlBanner = isExternal && ctrlChat === this.selfChat
-        ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n`
-        : '';
-      await this.say(
-        `${ctrlBanner}📥 ${who ? `${who} ` : ''}已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
-        { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
-        null,
-        [
-          { label: '立即插队', text: `${cmdTarget} steer`, kind: 'primary' },
-          { label: '取消排队', text: `${cmdTarget} cancel`, kind: 'danger' },
-        ],
-      );
-      return receipt;
-    }
-
-    const reqMsgId = receipt?.message?.id ?? null;
-    if (reqMsgId) rememberBounded(this.ownReqIds, reqMsgId);
-
-    if (receipt?.steered === true && alreadyTracking) {
-      if (!isExternal || ctxInfo.controlChatId === this.selfChat) {
-        const ctrlChat = this.resolveControlChatId(ctxInfo);
-        await this.say('⚡ 已将补充信息插入当前任务。', { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) });
-      }
-      return receipt;
-    }
-
-    const turn = this.#trackTurn({
-      key: reqMsgId || `${threadId}:${sendId}`,
-      botId: bot.id,
-      botName: bot.name,
-      threadId,
-      reqMsgId,
-      sendId,
-      isGroup,
-      chatCtx: compactCtx,
-    });
-    turn.startWatcher();
-    if (isExternal && ctxInfo.silentProgress && this.chats.externalAckInSelf && this.selfChat) {
-      const cmdTarget = isGroup || (this.chiefBotId && bot.id !== this.chiefBotId) ? `@${shownName}` : this.trigger;
-      this.say(
-        `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…`,
-        { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: this.selfChat },
-        null,
-        [{ label: '停止', text: `${cmdTarget} stop`, kind: 'danger' }],
-      ).catch(() => {});
-    }
-    return receipt;
-  }
-
-  async #emitCard(botId, botName, threadId, msg, { isGroup = false, chatCtx = null } = {}) {
-    const cid = msg.card?.requestId || msg.id;
-    if (!cid || this.deliveredCards.has(cid)) return;
-    rememberBounded(this.deliveredCards, cid);
-    const cardKind = msg.card
-      ? 'card'
-      : (msg.secret ? 'secret' : (msg.connector ? 'connector' : (msg.signIn ? 'signIn' : null)));
-    const speakerName = isGroup ? (msg.from?.name || '') : '';
-    const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
-    const shownName = this.displayBotName(botId, botName, { isGroup });
-    const isExternal = Boolean(chatCtx?.isExternal);
-    const ctrlChat = this.resolveControlChatId(chatCtx);
-    const route = {
-      botId,
-      botName,
-      threadId,
-      ombMsgId: msg.id,
-      ...(isGroup ? { isGroup: true } : {}),
-      ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
-    };
-    const who = this.botPrefix(botId, botName, { isGroup, speakerName, speakerBotId });
-    const prompt = formatCardPrompt(shownName, msg, who);
-    const originBanner = isExternal && ctrlChat === this.selfChat
-      ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」的审批 / 确认**\n`
-      : '';
-    const sentId = await this.say(`${originBanner}${prompt.text}`, route, null, prompt.actions);
-    this.emitTelemetry('card', { botName: shownName, kind: cardKind || 'card', summary: prompt.text });
-    if (sentId && cardKind) {
-      this.pendingCards.set(sentId, {
-        imMsgId: sentId,
-        cardKind,
-        cardBotId: msg.from?.botId || botId,
-        requestId: msg.card?.requestId ?? null,
-        threadId,
-        botId,
-        botName,
-        ...(isGroup ? { isGroup: true } : {}),
-        ombMsgId: msg.id,
-        isQuestion: Boolean(prompt.info?.isQuestion),
-        options: prompt.info?.options ?? [],
-        canRememberCommand: Boolean(prompt.info?.canRememberCommand),
-        ...(compactChatCtx(chatCtx) ? { chatCtx: compactChatCtx(chatCtx) } : {}),
-      });
-      this.saveState();
-    }
-  }
-
-  async #forwardBotMedia(threadId, msgs, { chatId = null, replyTo = null } = {}) {
-    const canFiles = this.#supportsFiles();
-    const canImages = this.#supportsImages();
-    if (!canFiles && !canImages) return;
-    const outOpts = {
-      ...(chatId ? { chatId } : {}),
-      ...(replyTo ? { replyTo } : {}),
-      recordContext: true,
-    };
-    for (const msg of msgs) {
-      if (!msg?.id) continue;
-      if (canImages && (msg.kind === 'screen' || msg.hasImage)) {
-        const k = `${msg.id}:__image__`;
-        if (!this.deliveredMedia.has(k)) {
-          rememberBounded(this.deliveredMedia, k);
-          try {
-            const { buf, mime } = await this.client.downloadMessageImage(threadId, msg.id);
-            const ext = MIME_EXT[mime.split(';')[0].trim().toLowerCase()] || '.png';
-            const name = `image-${String(msg.id).slice(0, 8)}${ext}`;
-            fs.mkdirSync(this.inDir, { recursive: true });
-            const dest = path.join(this.inDir, `out-${Date.now()}-${name}`);
-            fs.writeFileSync(dest, buf);
-            await this.sendOutboundFile(dest, name, outOpts);
-          } catch { /* 图片回传失败不阻断正文 */ }
-        }
-      }
-      if (!canFiles) continue;
-      for (const att of msg.attachments ?? []) {
-        const attPath = att?.path || att?.href || att?.url;
-        if (!attPath) continue;
-        const k = `${msg.id}:${attPath}`;
-        if (this.deliveredMedia.has(k)) continue;
-        rememberBounded(this.deliveredMedia, k);
-        try {
-          const res = await this.client.downloadMessageFile(threadId, msg.id, attPath);
-          const safe = safeAttachmentName(att.name || res.name, `file-${Date.now()}`);
-          fs.mkdirSync(this.inDir, { recursive: true });
-          const dest = path.join(this.inDir, `out-${Date.now()}-${safe}`);
-          fs.writeFileSync(dest, res.buf);
-          await this.sendOutboundFile(dest, safe, outOpts);
-        } catch { /* 附件回传失败不阻断正文 */ }
-      }
-    }
-  }
-
-  async #deliverBotReply({ botId, botName, threadId, text, finalMsg, mediaMessages = [], proactive = false, isGroup = false, speakerName = '', chatCtx = null }) {
-    if (finalMsg?.id) rememberBounded(this.deliveredOmbIds, finalMsg.id);
-    const isExternal = Boolean(chatCtx?.isExternal);
-    const targetChatId = chatCtx?.replyChatId || this.selfChat;
-    const quoteReplyId = (!isExternal || chatCtx?.privateReply) ? null : (chatCtx?.replyToImMsgId ?? null);
-    const speakerBotId = isGroup ? (finalMsg?.from?.botId || null) : null;
-    const shownName = this.displayBotName(botId, botName, { isGroup });
-    const shownSpeaker = speakerName ? this.displayBotName(speakerBotId, speakerName) : '';
-    const who = this.botPrefix(botId, botName, { proactive: false, isGroup, speakerName, speakerBotId });
-    const originName = chatCtx?.chatName || chatCtx?.originChatId;
-    const privHead = isExternal && chatCtx?.privateReply && !proactive
-      ? `📩 **私密回复 · 来自「${originName}」**\n`
-      : '';
-    const originNote = proactive && isExternal ? `（来自「${originName}」）` : '';
-    const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
-    const head = proactive
-      ? `🔔 **${proLabel} 通知**${originNote}\n`
-      : (who ? `${who}\n` : '');
-    const safeBody = isExternal && targetChatId && targetChatId !== this.selfChat
-      ? sanitizeExternalMentions(text, { mode: this.chats.externalSanitizeMentions ?? 'all', botNames: this.getKnownBotNames() })
-      : text;
-    const full = privHead + head + safeBody;
-    const compactCtx = compactChatCtx(chatCtx);
-    const route = {
-      botId,
-      botName,
-      threadId,
-      ombMsgId: finalMsg?.id ?? null,
-      ...(isGroup ? { isGroup: true } : {}),
-      ...(targetChatId ? { targetChatId } : {}),
-      ...(compactCtx ? {
-        originChatId: compactCtx.originChatId,
-        originChatName: compactCtx.chatName,
-        originChatType: compactCtx.chatType,
-        privateReply: compactCtx.privateReply,
-      } : {}),
-    };
-    const isPrivDraft = Boolean(isExternal && chatCtx?.privateReply && !proactive && chatCtx?.originChatId);
-    const isPolishDraft = Boolean(!proactive && !isExternal && chatCtx?.polishDraft?.originChatId);
-    const draftMeta = isPrivDraft
-      ? {
-          originChatId: chatCtx.originChatId,
-          originName,
-          originChatType: chatCtx.chatType || 'group',
-          replyToImMsgId: chatCtx.originQuoteId ?? null,
-        }
-      : (isPolishDraft
-        ? {
-            originChatId: chatCtx.polishDraft.originChatId,
-            originName: chatCtx.polishDraft.originChatName || chatCtx.polishDraft.originChatId,
-            originChatType: chatCtx.polishDraft.originChatType || 'group',
-            replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
-          }
-        : null);
-    const effResult = this.#effectiveResultChars();
-    const effSoftSplit = this.#effectiveSoftSplitChars();
-
-    const draftKey = draftMeta ? `draft_${this.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
-    const draftActions = draftKey
-      ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${this.trigger} sendback ${draftKey}` }]
-      : null;
-
-    let firstSentId = null;
-    if (full.length <= effResult) {
-      firstSentId = await this.say(full, route, quoteReplyId, draftActions);
-    } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
-      const chunks = mdSplit(full, effResult);
-      for (let i = 0; i < chunks.length; i++) {
-        const sid = await this.say(
-          chunks[i],
-          {
-            ...route,
-            ombMsgId: i === chunks.length - 1 ? (finalMsg?.id ?? null) : null,
-          },
-          i === 0 ? quoteReplyId : null,
-          i === chunks.length - 1 ? draftActions : null,
-        );
-        if (i === 0) firstSentId = sid;
-      }
-    } else {
-      const clipped = mdClip(full, effResult);
-      const canAttach = clipped.cut && this.#supportsFiles();
-      const out = canAttach ? `${clipped.text}\n\n📎 完整回复见下一条附件` : clipped.text;
-      firstSentId = await this.say(out, route, quoteReplyId, draftActions);
-
-      if (canAttach) {
-        try {
-          fs.mkdirSync(this.inDir, { recursive: true });
-          const mdPath = path.join(this.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
-          fs.writeFileSync(mdPath, `${full}\n`);
-          await this.sendOutboundFile(mdPath, `${fileSafe(shownName) || 'reply'}.md`, {
-            chatId: targetChatId,
-            ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
-          });
-        } catch { /* 附件失败不影响正文 */ }
-      }
-    }
-
-    if (draftMeta && draftKey) {
-      const draftObj = {
-        id: draftKey,
-        imMsgId: firstSentId || draftKey,
-        originChatId: draftMeta.originChatId,
-        originChatName: draftMeta.originName,
-        originChatType: draftMeta.originChatType,
-        replyToImMsgId: draftMeta.replyToImMsgId,
-        rawText: text,
-        createdAt: this.now(),
-      };
-      this.privateDrafts.set(draftKey, draftObj);
-      if (firstSentId) this.privateDrafts.set(firstSentId, draftObj);
-      this.lastPrivateDraftId = firstSentId || draftKey;
-      while (this.privateDrafts.size > 40) this.privateDrafts.delete(this.privateDrafts.keys().next().value);
-    }
-
-    this.recordOutboundToContext(targetChatId, {
-      id: firstSentId,
-      text: full,
-      replyTo: quoteReplyId,
-      senderName: speakerName || botName,
-    });
-    this.emitTelemetry(proactive ? 'proactive' : 'reply', {
-      botName: speakerName || botName,
-      isGroup,
-      chatId: targetChatId || null,
-      chatType: isExternal ? (chatCtx?.privateReply ? 'self' : chatCtx?.chatType) : 'self',
-      summary: text,
-    });
-
-    if (!proactive && !isExternal) {
-      this.lastBotReplyAt = this.now();
-      this.focus = { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}) };
-    }
-    this.saveState();
-
-    const media = mediaMessages.length ? mediaMessages : (finalMsg ? [finalMsg] : []);
-    await this.#forwardBotMedia(threadId, media, {
-      chatId: targetChatId,
-      replyTo: quoteReplyId,
-    });
-  }
-
-  async flushQuietDigest() {
-    if (!this.quietQueue.length) return 0;
-    const items = this.quietQueue.splice(0);
-    this.saveState();
-    const lines = items.map((it) => {
-      const itemBot = this.displayBotName(it.botId, it.botName, { isGroup: Boolean(it.isGroup) });
-      const itemSpeaker = it.speakerName ? this.displayBotName(it.speakerBotId, it.speakerName) : '';
-      return `- **${itemSpeaker ? `${itemBot} · ${itemSpeaker}` : itemBot}**：${clip(it.text.replace(/\s+/g, ' '), 180)}`;
-    });
-    const last = items.at(-1);
-    await this.say(
-      `🌙 **免打扰期间汇总（${items.length} 条）**\n${lines.join('\n')}`,
-      { botId: last.botId, botName: last.botName, threadId: last.threadId, ...(last.isGroup ? { isGroup: true } : {}), ombMsgId: last.finalMsg?.id ?? null },
-    );
-    for (const it of items) {
-      if (it.finalMsg) await this.#forwardBotMedia(it.threadId, [it.finalMsg]);
-    }
-    return items.length;
-  }
-
-  #trackTurn(params) {
+  trackTurn(params) {
     return createTurnTracker(this, params, {
-      deliverBotReply: (args) => this.#deliverBotReply(args),
-      emitCard: (botId, botName, tid, msg, opts) => this.#emitCard(botId, botName, tid, msg, opts),
-      forwardBotMedia: (tid, msgs, opts) => this.#forwardBotMedia(tid, msgs, opts),
-      maybeWarnHighContext: (botId, tid, ctx) => this.#maybeWarnHighContext(botId, tid, ctx),
+      deliverBotReply: (args) => deliverBotReply(this, args),
+      emitCard: (botId, botName, tid, msg, opts) => emitCard(this, botId, botName, tid, msg, opts),
+      forwardBotMedia: (tid, msgs, opts) => forwardBotMedia(this, tid, msgs, opts),
+      maybeWarnHighContext: (botId, tid, ctx) => maybeWarnHighContext(this, botId, tid, ctx),
     });
-  }
-
-  async #handleProactiveMessage(threadId, msg) {
-    if (!msg || msg.role !== 'bot' || this.proactive === false) return;
-    if (msg.kind === 'digest' || msg.kind === 'activity') return;
-    if (msg.id && this.deliveredOmbIds.has(String(msg.id))) return;
-    if (msg.requestMessageId && this.ownReqIds.has(String(msg.requestMessageId))) return;
-    if (this.pendingThreads.has(threadId)) return;
-
-    const owner = await this.#resolveOwnerByThread(threadId);
-    const botId = owner?.id ?? threadId;
-    const isGroup = Boolean(owner?.isGroup);
-    const botName = this.displayBotName(botId, owner?.name, { isGroup });
-    const speakerName = isGroup ? (msg.from?.name || '') : '';
-    const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
-    const extChat = [...this.chatThreads.values()].find((v) => v.threadId === threadId) ?? null;
-    const proChatCtx = extChat
-      ? {
-          isExternal: true,
-          originChatId: extChat.chatId,
-          chatType: extChat.chatType,
-          chatName: extChat.chatName,
-          replyChatId: this.selfChat || extChat.chatId,
-          controlChatId: this.selfChat || extChat.chatId,
-          privateReply: Boolean(this.selfChat),
-          silentProgress: true,
-        }
-      : null;
-
-    if (messageNeedsInput(msg)) {
-      await this.#emitCard(botId, botName, threadId, msg, { isGroup, chatCtx: proChatCtx });
-      return;
-    }
-
-    if (msg.kind === 'screen' && msg.hasImage) {
-      rememberBounded(this.deliveredOmbIds, msg.id);
-      this.saveState();
-      if (extChat) return; // 外部会话后台异常或重试产生的无文字截图不再误发自聊
-      await this.#forwardBotMedia(threadId, [msg], { chatId: proChatCtx?.replyChatId || this.selfChat });
-      return;
-    }
-
-    if (msg.kind === 'text' && msg.turnTerminal) {
-      const text = String(msg.text ?? '').trim();
-      if (!text && !msg.hasImage && !(msg.attachments?.length)) return;
-      rememberBounded(this.deliveredOmbIds, msg.id);
-      if (inQuietHours(this.now(), this.quietHours)) {
-        this.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: text || '（附件通知）', finalMsg: msg });
-        this.saveState();
-        return;
-      }
-      await this.#deliverBotReply({
-        botId,
-        botName,
-        threadId,
-        text: text || '（附件通知）',
-        finalMsg: msg,
-        mediaMessages: [msg],
-        proactive: true,
-        isGroup,
-        speakerName,
-        chatCtx: proChatCtx,
-      });
-    }
-  }
-
-  #claimQueuedUserMessage(threadId, msg) {
-    const list = this.queuedByThread.get(threadId);
-    let hit = null;
-    if (list?.length) {
-      const idx = list.findIndex((q) => (msg.sendId && q.sendId === msg.sendId) || (msg.queueId && q.queueId === msg.queueId));
-      if (idx >= 0) {
-        [hit] = list.splice(idx, 1);
-        if (!list.length) this.queuedByThread.delete(threadId);
-      }
-    }
-    if (!hit && msg.sendId && this.steeredQueue.has(msg.sendId)) {
-      hit = this.steeredQueue.get(msg.sendId);
-      this.steeredQueue.delete(msg.sendId);
-    }
-    if (!hit) return false;
-
-    const reqMsgId = msg.id ?? null;
-    if (reqMsgId) rememberBounded(this.ownReqIds, reqMsgId);
-    const key = reqMsgId || `${threadId}:${hit.sendId}`;
-    if (!this.activeTurns.has(key)) {
-      const turn = this.#trackTurn({
-        key,
-        botId: hit.botId,
-        botName: hit.botName,
-        threadId,
-        reqMsgId,
-        sendId: hit.sendId,
-        isGroup: Boolean(hit.isGroup),
-        chatCtx: hit.chatCtx ?? null,
-      });
-      turn.startWatcher();
-    }
-    return true;
-  }
-
-  async #onSseEvent(evt) {
-    if (!evt || typeof evt !== 'object') return;
-    this.sseConnected = true;
-    this.sseAuthError = null;
-    this.consecutiveSseErrors = 0;
-    if ((evt.kind === 'message' || evt.kind === 'message.patch') && evt.message) {
-      const threadId = evt.threadId ?? evt.message.threadId;
-      if (evt.message.role === 'user') {
-        this.#claimQueuedUserMessage(threadId, evt.message);
-        return;
-      }
-      let handled = false;
-      for (const turn of this.activeTurns.values()) {
-        if (turn.threadId === threadId) {
-          turn.onMessage(evt.message);
-          handled = true;
-        }
-      }
-      if (!handled) await this.#handleProactiveMessage(threadId, evt.message);
-      return;
-    }
-    if (evt.kind === 'bot' && evt.bot) {
-      if (!evt.bot.hidden) await this.refreshMultiBot();
-      for (const turn of this.activeTurns.values()) {
-        if (turn.botId !== evt.bot.id || turn.isGroup) continue;
-        if (evt.bot.busy) turn.sawBusy = true;
-        else if (turn.sawBusy && !evt.bot.busy) turn.complete().catch(() => {});
-      }
-      return;
-    }
-    if (evt.kind === 'group' && evt.group) {
-      if (!evt.group.hidden) await this.refreshMultiBot();
-      for (const turn of this.activeTurns.values()) {
-        if (!turn.isGroup || turn.botId !== evt.group.id) continue;
-        if (evt.group.busy) turn.sawBusy = true;
-        else if (turn.sawBusy && !evt.group.busy) turn.complete().catch(() => {});
-      }
-    }
   }
 }

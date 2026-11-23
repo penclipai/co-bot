@@ -266,7 +266,7 @@ export function createTurnTracker(
       ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
       : '';
 
-    let messages = [];
+    let messages;
     try {
       const res = await bridge.client.getMessages(threadId, 25);
       messages = Array.isArray(res.messages) ? res.messages : [];

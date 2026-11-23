@@ -13,123 +13,7 @@ import { extractCardInfo, inQuietHours, OpenMausBotBridge } from '../src/openmau
 import { parseInlineTriggerMention, parseStartMention } from '../src/openmausbot/mentions.js';
 import { WebSimTransport } from '../src/im/sim.js';
 import { WebServer } from '../src/web/server.js';
-
-function makeMockHarness({ onCreateTask, onSendMessage, onRespond, onExport } = {}) {
-  const sentPrompts = [];
-  const createdTasks = [];
-  const responds = [];
-  let seq = 0;
-
-  return {
-    sentPrompts,
-    createdTasks,
-    responds,
-    client: {
-      baseUrl: 'http://127.0.0.1:8799',
-      async health() { return { ok: true, version: '0.1.173', box: 'off' }; },
-      async listBots() {
-        return {
-          bots: [{
-            id: 'bot_main',
-            name: 'MausBot',
-            chiefOfStaff: true,
-            threadId: 'th_self_main',
-            mainThreadId: 'th_self_main',
-            tasks: [{ id: 'th_self_main', threadId: 'th_self_main', title: '自聊主线' }],
-          }],
-          groups: [],
-        };
-      },
-      async resolveBot(name) {
-        if (!name || name.toLowerCase() === 'mausbot') {
-          return { id: 'bot_main', name: 'MausBot', threadId: 'th_self_main' };
-        }
-        return null;
-      },
-      async createTask(botId, opts = {}) {
-        const tid = `th_ext_${++seq}`;
-        createdTasks.push({ botId, threadId: tid, opts });
-        onCreateTask?.({ botId, threadId: tid, opts });
-        return {
-          bot: { id: botId, name: 'MausBot', threadId: 'th_self_main' },
-          task: { id: tid, threadId: tid, title: opts.title || '会话' },
-        };
-      },
-      async uploadFile(name, buf, mime) {
-        return { path: `/tmp/omb/${name}`, size: buf.length, mime };
-      },
-      async uploadImage(buf, mime) {
-        return { path: `/tmp/omb/img.png`, size: buf.length, mime };
-      },
-      async sendMessage(botId, payload) {
-        const entry = { botId, ...payload };
-        sentPrompts.push(entry);
-        if (onSendMessage) return onSendMessage(entry);
-        return { message: { id: `req_${++seq}` } };
-      },
-      async getMessages() {
-        return { messages: [] };
-      },
-      async getJob() {
-        return { state: 'idle', since: 1, version: 1 };
-      },
-      async respond(threadId, payload) {
-        responds.push({ threadId, ...payload });
-        return onRespond ? onRespond({ threadId, ...payload }) : { ok: true };
-      },
-      async exportThread(threadId) {
-        return onExport ? onExport(threadId) : { name: 'ext.md', text: '# Exported thread' };
-      },
-      async subscribeEvents(_cb, { signal } = {}) {
-        if (!signal) return new Promise(() => {});
-        if (signal.aborted) return;
-        return new Promise((resolve) => {
-          signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-      },
-    },
-  };
-}
-
-function makeMockTransport(downloads = {}) {
-  const sent = [];
-  const sentFiles = [];
-  let n = 0;
-  let handler = null;
-  return {
-    sent,
-    sentFiles,
-    transport: {
-      selfChatId: 'chat_self',
-      capabilities: {
-        markdown: true,
-        files: true,
-        images: true,
-        replyTo: true,
-        actions: true,
-        history: false,
-      },
-      async start(fn) { handler = fn; },
-      async send(chatId, text, opts = {}) {
-        const id = `im_out_${++n}`;
-        sent.push({ id, chatId, text, opts });
-        return id;
-      },
-      async sendFile(chatId, file, opts = {}) {
-        const id = `im_file_${++n}`;
-        sentFiles.push({ id, chatId, file, opts });
-        return id;
-      },
-      async download(att, savePath) {
-        const content = downloads[att.id] ?? `mock:${att.name}`;
-        fs.mkdirSync(path.dirname(savePath), { recursive: true });
-        fs.writeFileSync(savePath, content);
-      },
-      async stop() {},
-      emit(ev) { return handler?.(ev); },
-    },
-  };
-}
+import { makeMockHarness, makeMockTransport } from './helpers/mock-im-context.js';
 
 test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thread 与卡片隐私', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-multichat-'));
@@ -208,7 +92,7 @@ test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thre
     return { state: 'idle', since: 2, version: 2 };
   };
 
-  const { sent, sentFiles, transport } = makeMockTransport({
+  const { sent, transport } = makeMockTransport({
     att_log_1: 'ERROR 502 upstream timed out (110: Connection timed out)\n',
   });
 
@@ -307,16 +191,15 @@ test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thre
     assert.ok(selfPrivReplies.some((s) => s.text.includes('私密回复 · 来自「研发架构群」') && s.text.includes('nginx upstream 超时')));
     assert.match(mock.sentPrompts[2].text, /reply_destination: self_chat_private/);
 
-    // 5. 敏感指令（@bot bots / @bot export）从群里触发时重定向到自聊，不泄露到群里
+    // 5. 敏感指令（@bot bots / @bot memory）从群里触发时重定向到自聊，不泄露到群里
     await bridge.onEvent({
       id: 'm_me_6',
       ts: Date.now() + 3000,
       chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
       sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot export',
+      text: '@bot memory',
     });
     assert.equal(sent.filter((s) => s.chatId === 'grp_dev').length, beforeGrpCount);
-    assert.ok(sentFiles.every((f) => f.chatId === 'chat_self'), '敏感 export 文件应发往自聊而非群聊');
     assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('来自「研发架构群」的指令结果')));
 
     // 6. 审批卡路由到自聊，自聊输入 ok 批准后结果按约定回到原群
@@ -354,14 +237,15 @@ test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thre
   }
 });
 
-test('imContextPlugin 提供按 chatId 强隔离的只读 HTTP 接口并支持通道历史回溯', async () => {
+test('imContextPlugin 保持按 chatId 隔离并支持通过通道 getMessage 回溯历史', async () => {
+  const now = Date.now();
   const remoteHistory = {
     grp_dev: [
-      { id: 'r_1', ts: 1000, chat: { id: 'grp_dev', type: 'group', name: '研发群' }, sender: { id: 'alice', name: 'Alice', isSelf: false }, text: '老消息：Redis 池配置为 64' },
-      { id: 'r_2', ts: 2000, chat: { id: 'grp_dev', type: 'group', name: '研发群' }, sender: { id: 'bob', name: 'Bob', isSelf: false }, text: '收到，准备压测' },
+      { id: 'r_1', ts: now - 3000, chat: { id: 'grp_dev', type: 'group', name: '研发群' }, sender: { id: 'alice', name: 'Alice', isSelf: false }, text: '老消息：Redis 池配置为 64' },
+      { id: 'r_2', ts: now - 2000, chat: { id: 'grp_dev', type: 'group', name: '研发群' }, sender: { id: 'bob', name: 'Bob', isSelf: false }, text: '收到，准备压测' },
     ],
     dm_secret: [
-      { id: 's_1', ts: 1500, chat: { id: 'dm_secret', type: 'direct', name: 'SecretDM' }, sender: { id: 'other', name: 'Other', isSelf: false }, text: '绝密私聊内容 Redis_Secret_XYZ' },
+      { id: 's_1', ts: now - 2500, chat: { id: 'dm_secret', type: 'direct', name: 'SecretDM' }, sender: { id: 'other', name: 'Other', isSelf: false }, text: '绝密私聊内容 Redis_Secret_XYZ' },
     ],
   };
 
@@ -381,10 +265,6 @@ test('imContextPlugin 提供按 chatId 强隔离的只读 HTTP 接口并支持�
           if (!beforeMsgId) return arr.slice(-limit);
           const idx = arr.findIndex((m) => m.id === beforeMsgId);
           return idx >= 0 ? arr.slice(Math.max(0, idx - limit), idx) : [];
-        },
-        async searchHistory(chatId, query, { limit = 10 } = {}) {
-          const q = String(query || '').toLowerCase();
-          return (remoteHistory[chatId] ?? []).filter((m) => m.text.toLowerCase().includes(q)).slice(-limit);
         },
       };
     },
@@ -406,7 +286,7 @@ test('imContextPlugin 提供按 chatId 强隔离的只读 HTTP 接口并支持�
     // 先写入实时消息到内存（不含 r_1 / r_2，模拟内存尚未看到的更早历史）
     imContext.recordInbound({
       id: 'live_3',
-      ts: 3000,
+      ts: now - 1000,
       chat: { id: 'grp_dev', type: 'group', name: '研发群' },
       sender: { id: 'me', name: '我', isSelf: true },
       replyTo: 'r_1',
@@ -416,7 +296,7 @@ test('imContextPlugin 提供按 chatId 强隔离的只读 HTTP 接口并支持�
     const ctx = await imContext.buildPromptContext({
       ev: {
         id: 'live_3',
-        ts: 3000,
+        ts: now - 1000,
         chat: { id: 'grp_dev', type: 'group', name: '研发群' },
         sender: { id: 'me', name: '我', isSelf: true },
         replyTo: 'r_1',
@@ -425,42 +305,13 @@ test('imContextPlugin 提供按 chatId 强隔离的只读 HTTP 接口并支持�
       contextWindow: 15,
     });
     assert.match(ctx.header, /老消息：Redis 池配置为 64/, '应通过 channel.getMessage 自动补全引用消息');
-    assert.match(ctx.header, /http:\/\/127\.0\.0\.1:\d+\/api\/im-context\/messages\?token=/);
+    assert.doesNotMatch(ctx.header, /more_context_api|\/api\/im-context/);
+    assert.doesNotMatch(ctx.header, /Redis_Secret_XYZ/, '绝不可泄漏其他会话内容');
 
-    const token = imContext.issueScopeToken('grp_dev');
-
-    // 即使攻击者在 query 中传入 chatId=dm_secret，仍只能读到 token 绑定的 grp_dev
-    const msgRes = await fetch(`${base}/api/im-context/messages?token=${encodeURIComponent(token)}&chatId=dm_secret&limit=10`).then((r) => r.json());
-    assert.equal(msgRes.ok, true);
-    assert.equal(msgRes.chatId, 'grp_dev');
-    assert.equal(msgRes.items.some((m) => m.text.includes('Redis_Secret_XYZ')), false, '绝不可越权访问 dm_secret');
-
-    const searchRes = await fetch(`${base}/api/im-context/search?token=${encodeURIComponent(token)}&q=Redis`).then((r) => r.json());
-    assert.equal(searchRes.ok, true);
-    assert.equal(searchRes.chatId, 'grp_dev');
-    assert.ok(searchRes.items.some((m) => m.id === 'r_1'));
-    assert.equal(searchRes.items.some((m) => m.text.includes('Secret')), false);
-
-    // 单个消息检索与跨会话屏蔽
-    const crossMsg = await fetch(`${base}/api/im-context/message?token=${encodeURIComponent(token)}&msgId=s_1`);
-    const crossBody = await crossMsg.json();
-    assert.equal(crossMsg.status, 404);
-    assert.equal(crossBody.ok, false);
-
-    // 非法 token 拒绝访问
-    const badRes = await fetch(`${base}/api/im-context/messages?token=ctx_invalid.sig`);
-    assert.equal(badRes.status, 401);
-    assert.equal((await badRes.json()).ok, false);
-
-    // HEAD 探测应返回 200 与正确 Content-Type / Content-Length（兼容 DuckDB data_load）
-    const headOk = await fetch(`${base}/api/im-context/messages?token=${encodeURIComponent(token)}&limit=5`, { method: 'HEAD' });
-    assert.equal(headOk.status, 200);
-    assert.match(headOk.headers.get('content-type') || '', /application\/json/);
-    assert.ok(Number(headOk.headers.get('content-length')) > 0);
-    assert.equal(await headOk.text(), '');
-
-    const headBad = await fetch(`${base}/api/im-context/messages?token=bad`, { method: 'HEAD' });
-    assert.equal(headBad.status, 401);
+    // 通过 getHistory 回溯该群更早历史且不混入 dm_secret
+    const hist = await imContext.getHistory('grp_dev', { limit: 10 });
+    assert.ok(hist.some((m) => m.id === 'r_1'));
+    assert.equal(hist.some((m) => m.text.includes('Redis_Secret_XYZ')), false);
 
     // 验证 /api/debug/events 保留 chatId
     await kernel.get('channel').send('grp_dev', 'telemetry probe');
@@ -792,28 +643,16 @@ test('动态管群指令（chats/mute/allow/mode）、跨群只读汇总（summa
   }
 });
 
-test('scoped /api/im-context/attachment 文本脱敏与二进制下载 + /api/status 多会话字段与 /api/debug/events 过滤', async () => {
+test('/api/debug/events 过滤、/debug UI 与 /sim 撤回渲染校验', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-att-api-'));
-  const filesByAttId = {
-    att_txt_1: Buffer.from('ERROR token=sk-secretkey1234567890 upstream timed out\n', 'utf8'),
-    att_png_1: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    att_other_1: Buffer.from('secret from other chat', 'utf8'),
-  };
   let handler = null;
   const mockChannelPlugin = defineChannelPlugin({
     name: 'att-mock',
-    capabilities: { files: true, images: true, history: true },
+    capabilities: { markdown: true, files: false, images: false, history: false },
     create() {
       return {
         async start(cb) { handler = cb; },
         async send() { return 'out_1'; },
-        async sendFile() { return 'f_1'; },
-        async download(att, savePath) {
-          const buf = filesByAttId[att.id];
-          if (!buf) throw new Error('not found');
-          fs.mkdirSync(path.dirname(savePath), { recursive: true });
-          fs.writeFileSync(savePath, buf);
-        },
         async stop() {},
       };
     },
@@ -839,59 +678,20 @@ test('scoped /api/im-context/attachment 文本脱敏与二进制下载 + /api/st
       chat: { id: 'grp_dev', type: 'group', name: '研发群' },
       sender: { id: 'alice', name: 'Alice', isSelf: false },
       text: '附件日志见上一条',
-      attachments: [{ id: 'att_txt_1', msgId: 'm_log', name: 'err.log', mime: 'text/plain', size: filesByAttId.att_txt_1.length }],
-    });
-    await handler({
-      id: 'm_png',
-      ts: Date.now() - 1000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发群' },
-      sender: { id: 'bob', name: 'Bob', isSelf: false },
-      text: '',
-      attachments: [{ id: 'att_png_1', msgId: 'm_png', name: 'shot.png', mime: 'image/png', size: filesByAttId.att_png_1.length }],
     });
     await handler({
       id: 'm_other',
       ts: Date.now(),
       chat: { id: 'dm_alice', type: 'direct', name: 'Alice' },
       sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: '私聊文件',
-      attachments: [{ id: 'att_other_1', msgId: 'm_other', name: 'secret.txt', mime: 'text/plain', size: filesByAttId.att_other_1.length }],
+      text: '私聊消息',
     });
 
-    const urls = imContext.issueContextApiUrls('grp_dev');
-    assert.ok(urls.attachmentUrl.includes('/api/im-context/attachment?token='));
-
-    // 1. 文本附件：返回内容、路径且敏感 token 已脱敏
-    const txtRes = await fetch(`${urls.attachmentUrl}&msgId=m_log`).then((r) => r.json());
-    assert.equal(txtRes.ok, true);
-    assert.equal(txtRes.kind, 'text');
-    assert.match(txtRes.text, /upstream timed out/);
-    assert.doesNotMatch(txtRes.text, /sk-secretkey1234567890/);
-    assert.match(txtRes.text, /\[REDACTED\]/);
-    assert.ok(fs.existsSync(txtRes.savedPath));
-
-    // 2. 二进制图片附件：落盘并返回 savedPath + kind: 'binary'
-    const pngRes = await fetch(`${urls.attachmentUrl}&msgId=m_png`).then((r) => r.json());
-    assert.equal(pngRes.ok, true);
-    assert.equal(pngRes.kind, 'binary');
-    assert.equal(pngRes.attachment.name, 'shot.png');
-    assert.ok(fs.existsSync(pngRes.savedPath));
-
-    // 3. 跨会话拒绝与非法令牌拒绝
-    const cross = await fetch(`${urls.attachmentUrl}&msgId=m_other`);
-    assert.equal(cross.status, 404);
-    const bad = await fetch(`${base}/api/im-context/attachment?token=invalid&msgId=m_log`);
-    assert.equal(bad.status, 401);
-
-    // 4. HEAD 探测支持
-    const headAtt = await fetch(`${urls.attachmentUrl}&msgId=m_log`, { method: 'HEAD' });
-    assert.equal(headAtt.status, 200);
-
-    // 5. /api/debug/events?chatId=...&source=...&type=... 过滤与 /debug、/sim UI 校验
+    // 1. /api/debug/events?chatId=...&source=...&type=... 过滤与 /debug、/sim UI 校验
     const grpEv = await fetch(`${base}/api/debug/events?chatId=grp_dev&source=channel`).then((r) => r.json());
     assert.equal(grpEv.ok, true);
     assert.equal(grpEv.filter.chatId, 'grp_dev');
-    assert.ok(grpEv.events.length >= 2);
+    assert.ok(grpEv.events.length >= 1);
     assert.equal(grpEv.events.every((e) => e.chatId === 'grp_dev' && e.source === 'channel'), true);
 
     const typedEv = await fetch(`${base}/api/debug/events?type=inbound`).then((r) => r.json());
@@ -904,7 +704,7 @@ test('scoped /api/im-context/attachment 文本脱敏与二进制下载 + /api/st
     assert.equal(dbgPage.status, 200);
     const dbgHtml = await dbgPage.text();
     assert.match(dbgHtml, /多会话上下文与隔离 Thread/);
-    assert.match(dbgHtml, /定时跨群纪要/);
+    assert.doesNotMatch(dbgHtml, /定时跨群纪要/);
     assert.match(dbgHtml, /id="typeFilter"/);
 
     // 验证 /sim 前端页面撤回渲染逻辑与 bridge 模块重导出兼容
@@ -917,492 +717,6 @@ test('scoped /api/im-context/attachment 文本脱敏与二进制下载 + /api/st
     assert.equal(parseInlineTriggerMention('@Alice 让 @bot 查下')?.mention, 'bot');
   } finally {
     await kernel.stop();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('复杂 @mention 与引用组合：裸 @bot+引用、句中触发、反引号忽略、引用后@同事不重触、出站 @ 脱敏与多 Bot 复核', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-mention-'));
-  const threadMsgs = {};
-  const mock = makeMockHarness({
-    onSendMessage(entry) {
-      const reqId = `req_${mock.sentPrompts.length}`;
-      threadMsgs[entry.threadId] = [
-        { id: reqId, role: 'user', text: entry.text, sendId: entry.sendId },
-        {
-          id: `bot_${reqId}`,
-          role: 'bot',
-          requestMessageId: reqId,
-          kind: 'text',
-          turnTerminal: true,
-          text: entry.botId === 'bot_plum'
-            ? 'Plum复核：建议顺便检查 keepalive_timeout。'
-            : '请通知 @Alice 与 @所有人 今天 18:00 封板，也可找 @Plum，邮箱 dev@example.com，示例 `@bot`。',
-        },
-      ];
-      return { message: { id: reqId } };
-    },
-  });
-  mock.client.listBots = async () => ({
-    bots: [
-      { id: 'bot_main', name: 'MausBot', chiefOfStaff: true, threadId: 'th_self_main', tasks: [] },
-      { id: 'bot_plum', name: 'Plum', chiefOfStaff: false, threadId: 'th_plum_main', tasks: [] },
-    ],
-    groups: [],
-  });
-  mock.client.resolveBot = async (name) => {
-    const low = String(name || '').toLowerCase();
-    if (!low || low === 'mausbot') return { id: 'bot_main', name: 'MausBot', threadId: 'th_self_main' };
-    if (low === 'plum') return { id: 'bot_plum', name: 'Plum', threadId: 'th_plum_main' };
-    return null;
-  };
-  mock.client.getMessages = async (tid) => ({ messages: threadMsgs[tid] ?? [] });
-
-  const { sent, transport } = makeMockTransport();
-  const bridge = new OpenMausBotBridge({
-    client: mock.client,
-    transport,
-    dataDir: tmpDir,
-    sendRetries: 0,
-  });
-  await bridge.start();
-
-  try {
-    // 1. 同事发 `@bot 提问` 不触发；本人仅发裸 `@bot` 引用同事该条消息 -> 直接转给 Bot 处理（不弹出 help）
-    await bridge.onEvent({
-      id: 'm_col_499',
-      ts: Date.now() - 5000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: '@bot nginx 报 499 是客户端断连吗？',
-    });
-    assert.equal(mock.sentPrompts.length, 0);
-
-    await bridge.onEvent({
-      id: 'm_me_bare_quote',
-      ts: Date.now(),
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: 'm_col_499',
-      text: '@bot',
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    assert.equal(mock.sentPrompts.length, 1, '裸 @bot 引用同事消息应触发 OpenMausBot 而非返回 help');
-    assert.match(mock.sentPrompts[0].text, /nginx 报 499 是客户端断连吗/);
-    assert.match(mock.sentPrompts[0].text, /reply_policy:/);
-
-    // 5. 验证外部群出站文本已将 @Alice/@所有人/@Plum 插 \u200B 防误触，保留 dev@example.com 与 `@bot`
-    const grpReply = sent.find((s) => s.chatId === 'grp_dev');
-    assert.ok(grpReply);
-    assert.match(grpReply.text, /@\u200BAlice/);
-    assert.match(grpReply.text, /@\u200B所有人/);
-    assert.match(grpReply.text, /@\u200BPlum/);
-    assert.match(grpReply.text, /dev@example\.com/);
-    assert.match(grpReply.text, /`@bot`/);
-    // 即使将该脱敏后的群回复当做入站引用/文本回放，也不会把 @\u200Bbot 当触发词重触
-    await bridge.onEvent({
-      id: 'm_replay_sanitized',
-      ts: Date.now() + 10,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@\u200Bbot 不应被零宽字符假触发',
-    });
-    assert.equal(mock.sentPrompts.length, 1);
-
-    // 2. 反引号 / 句中元讨论不误触；句首 `@Alice` + 句中 `@bot` 正常触发；句中 `@bot status` 不当作控制指令
-    await bridge.onEvent({
-      id: 'm_backtick',
-      ts: Date.now() + 20,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '我们刚修完 `@bot` 的逻辑，也顺便提了「@bot」',
-    });
-    assert.equal(mock.sentPrompts.length, 1, '反引号与引号内的 @bot 不应误触');
-
-    await bridge.onEvent({
-      id: 'm_inline_status',
-      ts: Date.now() + 30,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '我觉得 @bot status 这个功能在移动端挺好用的',
-    });
-    await new Promise((r) => setTimeout(r, 30));
-    assert.equal(mock.sentPrompts.length, 2, '句中提到 @bot 应作为普通对话而不是误执行 status 控制指令');
-
-    await bridge.onEvent({
-      id: 'm_inline_alice',
-      ts: Date.now() + 40,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@Alice 别急，我让 @bot 帮我们核对一下日志',
-    });
-    await new Promise((r) => setTimeout(r, 30));
-    assert.equal(mock.sentPrompts.length, 3);
-    assert.match(mock.sentPrompts[2].text, /@Alice 别急，我让 帮我们核对一下日志/);
-
-    // 3. 引用 Bot 回复但改口 `@Alice` 叮嘱同事 -> 绝不重触 Bot
-    await bridge.onEvent({
-      id: 'm_quote_to_alice',
-      ts: Date.now() + 50,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: grpReply.id,
-      text: '辛苦 @Alice 按上面说的改下超时',
-    });
-    assert.equal(mock.sentPrompts.length, 3, '引用 Bot 回复但显式 @同事时不应再重触 Bot');
-
-    // 4. 引用 MausBot 回复并发 `@Plum 复核一下` -> 切到 Plum 且附带 MausBot 回复上下文
-    await bridge.onEvent({
-      id: 'm_handoff_plum',
-      ts: Date.now() + 60,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: grpReply.id,
-      text: '@Plum 复核一下这条分析',
-    });
-    await new Promise((r) => setTimeout(r, 30));
-    assert.equal(mock.sentPrompts.length, 4);
-    assert.equal(mock.sentPrompts[3].botId, 'bot_plum');
-    assert.match(mock.sentPrompts[3].text, /quoted_message:/);
-    assert.match(mock.sentPrompts[3].text, /18:00 封板/);
-
-    // 6. `@bot!` 私密发回自聊时保留原始清晰 `@Alice`（不插 \u200B）
-    await bridge.onEvent({
-      id: 'm_priv_raw',
-      ts: Date.now() + 70,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot! 帮我起草一句给 Alice 的提醒',
-    });
-    await new Promise((r) => setTimeout(r, 30));
-    const privReply = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('私密回复'));
-    assert.ok(privReply);
-    assert.match(privReply.text, /@Alice/);
-    assert.doesNotMatch(privReply.text, /@\u200BAlice/);
-  } finally {
-    await bridge.stop();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('B1+B2+B3 群聊深水区：结构化 mentions 与撤回擦除、连发多附件合批、外部群隔离 Thread 上下文监测与自动压缩', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-trackb-'));
-  const uploads = [];
-  const compacts = [];
-  const threadMsgs = {};
-  let extUsageRatio = 0.85;
-
-  const mock = makeMockHarness({
-    onSendMessage(entry) {
-      const reqId = `req_${mock.sentPrompts.length}`;
-      threadMsgs[entry.threadId] = [
-        { id: reqId, role: 'user', text: entry.text, sendId: entry.sendId },
-        { id: `bot_${reqId}`, role: 'bot', requestMessageId: reqId, kind: 'text', turnTerminal: true, text: '已分析日志。' },
-      ];
-      return { message: { id: reqId } };
-    },
-  });
-  mock.client.listBots = async () => ({
-    bots: [{
-      id: 'bot_main',
-      name: 'MausBot',
-      chiefOfStaff: true,
-      threadId: 'th_self_main',
-      tasks: [
-        { id: 'th_self_main', threadId: 'th_self_main', title: '自聊主线', usage: { context: { tokens: 1000, window: 100_000 }, turns: 2 } },
-        ...mock.createdTasks.map((t) => ({
-          id: t.threadId,
-          threadId: t.threadId,
-          title: t.opts?.title || '外部群',
-          usage: { context: { tokens: Math.round(extUsageRatio * 100_000), window: 100_000 }, turns: 28 },
-        })),
-      ],
-    }],
-    groups: [],
-  });
-  mock.client.uploadFile = async (name, buf, mime) => {
-    uploads.push({ name, content: buf.toString('utf8'), mime });
-    return { path: `/tmp/omb/${name}`, size: buf.length, mime };
-  };
-  mock.client.compact = async (botId, threadId) => {
-    compacts.push({ botId, threadId });
-    return { ok: true };
-  };
-  mock.client.getMessages = async (tid) => ({ messages: threadMsgs[tid] ?? [] });
-
-  const { sent, transport } = makeMockTransport({
-    att_log1: 'node1 timeout ERR_504',
-    att_log2: 'node2 reset ERR_499',
-    att_secret: 'temp_pass_999',
-  });
-  const bridge = new OpenMausBotBridge({
-    client: mock.client,
-    transport,
-    dataDir: tmpDir,
-    sendRetries: 0,
-    chats: { autoCompactThreshold: 0.92 },
-  });
-  await bridge.start();
-
-  try {
-    const t0 = Date.now();
-    // 1. Alice 误发一条含密文日志并立即撤回
-    await bridge.onEvent({
-      id: 'm_secret',
-      ts: t0,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: '密码 temp_pass_999',
-      attachments: [{ id: 'att_secret', msgId: 'm_secret', name: 'secret.log' }],
-    });
-    await bridge.onEvent({
-      id: 'm_recall_1',
-      kind: 'recall',
-      ts: t0 + 100,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      recalledMsgId: 'm_secret',
-      text: '',
-    });
-    assert.equal(bridge.localContextStore.getMessage('grp_dev', 'm_secret'), null, '撤回消息应立即从上下文删除');
-
-    // 2. Alice 连发两份日志，本人只引用第 2 份或直接不引用说「对比上面两个日志」 -> 两份一并上传且不含已撤回的 secret.log
-    await bridge.onEvent({
-      id: 'm_log1',
-      ts: t0 + 1000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: 'node1',
-      attachments: [{ id: 'att_log1', msgId: 'm_log1', name: 'node1.log' }],
-    });
-    await bridge.onEvent({
-      id: 'm_log2',
-      ts: t0 + 2000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: 'node2',
-      attachments: [{ id: 'att_log2', msgId: 'm_log2', name: 'node2.log' }],
-    });
-    await bridge.onEvent({
-      id: 'm_ask_logs',
-      ts: t0 + 3000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: 'm_log2',
-      text: '@bot 帮看下这批日志',
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    assert.deepEqual(uploads.map((u) => u.name).sort(), ['node1.log', 'node2.log'], '连发多附件应自动合批且不包含已撤回附件');
-    assert.doesNotMatch(mock.sentPrompts[0].text, /temp_pass_999/);
-    assert.match(mock.sentPrompts[0].text, /auto_attached_files:.*node2\.log/);
-    assert.match(mock.sentPrompts[0].text, /auto_attached_files:.*node1\.log/);
-
-    // 3. 结构化 mentions（正文中未出现 @Bob 字样但 mentions=[Bob]）引用 Bot 回复 -> 不重触 Bot
-    const botReply = sent.find((s) => s.chatId === 'grp_dev' && s.text.includes('已分析日志'));
-    assert.ok(botReply);
-    await bridge.onEvent({
-      id: 'm_struct_handoff',
-      ts: t0 + 4000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: botReply.id,
-      mentions: [{ id: 'bob', name: 'Bob' }],
-      text: '按上面处理下',
-    });
-    assert.equal(mock.sentPrompts.length, 1, '结构化 @同事 时引用 Bot 回复不应重触 Bot');
-
-    // 4. B3: 85% 警告发往自聊且附 `@bot compact grp_dev` 按钮；自聊可执行 `@bot context grp_dev` 与 `@bot compact grp_dev`
-    const warnMsg = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('85%'));
-    assert.ok(warnMsg, '外部群达到 85% 应在自聊收到提示');
-    assert.match(warnMsg.opts.actions[0].text, /^@bot compact grp_dev$/);
-
-    await bridge.onEvent({
-      id: 'm_ctx_grp',
-      ts: t0 + 5000,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot context grp_dev',
-    });
-    const ctxResp = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('研发架构群') && s.text.includes('85%'));
-    assert.ok(ctxResp);
-
-    await bridge.onEvent({
-      id: 'm_cmp_grp',
-      ts: t0 + 5100,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot compact grp_dev',
-    });
-    assert.equal(compacts.length, 1);
-    assert.equal(compacts[0].threadId, mock.createdTasks[0].threadId, 'compact 必须作用于外部群隔离 Thread 而非自聊主线');
-
-    // 5. B3: 当外部群达到 92% 时自动静默压缩外部群 Thread 并向自聊报告
-    extUsageRatio = 0.94;
-    await bridge.onEvent({
-      id: 'm_ask_auto_cmp',
-      ts: t0 + 6000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot 今天天气不错',
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    assert.equal(uploads.length, 2, '无关提问不应再次上传上面的日志附件');
-    assert.equal(compacts.length, 2, '达到 92% 阈值应自动后台压缩外部群 Thread');
-    assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('已自动后台压缩')));
-  } finally {
-    await bridge.stop();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('C1+C2+C3 跨群效率助手：定时汇总持久化与防重触、私密草稿改写与确认回发（防误艾特）、跨群关键词检索', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-trackc-'));
-  let fakeNow = new Date(2026, 10, 22, 17, 55, 0).getTime();
-  const threadMsgs = {};
-  const mock = makeMockHarness({
-    onSendMessage(entry) {
-      const reqId = `req_${mock.sentPrompts.length}`;
-      const isPrivDraftReq = entry.text.includes('起草');
-      const reply = isPrivDraftReq
-        ? '请 @Alice 今天 18:00 前确认发布窗口。'
-        : '汇总完成：今日讨论聚焦 nginx 499 与封板。';
-      threadMsgs[entry.threadId] = [
-        { id: reqId, role: 'user', text: entry.text, sendId: entry.sendId },
-        { id: `bot_${reqId}`, role: 'bot', requestMessageId: reqId, kind: 'text', turnTerminal: true, text: reply },
-      ];
-      return { message: { id: reqId } };
-    },
-  });
-  mock.client.getMessages = async (tid) => ({ messages: threadMsgs[tid] ?? [] });
-
-  const { sent, transport } = makeMockTransport();
-  const bridge = new OpenMausBotBridge({
-    client: mock.client,
-    transport,
-    dataDir: tmpDir,
-    sendRetries: 0,
-    now: () => fakeNow,
-  });
-  await bridge.start();
-
-  try {
-    // Seed 外部群与私聊上下文
-    await bridge.onEvent({
-      id: 'g_msg_1',
-      ts: fakeNow - 60_000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'alice', name: 'Alice', isSelf: false },
-      text: 'nginx 499 连接池待确认',
-    });
-    await bridge.onEvent({
-      id: 'd_msg_1',
-      ts: fakeNow - 30_000,
-      chat: { id: 'dm_bob', type: 'direct', name: 'Bob' },
-      sender: { id: 'bob', name: 'Bob', isSelf: false },
-      text: 'nginx 灰度配置发你了',
-    });
-
-    // C3: 跨群检索（支持全群多词与 in:群名 限定），在外部群调用也私密发回自聊
-    await bridge.onEvent({
-      id: 'c3_find_all',
-      ts: fakeNow + 1000,
-      chat: { id: 'dm_bob', type: 'direct', name: 'Bob' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot find nginx',
-    });
-    const findAllMsg = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('跨群检索') && s.text.includes('研发架构群') && s.text.includes('Bob'));
-    assert.ok(findAllMsg, 'find 结果必须私密路由至自聊且包含跨会话命中');
-    assert.equal(sent.some((s) => s.chatId === 'dm_bob'), false);
-
-    await bridge.onEvent({
-      id: 'c3_find_scoped',
-      ts: fakeNow + 2000,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot find in:研发架构群 499',
-    });
-    const findScopedMsg = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('命中 1 条') && s.text.includes('499'));
-    assert.ok(findScopedMsg);
-
-    // C1: 添加每日 18:00 定时汇总 -> 到点仅触发一次，不打扰原群，无新消息不重复触发
-    await bridge.onEvent({
-      id: 'c1_add',
-      ts: fakeNow + 3000,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '@bot schedule add grp_dev 18:00 关注发布风险',
-    });
-    assert.equal(bridge.listScheduledSummaries().length, 1);
-
-    fakeNow = new Date(2026, 10, 22, 18, 0, 10).getTime();
-    const ran1 = await bridge.tickScheduledSummaries(fakeNow);
-    await new Promise((r) => setTimeout(r, 40));
-    assert.equal(ran1.length, 1);
-    assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('汇总完成')));
-    assert.equal(sent.some((s) => s.chatId === 'grp_dev'), false, '定时汇总绝不可打扰原群');
-
-    fakeNow = new Date(2026, 10, 22, 18, 2, 0).getTime();
-    const ran2 = await bridge.tickScheduledSummaries(fakeNow);
-    assert.equal(ran2.length, 0, '同一天同一规则不得重复触发');
-
-    // 次日有新消息才再次触发；若无新消息则静默跳过
-    fakeNow = new Date(2026, 10, 23, 18, 1, 0).getTime();
-    assert.equal((await bridge.tickScheduledSummaries(fakeNow)).length, 0, '无新消息应跳过定时汇总');
-
-    // 重启恢复定时汇总配置
-    await bridge.stop();
-    const bridge2 = new OpenMausBotBridge({ client: mock.client, transport, dataDir: tmpDir, sendRetries: 0, now: () => fakeNow });
-    assert.equal(bridge2.listScheduledSummaries().length, 1);
-
-    // C2: 外部群 `@bot!` 私密起草 -> 自聊 `@bot sendback` 预览 -> `改：...` 改写 -> `确认发送` 自动插 \u200B 防误艾特发回原群
-    await bridge2.start();
-    await bridge2.onEvent({
-      id: 'c2_draft_req',
-      ts: fakeNow + 1000,
-      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: 'g_msg_1',
-      text: '@bot! 帮我起草一句回复',
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    const privDraft = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('私密回复') && s.text.includes('@Alice'));
-    assert.ok(privDraft);
-    assert.doesNotMatch(privDraft.text, /@\u200BAlice/);
-
-    await bridge2.onEvent({
-      id: 'c2_sb_req',
-      ts: fakeNow + 2000,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      replyTo: privDraft.id,
-      text: '@bot sendback',
-    });
-    assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('确认发回到「研发架构群」')));
-
-    await bridge2.onEvent({
-      id: 'c2_sb_edit',
-      ts: fakeNow + 2500,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '改：请 @Alice 今晚 19:00 前再确认下',
-    });
-    assert.ok(sent.some((s) => s.chatId === 'chat_self' && s.text.includes('19:00 前再确认下')));
-
-    await bridge2.onEvent({
-      id: 'c2_sb_confirm',
-      ts: fakeNow + 3000,
-      chat: { id: 'chat_self', type: 'self' },
-      sender: { id: 'me', name: '我', isSelf: true },
-      text: '确认发送',
-    });
-    const backMsg = sent.find((s) => s.chatId === 'grp_dev');
-    assert.ok(backMsg, '确认后应实际发回原群');
-    assert.equal(backMsg.opts.replyTo, 'g_msg_1', '应保留原触发引用的群消息气泡');
-    assert.match(backMsg.text, /@\u200BAlice/);
-    assert.match(backMsg.text, /19:00 前再确认下/);
-    await bridge2.stop();
-  } finally {
-    await bridge.stop().catch(() => {});
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

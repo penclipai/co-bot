@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { APP_ROOT, loadConfig } from '../src/config.js';
 import { Kernel } from '../src/core/kernel.js';
 import { validateChannelAdapter, validateInboundEvent } from '../src/core/channel-contract.js';
@@ -121,18 +121,8 @@ export async function runChannelContractTest(cfg, {
     errors.push(...check.errors);
     warnings.push(...check.warnings);
 
-    // 额外校验 ipc 的 legacy client 文件导出
-    if (loaded.resolvedName === 'ipc' && !loaded.options?.clientModule) {
-      if (!loaded.options?.selfId) warnings.push('ipc.selfId 未填写，实时连接时会阻断');
-      const clientPath = loaded.options?.client;
-      if (!clientPath || !fs.existsSync(clientPath)) {
-        errors.push(`找不到 ipc.client 文件：${clientPath || '(未填写)'}`);
-      } else {
-        const mod = await import(pathToFileURL(path.resolve(clientPath)).href);
-        if (typeof mod.connect !== 'function' || typeof mod.send !== 'function') {
-          errors.push(`${clientPath} 必须导出 connect 与 send 函数`);
-        }
-      }
+    if (loaded.resolvedName === 'ipc' && !loaded.options?.clientModule && !loaded.options?.client) {
+      errors.push('ipc.client 未填写');
     }
 
     log(`✓ 已加载通道插件「${loaded.resolvedName}」`);

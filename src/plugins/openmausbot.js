@@ -40,10 +40,11 @@ export const openmausbotPlugin = {
   provides: ['openmausbot', 'bridge'],
   async apply(ctx, opts = {}) {
     const cfg = ctx.config;
+    const ombCfg = cfg.openmausbot || {};
     const channel = ctx.get('channel');
     const logger = ctx.logger ?? console;
 
-    if (opts.ensureOmb && cfg.openmausbot.autoStart !== false && isLoopbackUrl(cfg.openmausbot.url)) {
+    if (opts.ensureOmb && ombCfg.autoStart !== false && isLoopbackUrl(ombCfg.url)) {
       try {
         await ensureOpenMausBot(cfg);
       } catch (e) {
@@ -52,9 +53,9 @@ export const openmausbotPlugin = {
     }
 
     const client = opts.client ?? new OpenMausBotClient({
-      baseUrl: cfg.openmausbot.url,
-      timeoutMs: cfg.openmausbot.timeoutMs,
-      token: cfg.openmausbot.token,
+      baseUrl: ombCfg.url,
+      timeoutMs: ombCfg.timeoutMs,
+      token: ombCfg.token,
     });
 
     let startupProbe = null;
@@ -72,10 +73,14 @@ export const openmausbotPlugin = {
       dataDir: cfg.dataDir,
       imContext,
       chats: cfg.chats,
-      syncChiefIdentity: cfg.openmausbot.syncChiefIdentity !== false,
+      projects: cfg.projects,
+      sharedContextDir: cfg.sharedContextDir,
+      sharedContextPullIntervalMs: cfg.sharedContextPullIntervalMs,
+      execGit: opts.execGit ?? null,
+      syncChiefIdentity: ombCfg.syncChiefIdentity !== false,
       autoHealOmb: opts.autoHealOmb !== undefined
         ? opts.autoHealOmb
-        : ((cfg.openmausbot.autoStart !== false && isLoopbackUrl(cfg.openmausbot.url))
+        : ((ombCfg.autoStart !== false && isLoopbackUrl(ombCfg.url))
           ? () => ensureOpenMausBot(cfg)
           : null),
       onTelemetry: (ev) => ctx.emit('bridge:event', {

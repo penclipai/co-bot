@@ -32,6 +32,7 @@ export default defineChannelPlugin({
     replyTo: true,     // false 时忽略引用气泡参数
     actions: false,    // 真实 IM 无模拟器内嵌按钮时保持 false
     history: false,    // 实现下方可选 getMessage / getHistory / searchHistory 后设为 true
+    notify: false,     // 若“自聊消息”无手机推送，实现下方 notify() 后设为 true
     maxChars: 0,       // 单条字符上限，如企微/短信限 2000，0 表示沿用 selfChat.resultChars
     multiDevice: true, // 是否透传手机/桌面多端来源，配合 commandDevices 过滤
   },
@@ -112,6 +113,11 @@ export default defineChannelPlugin({
       // },
       // async searchHistory(chatId, query, { limit = 10 } = {}) {
       //   return await ipc.searchMessages({ conversationId: chatId, keyword: query, limit });
+      // },
+
+      // 可选：当“发给自己的自聊消息”手机端不推送提醒时，实现 notify() 补发应用通知
+      // async notify({ title, body, chatId, urgent }) {
+      //   await ipc.pushNotification({ title, body, chatId, urgent });
       // },
 
       async stop() {

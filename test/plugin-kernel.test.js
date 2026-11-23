@@ -270,15 +270,32 @@ test('loadChannelPlugin: dynamically loads declarative defineChannelPlugin, Cord
   const resApply = await loadChannelPlugin({ channel: { use: pApply, options: {} }, ipc: {} });
   assert.equal(resApply.resolvedName, 'apply-im');
 
-  // 3. 向后兼容旧版 connect / send 文件
+  // 3. 向后兼容旧版 connect / send 文件（通过 wrapLegacyClientPlugin 托管）
   const pLegacy = path.join(dir, 'legacy-client.mjs');
   fs.writeFileSync(pLegacy, `
-    export async function connect() {}
-    export async function send() { return { msgId: 'leg1' }; }
+    let handler = null;
+    export const sent = [];
+    export async function connect(onMsg) { handler = onMsg; }
+    export async function send(payload) { sent.push(payload); return { msgId: 'leg1' }; }
+    export function push(msg) { return handler?.(msg); }
   `);
   const resLegacy = await loadChannelPlugin({ channel: { use: pLegacy, options: {} }, ipc: { selfId: 'u1' } });
   assert.equal(resLegacy.resolvedName, 'ipc');
   assert.equal(typeof resLegacy.options.clientModule.connect, 'function');
+
+  const legKernel = new Kernel({ config: { ipc: resLegacy.options } });
+  legKernel.use(resLegacy.plugin, resLegacy.options);
+  await legKernel.start();
+  const legChan = legKernel.get('channel');
+  const legEvents = [];
+  await legChan.start((ev) => legEvents.push(ev));
+  assert.equal(legChan.capabilities.files, false);
+  await resLegacy.options.clientModule.push({ msgId: 'm_leg', chatId: 'self_99', chatType: 'self', fromId: 'u1', text: 'hello' });
+  assert.equal(legChan.selfChatId, 'self_99');
+  assert.equal(legEvents[0].chat.type, 'self');
+  assert.equal(await legChan.send('self_99', 'ok'), 'leg1');
+  assert.deepEqual(resLegacy.options.clientModule.sent[0], { chatId: 'self_99', text: 'ok', quoteMsgId: undefined });
+  await legKernel.stop();
 });
 
 test('OpenMausBotBridge capability-aware degradation: strips markdown, honors maxChars/replyTo/actions/files', async () => {

@@ -57,6 +57,7 @@ export const DEFAULT_CAPABILITIES = Object.freeze({
   replyTo: true,
   actions: false,
   history: false,
+  notify: false,
   maxChars: 0,
   multiDevice: false,
 });
@@ -140,6 +141,7 @@ export function normalizeCapabilities(raw = {}, adapter = null) {
       || typeof adapter.getMessage === 'function'
       || typeof adapter.searchHistory === 'function'),
   );
+  const hasNotify = Boolean(adapter && typeof adapter.notify === 'function');
   const files = src.files !== undefined ? Boolean(src.files) : hasSendFile;
   const images = src.images !== undefined ? Boolean(src.images) : files;
   return {
@@ -149,6 +151,7 @@ export function normalizeCapabilities(raw = {}, adapter = null) {
     replyTo: src.replyTo !== undefined ? Boolean(src.replyTo) : DEFAULT_CAPABILITIES.replyTo,
     actions: src.actions !== undefined ? Boolean(src.actions) : DEFAULT_CAPABILITIES.actions,
     history: src.history !== undefined ? Boolean(src.history) : hasHistory,
+    notify: src.notify !== undefined ? Boolean(src.notify) : hasNotify,
     maxChars: Math.max(0, Number(src.maxChars ?? DEFAULT_CAPABILITIES.maxChars) || 0),
     multiDevice: src.multiDevice !== undefined ? Boolean(src.multiDevice) : DEFAULT_CAPABILITIES.multiDevice,
   };
@@ -413,6 +416,9 @@ export function validateChannelAdapter(adapter, declaredCaps = null) {
   if (caps.files && typeof adapter.sendFile !== 'function') {
     errors.push('声明了 capabilities.files=true 但未实现 sendFile(chatId, file, opts)');
   }
+  if (caps.notify && typeof adapter.notify !== 'function') {
+    errors.push('声明了 capabilities.notify=true 但未实现 notify(payload)');
+  }
   if (typeof adapter.sendFile === 'function' && typeof adapter.download !== 'function') {
     warnings.push('已实现 sendFile 但未实现 download(att, savePath)，入站附件将无法拉取');
   }
@@ -626,6 +632,22 @@ export class ManagedChannel {
     if (typeof this.adapter?.searchHistory !== 'function') return [];
     const list = await this.adapter.searchHistory(chatId, query, opts);
     return Array.isArray(list) ? list.map((m) => this.#normalizeMaybeEvent(m)).filter(Boolean) : [];
+  }
+
+  async notify(payload = {}) {
+    if (typeof this.adapter?.notify !== 'function') return false;
+    try {
+      await this.adapter.notify(payload);
+      this.#emit('channel:notify', {
+        chatId: payload?.chatId ? String(payload.chatId) : null,
+        urgent: Boolean(payload?.urgent),
+        summary: clipSummary(payload?.title || payload?.body || 'notify'),
+      });
+      return true;
+    } catch (e) {
+      this.logger.warn?.(`[channel:${this.name}] notify 失败：`, e?.message || e);
+      return false;
+    }
   }
 
   async stop() {

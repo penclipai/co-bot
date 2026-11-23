@@ -151,7 +151,7 @@
     d.className = 'empty';
     d.id = 'empty';
     if (activeChat === 'self') {
-      d.innerHTML = '这里模拟 IM 手机端自聊 → co-bot（Coordinator Bot 个人协调助手）。<br><br>试试：<b>@bot 你好</b> · <b>@bot style cobot</b>（启用协调助手风格）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群效率：<b>@bot find &lt;词&gt;</b> · <b>@bot schedule</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b><br>常用效率：<b>@bot model</b> · <b>@bot context</b> · <b>@bot search</b> · <b>@bot export</b> · <b>@bot routines</b> · <b>@bot memory</b><br>会话与控制：<b>@bot new</b> · <b>@bot tasks</b> · <b>@bot compact [群]</b> · <b>@bot steer</b> · <b>@bot stop</b><br><br>审批与选项卡支持点快捷按钮，或直接回复 <b>ok / always / no / 1 / 2</b>。<br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
+      d.innerHTML = '这里模拟 IM 手机端自聊 → co-bot（Coordinator Bot 个人协调助手）。<br><br>试试：<b>@bot 你好</b> · <b>@bot help</b>（查看指令清单）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群协同：<b>@bot chats</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b> · <b>@bot bind</b> · <b>@bot delegate</b><br>会话与控制：<b>@bot new</b> · <b>@bot tasks</b> · <b>@bot context</b> · <b>@bot compact [群]</b> · <b>@bot memory</b> · <b>@bot approval</b><br>运行干预：<b>@bot steer</b> · <b>@bot cancel</b> · <b>@bot stop</b> · <b>@bot digest</b> · <b>@bot bye</b>（审批卡回 <b>ok / always / no / 1 / 2</b>）<br><br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
     } else {
       d.innerHTML = `这是模拟<b>${CHATS[activeChat].name}</b>（群聊 / 私聊场景）。<br><br>1. 点击输入框左侧 <b>我 / Alice / Bob</b> 切换身份发送或<b>撤回</b>消息/文件，构建多轮上下文；<br>2. 点任意气泡上的 <b>引用</b>，再切回 <b>我</b> 发送 <b>@bot 怎么看？</b>（原地回复）；<br>3. 发送 <b>@bot! 总结上面讨论</b> 或 <b>@bot -p ...</b> 可将结果私密发回「自聊」，确认后再 <b>@bot sendback</b> 回发。`;
     }

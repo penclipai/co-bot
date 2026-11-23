@@ -6,10 +6,9 @@
 
 ## 一、真机上线 Checklist
 
-1. **交互初始化与前置依赖自检**
+1. **安装依赖与前置自检**
    ```bash
    npm install
-   npm run setup -- --mode plugin   # 可选：交互生成 config.json 与 ./im-plugin.js 模板
    npm run check
    ```
    - 确认 `Node.js >= 24`、`openmausbot` 本地依赖就绪、底端引擎（如 `opencode`）正常。
@@ -61,5 +60,25 @@ npm test
 npm run channel:test -- --dry
 ```
 
-- 确认 `.gitignore` 正常生效（`config.json`、`ipc-client.js`、`im-plugin.js`、`data/`、`*.log`、`package-lock.json` 均不出现在待提交列表中）。
+- 确认 `.gitignore` 正常生效（`config.json`、`im-plugin.js`、`data/`、`*.log`、`package-lock.json` 均不出现在待提交列表中）。
 - 关联远端后推送：`git remote add origin <你的仓库地址> && git push -u origin main`。
+
+---
+
+## 四、多用户同机隔离与 7×24 弹性部署指南
+
+当需要将个人电脑上的 `co-bot` 迁往 7×24 在线 Linux 服务器，或在同一台共用开发机上为多位成员并行运行互不干扰的 `co-bot` 实例时，按以下 4 项做实例隔离：
+
+1. **独立配置、端口与数据目录**：
+   - 每位用户使用独立配置文件（如 `config.alice.json`、`config.bob.json`），通过 `--config` 启动：
+     ```bash
+     node --no-deprecation src/index.js --config /srv/cobot/alice/config.json
+     ```
+   - 必须各自隔离 `web.port`（如 `8787` / `8789`）与 `dataDir`（如 `/srv/cobot/alice/data` / `/srv/cobot/bob/data`），避免端口冲突与 `bridge-state.json` / 临时附件混用。
+2. **独立 OpenMausBot 实例与鉴权隔离**：
+   - 每位用户绑定独立的 OpenMausBot 地址与认证（如 `openmausbot.url: "http://127.0.0.1:8799"` vs `"http://127.0.0.1:8809"`，并通过环境变量 `OMB_TOKEN` 或各自配置提供 `token`），确保长期记忆（Memory）与会话上下文彻底物理隔离。
+3. **共享团队知识库 + 个人只读白名单**：
+   - 将团队共同规范仓库同步到服务器本地（如 `/srv/shared/team-docs`），各实例配置 `sharedContextDir`，其余保留在各自的 `dataDir` 与 OpenMausBot 私有记忆内；
+   - 按需配置 `chats.collaborators`（`confirm_in_self` / `auto_readonly`）与 `projects` 白名单即可开启受控只读协助及 `@bot delegate` 双实例 C2C 协同。
+4. **独立 Bot 账号切换（未来扩展）**：
+   - 若后续目标 IM 开放独立机器人号，只需在通道插件 `im-plugin.js` 中切换凭据并把 `chats.externalBotPrefix` 设为 `""`，上层安全门禁、白名单策略与 C2C 协议无需改动。

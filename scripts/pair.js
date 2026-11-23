@@ -181,6 +181,7 @@ async function main() {
     if (isOld6Digit) {
       throw new Error(
         `${e.message}\n💡 你输入的是手机 App 专用 6 位数字码；本地脚本可直接运行无参数的 \`npm run pair\`（在桌面端点一次 Allow 即可），或改用 12 位配对码（形如 7KQ2-M9XD-H4TP）。`,
+        { cause: e },
       );
     }
     throw e;

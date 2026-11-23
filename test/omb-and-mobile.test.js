@@ -5,18 +5,17 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  defineChannelPlugin,
   formatLinkCardSnippet,
   isAudioAttachment,
   normalizeInboundEvent,
 } from '../src/core/channel-contract.js';
 import { ChatContextStore, formatImContextBlock } from '../src/core/chat-context.js';
 import { Kernel } from '../src/core/kernel.js';
-import { defineChannelPlugin } from '../src/core/channel-contract.js';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.js';
 import { openmausbotPlugin } from '../src/plugins/openmausbot.js';
 import { inspectorPlugin } from '../src/plugins/inspector.js';
 import { webPlugin } from '../src/plugins/web.js';
-import { upgradeOpenMausBot } from '../scripts/omb.js';
 
 const until = (fn, ms = 3000) => new Promise((resolve, reject) => {
   const t0 = Date.now();
@@ -184,7 +183,7 @@ test('Track D1: voice transcript hook, audio fallback, and linkCard normalizatio
   }
 });
 
-test('Track C+D2: 0.1.177 doctor & approvalMode, hot quiet/prefs commands, and persistent runtimePrefs across restart', async () => {
+test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status and commands', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-0177-prefs-'));
   const patchedBots = [];
   const ombServer = http.createServer((req, res) => {
@@ -270,7 +269,7 @@ test('Track C+D2: 0.1.177 doctor & approvalMode, hot quiet/prefs commands, and p
     await k1.start();
     const port1 = k1.get('web').server.address().port;
 
-    // 1. /api/status 暴露 0.1.177 doctor + approvalMode + waitingForTeammates + runtimePrefs
+    // 1. /api/status 暴露 0.1.177 doctor + approvalMode + waitingForTeammates
     const st1 = await fetch(`http://127.0.0.1:${port1}/api/status`).then((r) => r.json());
     assert.equal(st1.openmausbot.doctor.checked, 9);
     assert.equal(st1.openmausbot.bots[0].approvalMode, 'ask');
@@ -287,94 +286,10 @@ test('Track C+D2: 0.1.177 doctor & approvalMode, hot quiet/prefs commands, and p
     await until(() => sentOut.some((m) => m.text.includes('审批模式设为 `auto`')));
     assert.equal(patchedBots.at(-1)?.patch?.approvalMode, 'auto');
 
-    // 3. 免重启热调参：@bot quiet 23:00-07:30 + @bot prefs ack on + sanitize dangerous
-    await pushMsg({ id: 'cmd_q', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot quiet 23:00-07:30' });
-    await until(() => sentOut.some((m) => m.text.includes('`23:00` ~ `07:30`')));
-
-    await pushMsg({ id: 'cmd_ack', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot prefs ack on' });
-    await until(() => sentOut.some((m) => m.text.includes('外群静默接单时的自聊轻提示')));
-
-    await pushMsg({ id: 'cmd_san', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot prefs sanitize dangerous' });
-    await until(() => sentOut.some((m) => m.text.includes('策略设为 `dangerous`')));
-
     await k1.stop();
-
-    // 4. 重启恢复 runtimePrefs，且 prefs reset 可还原配置文件默认值
-    const k2 = new Kernel({ config: makeCfg() });
-    k2.use(webPlugin);
-    k2.use(makeChanPlugin(), { selfId: 'me', selfChatId: 'chat_self' });
-    k2.use(openmausbotPlugin, { autoHealOmb: null });
-    k2.use(inspectorPlugin);
-    await k2.start();
-    const b2 = k2.get('bridge');
-    const prefs2 = b2.getRuntimePrefs();
-    assert.equal(prefs2.quietHours.enabled, true);
-    assert.equal(prefs2.quietHours.start, '23:00');
-    assert.equal(prefs2.quietHours.end, '07:30');
-    assert.equal(prefs2.externalAckInSelf, true);
-    assert.equal(prefs2.externalSanitizeMentions, 'dangerous');
-
-    await pushMsg({ id: 'cmd_rst', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot prefs reset' });
-    await until(() => sentOut.some((m) => m.text.includes('已重置所有运行期热偏好')));
-    assert.equal(b2.getRuntimePrefs().externalAckInSelf, false);
-    assert.equal(b2.getRuntimePrefs().quietHours.enabled, false);
-    await k2.stop();
   } finally {
     ombServer.closeAllConnections?.();
     await new Promise((r) => ombServer.close(r));
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('Track C2: upgradeOpenMausBot supports dry-run preview and clean scripted upgrade lifecycle', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-upgrade-'));
-  try {
-    const pkgPath = path.join(tmpDir, 'package.json');
-    const instPkg = path.join(tmpDir, 'node_modules', 'openmausbot', 'package.json');
-    fs.mkdirSync(path.dirname(instPkg), { recursive: true });
-    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'co-bot', dependencies: { openmausbot: '^0.1.173' } }, null, 2));
-    fs.writeFileSync(instPkg, JSON.stringify({ name: 'openmausbot', version: '0.1.173' }));
-    const dataDir = path.join(tmpDir, 'data');
-    fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(path.join(dataDir, 'cobot.pid'), `${process.pid}\n`);
-
-    const calls = [];
-    const logs = [];
-    const cfg = {
-      openmausbot: { url: 'http://127.0.0.1:8799' },
-      web: { host: '127.0.0.1', port: 8787 },
-      dataDir,
-    };
-
-    const dryRes = await upgradeOpenMausBot(cfg, {
-      dry: true,
-      pkgPath,
-      fetchLatestVersion: () => '0.1.177',
-      log: (s) => logs.push(s),
-    });
-    assert.equal(dryRes.dry, true);
-    assert.equal(dryRes.current, '0.1.173');
-    assert.equal(dryRes.target, '0.1.177');
-    assert.equal(dryRes.upToDate, false);
-    assert.match(logs[0], /0\.1\.173 -> v0\.1\.177/);
-    assert.equal(JSON.parse(fs.readFileSync(pkgPath, 'utf8')).dependencies.openmausbot, '^0.1.173', 'dry-run 不应改写 package.json');
-
-    const realRes = await upgradeOpenMausBot(cfg, {
-      dry: false,
-      pkgPath,
-      fetchLatestVersion: () => '0.1.177',
-      stopCobot: async () => { calls.push('stopCobot'); },
-      stopOmb: async () => { calls.push('stopOmb'); },
-      runNpmInstall: async (cwd) => { calls.push(`npmInstall:${cwd}`); },
-      ensureOmb: async () => { calls.push('ensureOmb'); },
-      startCobot: async () => { calls.push('startCobot'); },
-      log: () => {},
-    });
-    assert.equal(realRes.upgraded, true);
-    assert.equal(realRes.restartedCobot, true);
-    assert.deepEqual(calls, ['stopCobot', 'stopOmb', `npmInstall:${tmpDir}`, 'ensureOmb', 'startCobot']);
-    assert.equal(JSON.parse(fs.readFileSync(pkgPath, 'utf8')).dependencies.openmausbot, '^0.1.177');
-  } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

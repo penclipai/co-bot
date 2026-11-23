@@ -169,6 +169,7 @@ export class WebSimTransport {
     });
 
     web.route('POST', '/upload', ({ body }) => {
+      // eslint-disable-next-line no-control-regex
       const name = path.basename(String(body.name ?? '')).replace(/[\x00-\x1f]/g, '') || 'file';
       const rawB64 = String(body.data ?? '').replace(/^data:[^;]*;base64,/i, '');
       const buf = Buffer.from(rawB64, 'base64');

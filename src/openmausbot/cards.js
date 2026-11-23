@@ -53,14 +53,6 @@ export function usageBar(pct) {
   return '█'.repeat(filled) + '░'.repeat(10 - filled);
 }
 
-export function fmtSchedule(sc) {
-  if (!sc || typeof sc !== 'object') return '定时';
-  if (sc.type === 'interval' && sc.everyMinutes) return `每 ${sc.everyMinutes} 分钟`;
-  if (sc.type === 'daily' && sc.at) return `每天 ${sc.at}`;
-  if (sc.cron) return sc.cron;
-  return sc.type || '定时';
-}
-
 function toolLabel(rawName) {
   const raw = String(rawName ?? '').trim();
   if (!raw) return { label: '', mapped: false };

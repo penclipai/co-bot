@@ -15,7 +15,7 @@ function xmlEscape(str) {
 
 function systemdQuote(arg) {
   const s = String(arg);
-  if (!/[\s"'\\$`%;&*?<>|()\[\]{}]/.test(s)) return s;
+  if (!/[\s"'\\$`%;&*?<>|()[\]{}]/.test(s)) return s;
   return `"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('$', '$$').replaceAll('%', '%%')}"`;
 }
 

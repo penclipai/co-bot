@@ -2,6 +2,7 @@
  * OpenMausBotBridge 按会话串行出站队列、断线消息缓冲重放与失败重试发送器。
  */
 import { hardBreaks, plain } from '../format.js';
+import { scanAndRedactOutbound } from '../core/security.js';
 import { rememberBounded } from './mentions.js';
 
 export function isTransportDisconnected(bridge) {
@@ -16,7 +17,7 @@ export function bufferOutboundItem(bridge, item) {
   while (bridge.disconnectedBuffer.length > cap) bridge.disconnectedBuffer.shift();
   bridge.emitTelemetry('outbound_buffered', {
     chatId: item.chatId,
-    summary: item.text,
+    summary: scanAndRedactOutbound(item.text).text,
   });
 }
 
@@ -76,7 +77,19 @@ export async function sendBridgeText(bridge, text, route = null, replyTo = null,
   }
   const caps = bridge.channelCaps();
   const useMarkdown = Boolean(bridge.markdown && caps?.markdown !== false);
-  const body = bridge.outPrefix + (useMarkdown ? hardBreaks(text) : plain(text));
+  const formatted = bridge.outPrefix + (useMarkdown ? hardBreaks(text) : plain(text));
+  const scan = extra?.skipSecurityScan
+    ? { text: formatted, redacted: false, hits: [], totalHits: 0 }
+    : scanAndRedactOutbound(formatted);
+  const body = scan.text;
+  if (scan.redacted) {
+    bridge.securityRedactions = (Number(bridge.securityRedactions) || 0) + scan.totalHits;
+    bridge.emitTelemetry('security_redacted', {
+      chatId,
+      kind: 'text',
+      summary: `count=${scan.totalHits} types=${scan.hits.map((h) => h.type).join(',')}`,
+    });
+  }
   bridge.rememberEcho(body);
   const opts = {
     ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),

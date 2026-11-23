@@ -8,11 +8,10 @@ import { validateConfig } from '../src/config.js';
 import { Kernel } from '../src/core/kernel.js';
 import { defineChannelPlugin } from '../src/core/channel-contract.js';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.js';
-import { buildHelpText, suggestClosestCommand } from '../src/openmausbot/commands.js';
+import { buildHelpText } from '../src/openmausbot/commands.js';
 import { openmausbotPlugin } from '../src/plugins/openmausbot.js';
 import { inspectorPlugin } from '../src/plugins/inspector.js';
 import { webPlugin } from '../src/plugins/web.js';
-import { runSetup } from '../scripts/setup.js';
 
 const until = (fn, ms = 3000) => new Promise((resolve, reject) => {
   const t0 = Date.now();
@@ -58,7 +57,7 @@ function makeTransport() {
 function makeMockClient({ onSendMessage, getJob: customGetJob, getMessages: customGetMessages } = {}) {
   const sentPrompts = [];
   const ssePushers = [];
-  let jobWaiters = [];
+  const jobWaiters = [];
   return {
     sentPrompts,
     pushSse(evt) { for (const cb of ssePushers) cb(evt); },
@@ -289,34 +288,9 @@ test('Usability B1+B2: validateConfig catches typos/bad values and scripts/setup
   assert.ok(bad.errors.some((e) => e.includes('turnStallMs')));
   assert.ok(bad.errors.some((e) => e.includes('chats.mode')));
   assert.ok(bad.errors.some((e) => e.includes('autoCompactThreshold')));
-
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-setup-'));
-  try {
-    const res = await runSetup({
-      nonInteractive: true,
-      mode: 'plugin',
-      baseDir: tmpDir,
-      configPath: 'config.json',
-      selfId: 'u_me_123',
-      port: '8899',
-      trigger: '@mybot',
-      force: true,
-      log: () => {},
-    });
-    assert.equal(res.validation.ok, true);
-    assert.ok(fs.existsSync(path.join(tmpDir, 'config.json')));
-    assert.ok(fs.existsSync(path.join(tmpDir, 'im-plugin.js')));
-    const written = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf8'));
-    assert.equal(written.channel.use, './im-plugin.js');
-    assert.equal(written.channel.options.selfId, 'u_me_123');
-    assert.equal(written.web.port, 8899);
-    assert.equal(written.selfChat.trigger, '@mybot');
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
 });
 
-test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action manages chat/schedule', async () => {
+test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action manages chat policies', async () => {
   const ombServer = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://127.0.0.1');
     res.setHeader('content-type', 'application/json');
@@ -356,7 +330,7 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
     ipc: { selfId: 'u_secret_self_id', selfChatId: 'chat_self' },
     web: { host: '127.0.0.1', port: 0 },
     selfChat: { trigger: '@bot', fileRetentionDays: 0 },
-    chats: { mode: 'owner_everywhere', scheduledSummaries: [{ id: 'sched_1', chatId: 'grp_ops', chatName: '运维群', time: '09:00', enabled: true }] },
+    chats: { mode: 'owner_everywhere' },
     dataDir,
   };
 
@@ -382,7 +356,7 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
     assert.ok(bundle.runtime.memoryRssMB > 0);
     assert.ok(Array.isArray(bundle.events));
 
-    // 2. POST /api/debug/action 动态静音与恢复群、停用定时纪要
+    // 2. POST /api/debug/action 动态静音群并反映到 /api/status
     const act1 = await fetch(`http://127.0.0.1:${port}/api/debug/action`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -391,18 +365,9 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
     assert.equal(act1.ok, true);
     assert.ok(act1.chatPolicy.muted.includes('grp_ops'));
 
-    const act2 = await fetch(`http://127.0.0.1:${port}/api/debug/action`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'schedule_toggle', id: 'sched_1', enabled: false }),
-    }).then((r) => r.json());
-    assert.equal(act2.ok, true);
-    assert.equal(act2.schedule.enabled, false);
-
     const st = await fetch(`http://127.0.0.1:${port}/api/status`).then((r) => r.json());
     assert.ok(st.runtime?.pid > 0);
     assert.ok(st.chatPolicy.muted.includes('grp_ops'));
-    assert.equal(st.scheduledSummaries[0].enabled, false);
   } finally {
     await kernel.stop();
     ombServer.closeAllConnections?.();
@@ -411,26 +376,15 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
   }
 });
 
-test('UX C1+C2+C3: categorized help, safe typo guard, persistent privateDraft polish & externalAckInSelf', async () => {
+test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInSelf', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-ux-polish-'));
   try {
-    // 1. Typo suggestion unit checks: catches real typos, NEVER triggers on normal English prompts
-    assert.equal(suggestClosestCommand('summry 研发群')?.fullSuggestion, 'summary 研发群');
-    assert.equal(suggestClosestCommand('statu')?.suggestion, 'status');
-    assert.equal(suggestClosestCommand('compcat')?.suggestion, 'compact');
-    assert.equal(suggestClosestCommand('hello'), null);
-    assert.equal(suggestClosestCommand('check logs'), null);
-    assert.equal(suggestClosestCommand('fix 502 error'), null);
-    assert.equal(suggestClosestCommand('test'), null);
-
-    // Categorized help checks
     const fakeBridge = { trigger: '@bot', followUpWindowMs: 120_000 };
-    assert.match(buildHelpText(fakeBridge), /发送 `@bot help 群聊 \| 定时 \| 会话 \| 模型 \| 全部`/);
-    assert.match(buildHelpText(fakeBridge, '群聊'), /群聊与跨群能力/);
-    assert.doesNotMatch(buildHelpText(fakeBridge, '群聊'), /Bot 协同、模型与控制/);
-    assert.match(buildHelpText(fakeBridge, '全部'), /群聊与跨群能力[\s\S]*定时纪要与巡检[\s\S]*多会话与连续对话[\s\S]*Bot 协同/);
+    const help = buildHelpText(fakeBridge);
+    assert.match(help, /chats[\s\S]*summary[\s\S]*new[\s\S]*tasks[\s\S]*compact/);
+    assert.doesNotMatch(help, /schedule|routines|@bot model|export|style cobot/);
 
-    // 2. Live bridge flow: externalAckInSelf + typo guard + persistent privateDraft polish + sendback
+    // 2. Live bridge flow: externalAckInSelf + persistent privateDraft polish + sendback
     let replySeq = 0;
     const threadMsgs = new Map();
     const tr1 = makeTransport();
@@ -459,11 +413,6 @@ test('UX C1+C2+C3: categorized help, safe typo guard, persistent privateDraft po
       chats: { externalAckInSelf: true },
     });
     await b1.start();
-
-    // Typo `@bot summry 研发群` 被就地纠正，不会发送给 OpenMausBot
-    await tr1.push({ id: 'ux_typo', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot summry 研发群' });
-    assert.equal(mc.sentPrompts.length, 0);
-    assert.match(tr1.sent.at(-1).text, /@bot summary 研发群/);
 
     // Normal English `@bot hello` 透传到 OpenMausBot，不被误拦截
     await tr1.push({ id: 'ux_hi', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot hello' });

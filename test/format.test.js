@@ -309,7 +309,6 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
   assert.equal(cfg.chats.recentAttachmentWindowMs, 120_000);
   assert.equal(cfg.chats.maxAutoAttachments, 4);
   assert.equal(cfg.chats.autoCompactThreshold, 0.92);
-  assert.deepEqual(cfg.chats.scheduledSummaries, []);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   assert.match(clipSummary('GET /api/im-context/messages?token=ctx_eyJjaGF0IjoiZ3JwXzEifQ.abc123def456'), /\[REDACTED\]/);
