@@ -349,6 +349,7 @@ export interface PrivateDraft {
   replyToImMsgId: string | null;
   rawText: string;
   addBotPrefix: boolean;
+  forceBotPrefix?: boolean;
   delegationRe?: string;
   createdAt: number;
 }
@@ -356,6 +357,7 @@ export interface PrivateDraft {
 export interface PendingSendBack {
   draft: PrivateDraft;
   text: string;
+  useBotPrefix?: boolean;
   expiresAt: number;
 }
 

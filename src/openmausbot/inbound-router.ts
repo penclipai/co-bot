@@ -414,10 +414,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     return;
   }
 
-  // 先将所有成员与本人的合法入站消息写入内存环形上下文，供引用与多轮对话理解使用
-  bridge.recordInboundToContext(ev);
-
   const delegation = parseDelegationTag(rawText);
+
+  // 将非 C2C 协议的入站消息写入内存环形上下文，供引用与多轮对话理解使用
+  if (!delegation) bridge.recordInboundToContext(ev);
 
   // 安全门槛：非本人账号的消息先经 2 档白名单/C2C 协议评估（非白名单静默忽略）
   if (!isSelfSender) {
@@ -771,7 +771,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
 
   if (isSelfChat && bridge.isStickyActive() && bridge.focus && !NOTE_PREFIX_RE.test(rawText)) {
     if (BYE_RE.test(rawText)) {
-      bridge.lastBotReplyAt = 0;
+      bridge.clearSticky();
       return bridge.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');
     }
     const bodyText = rawText;

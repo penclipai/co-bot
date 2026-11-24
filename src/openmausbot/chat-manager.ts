@@ -200,21 +200,27 @@ export async function requestSendBack(
   overrideText = '',
 ): Promise<string | null> {
   if (!draft?.originChatId) return null;
+  const hasOverride = Boolean(String(overrideText ?? '').trim());
   const text = String(overrideText || draft.rawText || '').trim();
   if (!text) return null;
+  const useBotPrefix = Boolean(!draft.delegationRe && (draft.forceBotPrefix || (!hasOverride && draft.addBotPrefix)));
   bridge.clearPickers();
   bridge.pendingSendBack = {
     draft,
     text,
+    useBotPrefix,
     expiresAt: bridge.now() + 2 * 60_000,
   };
   const safePreview = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
   });
-  const quoteHint = draft.replyToImMsgId ? `（将引用原消息 \`${draft.replyToImMsgId}\`）` : '';
+  const quoteHint = draft.replyToImMsgId ? `，将引用原消息 \`${draft.replyToImMsgId}\`` : '';
+  const attrLabel = draft.delegationRe
+    ? '协作结果回传，带 🤖 协议标识'
+    : (useBotPrefix ? `以 🤖 **[${bridge.botName}]** 名义` : '以本人名义直接发出');
   return bridge.say(
-    `📤 **确认发回到「${draft.originChatName || draft.originChatId}」**${quoteHint}\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
+    `📤 **确认发回到「${draft.originChatName || draft.originChatId}」**（${attrLabel}${quoteHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
     null,
     null,
     [
@@ -232,14 +238,15 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     return null;
   }
   bridge.pendingSendBack = null;
-  const { draft, text } = pending;
+  const { draft, text, useBotPrefix } = pending;
+  const applyBotPrefix = useBotPrefix ?? Boolean(draft.addBotPrefix);
   let safeBody = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
   });
   if (draft.delegationRe) {
     safeBody = formatDelegationResponse({ re: draft.delegationRe, text: safeBody });
-  } else if (draft.addBotPrefix) {
+  } else if (applyBotPrefix) {
     const extPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
     if (extPrefix) {
       safeBody = extPrefix.trim() === '🤖'
@@ -258,7 +265,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     replyTo: draft.replyToImMsgId ?? undefined,
     senderId: 'me',
     senderName: '我',
-    isBotReply: Boolean(draft.delegationRe || draft.addBotPrefix),
+    isBotReply: Boolean(draft.delegationRe || applyBotPrefix),
   });
   if (draft.delegationRe) {
     bridge.emitTelemetry('delegation_res', {

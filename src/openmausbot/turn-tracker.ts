@@ -62,6 +62,7 @@ export interface TurnTrackerDeps {
     proactive?: boolean;
     isGroup?: boolean;
     speakerName?: string;
+    turnStartedAt?: number;
     chatCtx?: CompactChatContext | BridgeChatContext | null;
   }) => Promise<void>;
   emitCard: (
@@ -221,6 +222,7 @@ export function createTurnTracker(
         proactive: false,
         isGroup,
         speakerName: b.speakerName,
+        turnStartedAt: startedAt,
         chatCtx,
       })).catch(() => {});
     }
@@ -497,6 +499,7 @@ export function createTurnTracker(
               proactive: false,
               isGroup,
               speakerName: isGroup ? (terminalGoal.from?.name || '') : '',
+              turnStartedAt: startedAt,
               chatCtx,
             });
             await maybeWarnHighContext(botId, threadId, chatCtx);
@@ -504,7 +507,7 @@ export function createTurnTracker(
           }
         }
         if (deliveredIntermediateIds.size > 0) {
-          if (!isExternal) bridge.lastBotReplyAt = bridge.now();
+          if (!isExternal && startedAt >= bridge.lastByeAt) bridge.lastBotReplyAt = bridge.now();
           bridge.saveState();
           await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
           if (!isGroup) await maybeWarnHighContext(botId, threadId, chatCtx);
@@ -568,6 +571,7 @@ export function createTurnTracker(
             proactive: false,
             isGroup: true,
             speakerName: b.speakerName,
+            turnStartedAt: startedAt,
             chatCtx,
           });
         }
@@ -584,6 +588,7 @@ export function createTurnTracker(
         finalMsg: undeliveredTexts.at(-1) ?? texts.at(-1),
         mediaMessages: matched,
         proactive: false,
+        turnStartedAt: startedAt,
         chatCtx,
       });
       await maybeWarnHighContext(botId, threadId, chatCtx);
@@ -708,6 +713,7 @@ export function createTurnTracker(
             proactive: false,
             isGroup: true,
             speakerName,
+            turnStartedAt: startedAt,
             chatCtx,
           })).catch(() => {});
           return;

@@ -211,6 +211,7 @@ export interface ChannelAction {
 export interface ChannelSendOptions {
   replyTo?: string;
   actions?: ChannelAction[];
+  senderName?: string;
   [key: string]: unknown;
 }
 

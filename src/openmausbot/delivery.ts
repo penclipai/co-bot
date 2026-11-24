@@ -339,6 +339,7 @@ export async function deliverBotReply(
     proactive = false,
     isGroup = false,
     speakerName = '',
+    turnStartedAt,
     chatCtx = null,
   }: {
     botId: string;
@@ -350,6 +351,7 @@ export async function deliverBotReply(
     proactive?: boolean;
     isGroup?: boolean;
     speakerName?: string;
+    turnStartedAt?: number;
     chatCtx?: CompactChatContext | BridgeChatContext | null;
   },
 ): Promise<void> {
@@ -370,7 +372,8 @@ export async function deliverBotReply(
         originName,
         originChatType: chatCtx.chatType || 'group',
         replyToImMsgId: chatCtx.originQuoteId ?? null,
-        addBotPrefix: Boolean(chatCtx?.collaborator || chatCtx?.draftFirst),
+        addBotPrefix: true,
+        forceBotPrefix: Boolean(chatCtx?.collaborator || chatCtx?.draftFirst),
         delegationRe: chatCtx?.delegationReq?.id || null,
       }
     : (isPolishDraft && chatCtx?.polishDraft
@@ -415,12 +418,9 @@ export async function deliverBotReply(
   if (isDirectDelegationRes && chatCtx?.delegationReq?.id) {
     const tagged = formatDelegationResponse({ re: chatCtx.delegationReq.id, text: safeBody });
     const tagIdx = tagged.lastIndexOf('\n[cobot:res ');
-    if (tagIdx >= 0) {
-      bodyCore = tagged.slice(0, tagIdx);
-      delegationTagSuffix = tagged.slice(tagIdx);
-    } else {
-      bodyCore = tagged;
-    }
+    const rawCore = tagIdx >= 0 ? tagged.slice(0, tagIdx) : tagged;
+    bodyCore = badge ? rawCore.replace(/^🤖\s*/u, '') : rawCore;
+    if (tagIdx >= 0) delegationTagSuffix = tagged.slice(tagIdx);
   } else if (isDirectExternalReply && !useDefaultExtBadge && customExtPrefix) {
     bodyCore = formatExternalBotPrefix(bodyCore, customExtPrefix);
   }
@@ -560,6 +560,7 @@ export async function deliverBotReply(
       replyToImMsgId: draftMeta.replyToImMsgId,
       rawText: text,
       addBotPrefix: draftMeta.addBotPrefix,
+      ...('forceBotPrefix' in draftMeta && draftMeta.forceBotPrefix ? { forceBotPrefix: true } : {}),
       ...(draftMeta.delegationRe ? { delegationRe: draftMeta.delegationRe } : {}),
       createdAt: bridge.now(),
     };
@@ -586,7 +587,7 @@ export async function deliverBotReply(
     summary: safeTextSummary,
   });
 
-  if (!proactive && !isExternal) {
+  if (!proactive && !isExternal && (turnStartedAt === undefined || turnStartedAt >= bridge.lastByeAt)) {
     bridge.lastBotReplyAt = bridge.now();
     bridge.focus = { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}) };
   }

@@ -289,9 +289,11 @@ export class WebSimTransport {
     });
 
     web.route('POST', '/upload', ({ body }) => {
-      const rawBase = path.posix.basename(String(body.name ?? '').replace(/\\/g, '/').trim());
-      if (!rawBase || rawBase === '.' || rawBase === '..') throw new Error('非法文件名');
-      const name = safeAttachmentName(rawBase, 'file');
+      const rawInput = String(body.name ?? '').trim();
+      if (!rawInput || rawInput === '.' || rawInput === '..' || /[\\/]/.test(rawInput)) {
+        throw new Error('非法文件名');
+      }
+      const name = safeAttachmentName(rawInput, 'file');
       const rawB64 = String(body.data ?? '')
         .replace(/^data:[^;]*;base64,/i, '')
         .replace(/\s+/g, '')
@@ -374,7 +376,7 @@ export class WebSimTransport {
     });
   }
 
-  async send(chatId: string, text: string, { replyTo, actions }: ChannelSendOptions = {}): Promise<string> {
+  async send(chatId: string, text: string, { replyTo, actions, senderName }: ChannelSendOptions = {}): Promise<string> {
     const chat = chatMetaOf(chatId);
     const msg: SimHistoryItem = {
       id: `${this.boot}b${++this.n}`,
@@ -383,7 +385,7 @@ export class WebSimTransport {
       chatName: chat.name,
       from: 'bot',
       senderId: 'bot',
-      senderName: this.botName,
+      senderName: String(senderName || this.botName),
       isSelf: true,
       text,
       ts: Date.now(),

@@ -6,6 +6,7 @@ import type { ParsedDelegationTag, PendingOutboundDelegation } from './types.ts'
 import { trimMapCap } from './mentions.ts';
 
 const TAG_LINE_RE = /^\[cobot:(req|res)\s+([^\]]+)\]$/i;
+const INLINE_START_TAG_RE = /^\[cobot:(req|res)\s+([^\]]+)\](?:\s+([\s\S]*)|\s*)$/i;
 const VALID_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SAFE_VAL_RE = /[\s\]]+/g;
 
@@ -44,21 +45,27 @@ export function formatDelegationResponse({ re, text = '' }: { re?: string; text?
   return `${headerBody}\n${tag}`;
 }
 
-/** 仅解析消息末尾独立一行的 `[cobot:req ...]` / `[cobot:res ...]` 元数据标签。 */
+/** 解析句末独立行或句首的 `[cobot:req ...]` / `[cobot:res ...]` 元数据标签（忽略正文内引用的反引号提及）。 */
 export function parseDelegationTag(text: unknown): ParsedDelegationTag | null {
-  const s = String(text ?? '');
-  if (!s.trim()) return null;
+  const s = String(text ?? '').trim();
+  if (!s) return null;
+
   const lines = s.split(/\r?\n/);
   let lastIdx = lines.length - 1;
   while (lastIdx >= 0 && !lines[lastIdx].trim()) lastIdx -= 1;
-  if (lastIdx < 0) return null;
+  const tailMatch = lastIdx >= 0 ? lines[lastIdx].trim().match(TAG_LINE_RE) : null;
+  const startMatch = tailMatch ? null : s.match(INLINE_START_TAG_RE);
+  const tagMatch = tailMatch || startMatch;
+  if (!tagMatch) return null;
 
-  const m = lines[lastIdx].trim().match(TAG_LINE_RE);
-  if (!m) return null;
+  const kind = tagMatch[1].toLowerCase();
+  const attrStr = tagMatch[2];
+  const rawBody = tailMatch
+    ? lines.slice(0, lastIdx).join('\n').trim()
+    : String(tagMatch[3] ?? '').trim();
 
-  const kind = m[1].toLowerCase();
   const attrs: Record<string, string> = {};
-  for (const tok of m[2].trim().split(/\s+/)) {
+  for (const tok of attrStr.trim().split(/\s+/)) {
     const eq = tok.indexOf('=');
     if (eq <= 0) continue;
     const k = tok.slice(0, eq).toLowerCase();
@@ -66,7 +73,6 @@ export function parseDelegationTag(text: unknown): ParsedDelegationTag | null {
     if (k && v) attrs[k] = v;
   }
 
-  const rawBody = lines.slice(0, lastIdx).join('\n').trim();
   const body = rawBody
     .replace(/^🤖\s*(?:协作请求|协作答复)[:：\s]*/u, '')
     .trim();

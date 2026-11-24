@@ -78,7 +78,7 @@ export async function replyContextUsage(
   const summary = formatContextSummary(task);
   if (!summary) {
     await sensSink.say(
-      `📊 **${title}**${emptyHint}`,
+      `📊 **${title}** ${emptyHint}`,
       null,
       null,
       isExternal && compactCmd ? ([{ label: compactLabel, text: compactCmd }] as unknown as ChannelAction[]) : null,
@@ -86,7 +86,7 @@ export async function replyContextUsage(
     return;
   }
   await sensSink.say(
-    `📊 **${title}**上下文：${summary.line}`,
+    `📊 **${title}** 上下文：${summary.line}`,
     { botId: bot.id, botName: bot.name, threadId },
     null,
     [{ label: compactLabel, text: compactCmd, ...(summary.pct >= 80 ? { kind: 'primary' } : {}) }] as unknown as ChannelAction[],

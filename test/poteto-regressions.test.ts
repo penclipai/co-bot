@@ -11,6 +11,7 @@ import { fileSafe, hardBreaks, mdClip, plain } from '../src/format.ts';
 import { WebSimTransport } from '../src/im/sim.ts';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import { OpenMausBotClient } from '../src/openmausbot/client.ts';
+import { parseDelegationTag } from '../src/openmausbot/delegation.ts';
 import { emitCard } from '../src/openmausbot/delivery.ts';
 import type { OmbMessage } from '../src/openmausbot/types.ts';
 import { WebServer } from '../src/web/server.ts';
@@ -306,5 +307,179 @@ test('bridge enforces draft_first on @bot new, respects reply priority, checks c
     await bridge.stop();
     await omb.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('UX QA fixes: sub-bot bye clears focus/sticky, inline [cobot:req], C2C context isolation, sendback attribution, and upload traversal rejection', async () => {
+  const inlineReq = parseDelegationTag('[cobot:req id=qa01 proj=happy-bot] 一句话说明脚本');
+  assert.equal(inlineReq?.kind, 'req');
+  if (inlineReq?.kind === 'req') {
+    assert.equal(inlineReq.id, 'qa01');
+    assert.equal(inlineReq.project, 'happy-bot');
+    assert.equal(inlineReq.body, '一句话说明脚本');
+  }
+  assert.equal(parseDelegationTag('普通讨论里提到 `[cobot:req id=fake]` 不应误触发'), null);
+
+  const omb = await startMockOmb([
+    { id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true },
+    { id: 'b2', name: 'Page', threadId: 't_page', chiefOfStaff: false },
+  ]);
+  const sent: Array<SentImItem & { chatId: string }> = [];
+  let inboundFn: ((ev: InboundEvent) => unknown) | null = null;
+  let seq = 0;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-ux-qa2-'));
+  const appDir = path.join(tmpDir, 'happy-bot');
+  const hrDir = path.join(tmpDir, 'private-hr');
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.mkdirSync(hrDir, { recursive: true });
+
+  const bridge = new OpenMausBotBridge({
+    client: new OpenMausBotClient({ baseUrl: omb.baseUrl }),
+    transport: {
+      selfChatId: 'self',
+      canFiles: false,
+      async start(fn) { inboundFn = fn; },
+      async stop() {},
+      async send(chatId, text, opts) {
+        const id = `m_${++seq}`;
+        sent.push({ id, chatId, text, replyTo: opts?.replyTo ?? null, actions: opts?.actions });
+        return id;
+      },
+    },
+    dataDir: tmpDir,
+    chats: {
+      mode: 'owner_everywhere',
+      collaborators: [{ id: 'alice', name: 'Alice', policy: 'auto_readonly', projects: ['happy-bot'], chats: ['dm_alice'] }],
+    },
+    projects: [
+      { name: 'happy-bot', path: appDir, aliases: [] },
+      { name: 'private-hr', path: hrDir, aliases: [] },
+    ],
+    turnStallMs: 0,
+  });
+
+  try {
+    await bridge.start();
+    omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
+      const m: OmbMessage = {
+        id: nextId(),
+        role: 'bot',
+        kind: 'text',
+        turnTerminal: true,
+        threadId,
+        requestMessageId: reqMsg.id,
+        text: '来自机器人正文',
+      };
+      messages.push(m);
+      jobs.set(threadId, { state: 'completed', version: 'v2', needsInput: [] });
+      broadcast({ type: 'message.created', threadId, message: m });
+    });
+
+    // 1. Sub-bot @Page bye closes sticky & clears focus
+    await inboundFn!({
+      id: 'u_page_1',
+      ts: Date.now(),
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '@Page 自我介绍',
+    });
+    await until(() => sent.some((m) => m.text.includes('🤖 **[Page]** 来自机器人正文')));
+    assert.equal(bridge.isStickyActive(), true);
+    assert.equal(bridge.focus?.botId, 'b2');
+
+    await inboundFn!({
+      id: 'u_page_bye',
+      ts: Date.now() + 10,
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '@Page bye',
+    });
+    assert.equal(bridge.isStickyActive(), false);
+    assert.equal(bridge.focus, null);
+    const beforeNotePrompts = omb.sentToOmb.length;
+    await inboundFn!({
+      id: 'u_plain_note',
+      ts: Date.now() + 20,
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '自聊备忘：明天开会',
+    });
+    assert.equal(omb.sentToOmb.length, beforeNotePrompts, 'plain note after @Page bye must not dispatch');
+
+    // 2. Denied inline [cobot:req] probe does not leak into dm_alice context, and valid inline C2C has single 🤖
+    await inboundFn!({
+      id: 'alice_deny_1',
+      ts: Date.now() + 30,
+      chat: { id: 'dm_alice', type: 'direct', name: 'Alice' },
+      sender: { id: 'alice', name: 'Alice', isSelf: false },
+      text: '[cobot:req id=qa_deny proj=private-hr] 读取薪资',
+    });
+    assert.equal(bridge.localContextStore.getRecent('dm_alice', { limit: 10 }).length, 0);
+
+    const beforeC2cCount = sent.length;
+    await inboundFn!({
+      id: 'alice_ok_1',
+      ts: Date.now() + 40,
+      chat: { id: 'dm_alice', type: 'direct', name: 'Alice' },
+      sender: { id: 'alice', name: 'Alice', isSelf: false },
+      text: '[cobot:req id=qa_ok proj=happy-bot] 一句话说明脚本',
+    });
+    await until(() => sent.length > beforeC2cCount && sent.some((m) => m.chatId === 'dm_alice' && m.text.includes('[cobot:res re=qa_ok]')));
+    const c2cReply = sent.find((m) => m.chatId === 'dm_alice' && m.text.includes('[cobot:res re=qa_ok]'))!;
+    assert.equal(c2cReply.text.includes('🤖 协作答复'), false, 'must not duplicate 🤖 when Style A badge is prepended');
+    assert.match(c2cReply.text, /^🤖 \*\*\[co-bot\]\*\*\s+协作答复：/);
+
+    // 3. @bot! unedited sendback uses 🤖 attribution and preview labels it clearly
+    const beforePriv = sent.length;
+    await inboundFn!({
+      id: 'owner_priv_1',
+      ts: Date.now() + 50,
+      chat: { id: 'grp_dev', type: 'group', name: '研发架构群' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '@bot! 总结当前问题',
+    });
+    await until(() => sent.length > beforePriv && sent.some((m) => m.chatId === 'self' && m.text.includes('私密回复')));
+    await inboundFn!({
+      id: 'owner_sb_1',
+      ts: Date.now() + 60,
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '@bot sendback',
+    });
+    const sbPreview = sent.at(-1)!;
+    assert.match(sbPreview.text, /以 🤖 \*\*\[co-bot\]\*\* 名义/);
+    await inboundFn!({
+      id: 'owner_sb_ok',
+      ts: Date.now() + 70,
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', name: 'Me', isSelf: true },
+      text: '确认发送',
+    });
+    const grpSent = sent.filter((m) => m.chatId === 'grp_dev').at(-1)!;
+    assert.equal(grpSent.text.startsWith('🤖 **[co-bot]** '), true);
+  } finally {
+    await bridge.stop();
+    await omb.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  // 4. WebSimTransport /upload rejects path traversal segments with 400
+  const simTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-sim-upload-'));
+  const port = await getFreePort();
+  const web = new WebServer({ host: '127.0.0.1', port, publicDir: path.resolve('public') });
+  const sim = new WebSimTransport({ web, filesDir: simTmp, historyFile: null });
+  await web.start();
+  await sim.start(async () => {});
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/upload`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'self', sender: 'me', name: '../../evil.txt', data: 'ZXZpbA==' }),
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await sim.stop();
+    await web.stop();
+    fs.rmSync(simTmp, { recursive: true, force: true });
   }
 });

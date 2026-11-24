@@ -162,14 +162,14 @@ async function buildPromptContext(
   bridge: OpenMausBotBridge,
   ev: InboundEvent | null | undefined,
   chatCtx: BridgeChatContext,
-  { skipSelfQuote = false }: { skipSelfQuote?: boolean } = {},
+  { skipSelfQuote = false, injectRecent = bridge.chats.injectRecentContext !== false }: { skipSelfQuote?: boolean; injectRecent?: boolean } = {},
 ) {
   if (!ev?.chat?.id) return { header: '', quotedMsg: null, recentMsgs: [] as ChatContextMessage[], quotedAttachments: [], contextAttachments: [] };
   const common = {
     ev,
     privateReply: Boolean(chatCtx?.privateReply),
     contextWindow: bridge.chats.contextWindow,
-    injectRecent: bridge.chats.injectRecentContext !== false,
+    injectRecent,
     maxQuotedChars: bridge.chats.maxQuotedSnippetChars,
     maxRecentChars: bridge.chats.maxRecentMessageChars,
     skipSelfQuote,
@@ -599,6 +599,7 @@ export async function dispatchToBot(
     ? { header: ctxInfo.preformattedHeader, quotedMsg: null, recentMsgs: [], quotedAttachments: [], contextAttachments: [] }
     : await buildPromptContext(bridge, ctxInfo.ev, ctxInfo, {
         skipSelfQuote: Boolean(!isExternal && replyToOmbId),
+        injectRecent: bridge.chats.injectRecentContext !== false && !ctxInfo.delegationReq,
       });
   const { uploads, transcripts } = await claimUploads(
     bridge,

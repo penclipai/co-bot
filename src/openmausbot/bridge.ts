@@ -152,6 +152,7 @@ export class OpenMausBotBridge {
   groupByThread = new Map<string, OmbTargetBot>();
   chiefBotId: string | null = null;
   lastBotReplyAt = 0;
+  lastByeAt = 0;
   quietQueue: QuietQueueItem[] = [];
   quietTimer: ReturnType<typeof setInterval> | null = null;
   cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -327,6 +328,13 @@ export class OpenMausBotBridge {
       && this.lastBotReplyAt > 0
       && (this.now() - this.lastBotReplyAt) <= this.followUpWindowMs,
     );
+  }
+
+  clearSticky(): void {
+    this.lastBotReplyAt = 0;
+    this.lastByeAt = this.now();
+    this.focus = null;
+    this.saveState();
   }
 
   displayBotName(botId: string | null | undefined, rawName = '', { isGroup = false }: { isGroup?: boolean } = {}): string {

@@ -103,11 +103,15 @@ export async function sendBridgeText(
     : scanAndRedactOutbound(formatted);
   const body = scan.text;
   bridge.rememberEcho(body);
+  const msgRoute = route && 'botId' in route ? route : null;
+  const senderName = msgRoute?.botName
+    ? bridge.displayBotName(msgRoute.botId, msgRoute.botName, { isGroup: Boolean(msgRoute.isGroup) })
+    : '';
   const opts: ChannelSendOptions = {
     ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
     ...(Array.isArray(actions) && actions.length && caps?.actions !== false ? { actions } : {}),
+    ...(senderName ? { senderName } : {}),
   };
-  const msgRoute = route && 'botId' in route ? route : null;
 
   return enqueueOutboundTask(bridge, chatId, async () => {
     if (!extra?.noBuffer && isTransportDisconnected(bridge)) {

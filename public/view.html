@@ -41,7 +41,10 @@
       if (m) document.title = document.getElementById('name').textContent = decodeURIComponent(m[1]);
       return r.ok ? r.text() : Promise.reject(new Error('文件不存在或已过期'));
     }).then((t) => { document.getElementById('out').innerHTML = renderMarkdown(t); })
-      .catch((e) => { document.getElementById('out').textContent = e.message; });
+      .catch((e) => {
+        document.getElementById('raw').hidden = true;
+        document.getElementById('out').textContent = e.message;
+      });
   }
 </script>
 </body>

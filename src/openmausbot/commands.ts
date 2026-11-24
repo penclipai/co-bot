@@ -130,8 +130,8 @@ async function handleStatusCommand(
   const ctxLine = missingExt && extCtx
     ? `📊 **${extCtx.chatName || extCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
     : (ctxSummary
-      ? `📊 **${ctxTitle}**上下文：${ctxSummary.line}`
-      : `📊 **${ctxTitle}**：上下文暂无统计（对话后记录）`);
+      ? `📊 **${ctxTitle}** 上下文：${ctxSummary.line}`
+      : `📊 **${ctxTitle}** 暂无上下文统计（对话后记录）`);
 
   const sections = [headerLine, ctxLine];
   if (visible.length) {
@@ -227,16 +227,6 @@ async function handleDefaultCommand(
     return true;
   }
 
-  if (/^(?:bye|退下)$/.test(low)) {
-    if (isExternal) {
-      await sensSink.say('👋 外部群/私聊仅在 `@bot` 或引用 Bot 回复时触发，不会开启免 `@` 粘性。');
-      return true;
-    }
-    bridge.lastBotReplyAt = 0;
-    await replySink.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');
-    return true;
-  }
-
   if (await runQueueAction(bridge, {
     raw,
     target: targetBot,
@@ -273,7 +263,7 @@ async function handleDefaultCommand(
       await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`@bot\` 将不再触发，发 \`${bridge.trigger} unmute ${target.id}\` 可恢复。`);
     } else {
       bridge.setChatAllowed(target.id);
-      await sensSink.say(`✅ 已允许「${target.name}」（\`${target.id}\`）使用 \`@bot\`。`);
+      await sensSink.say(`✅ 已解除「${target.name}」（\`${target.id}\`）的静音，可正常使用 \`@bot\`。`);
     }
     return true;
   }
@@ -613,6 +603,16 @@ export async function handleCommand(
   const isExternal = Boolean(extCtx);
   const sensSink = makeCommandSink(bridge, chatCtx, { sensitive: true });
   const replySink = makeCommandSink(bridge, chatCtx, { sensitive: false });
+
+  if (/^(?:bye|退下|结束对话|退出对话)$/i.test(raw)) {
+    if (isExternal) {
+      await sensSink.say('👋 外部群/私聊仅在 `@bot` 或引用 Bot 回复时触发，不会开启免 `@` 粘性。');
+      return true;
+    }
+    bridge.clearSticky();
+    await replySink.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');
+    return true;
+  }
 
   if (isDefault && await handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, mid, quotedId, hasAttachments, chatCtx })) return true;
 
