@@ -127,9 +127,26 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
     return;
   }
 
+  const text = String(msg.text ?? '').trim();
+  const hasMedia = Boolean(msg.hasImage || (Array.isArray(msg.attachments) && msg.attachments.length > 0));
+  if (msg.kind === 'text' && !msg.turnTerminal && !text && hasMedia) {
+    rememberBounded(bridge.deliveredOmbIds, msg.id);
+    if (extChat) {
+      bridge.saveState();
+      return;
+    }
+    if (inQuietHours(bridge.now(), bridge.quietHours)) {
+      bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: '（附件通知）', finalMsg: msg });
+      bridge.saveState();
+      return;
+    }
+    bridge.saveState();
+    await forwardBotMedia(bridge, threadId, [msg], { chatId: proChatCtx?.replyChatId || bridge.selfChat });
+    return;
+  }
+
   if (msg.kind === 'text' && msg.turnTerminal) {
-    const text = String(msg.text ?? '').trim();
-    if (!text && !msg.hasImage && !(msg.attachments?.length)) return;
+    if (!text && !hasMedia) return;
     rememberBounded(bridge.deliveredOmbIds, msg.id);
     if (inQuietHours(bridge.now(), bridge.quietHours)) {
       bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: text || '（附件通知）', finalMsg: msg });

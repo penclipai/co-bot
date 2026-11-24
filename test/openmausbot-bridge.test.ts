@@ -478,3 +478,91 @@ test('openmausbot bridge: SSE 401 sets sseAuthFailed without tight loop, and upl
     await omb.close();
   }
 });
+
+test('openmausbot bridge: forwards standalone agents_attach_file messages (sentInTurn without requestMessageId) and proactive attachments', async () => {
+  const omb = await startMockOmb([
+    { id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true },
+  ]);
+  const sent: SentImItem[] = [];
+  const filesSent: SentImFileItem[] = [];
+  const transport = makeIm(sent, filesSent);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-bridge-sentinturn-'));
+  const bridge = new OpenMausBotBridge({ client: new OpenMausBotClient({ baseUrl: omb.baseUrl }), transport, dataDir });
+
+  const zipBytes = Buffer.from('504b0304140000000000', 'hex');
+  const attPath = 'C:\\Users\\chenj\\.openmausbot\\attachments\\test-archive.zip';
+
+  omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
+    const turnId = 'turn_zip_1';
+    const midMsg = {
+      id: nextId(),
+      role: 'bot',
+      kind: 'text',
+      threadId,
+      turnId,
+      requestMessageId: reqMsg.id,
+      text: '正在打包测试文件。',
+    };
+    messages.push(midMsg);
+    broadcast({ kind: 'message', threadId, message: midMsg });
+
+    setTimeout(() => {
+      const attMsgId = nextId();
+      omb.setMedia(attMsgId, attPath, { buf: zipBytes, mime: 'application/zip', name: 'test-archive.zip' });
+      const attMsg = {
+        id: attMsgId,
+        role: 'bot',
+        kind: 'text',
+        threadId,
+        text: '',
+        attachments: [{ kind: 'file', path: attPath, mime: 'application/zip', name: 'test-archive.zip' }],
+        sentInTurn: turnId,
+      };
+      const finMsg = {
+        id: nextId(),
+        role: 'bot',
+        kind: 'text',
+        threadId,
+        turnId,
+        requestMessageId: reqMsg.id,
+        text: 'zip 包发好了，叫 test-archive.zip。',
+        turnTerminal: true,
+      };
+      messages.push(attMsg, finMsg);
+      jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+      broadcast({ kind: 'message', threadId, message: attMsg });
+      broadcast({ kind: 'message', threadId, message: finMsg });
+    }, 20);
+  });
+
+  try {
+    await bridge.start();
+    await transport.emitUser('@bot 测试一下给我发一个zip文件');
+    await until(() => sent.some((m) => m.text.includes('zip 包发好了')) && filesSent.length === 1);
+    assert.equal(filesSent[0].name, 'test-archive.zip');
+    assert.equal(filesSent[0].buf.equals(zipBytes), true);
+
+    const proPath = 'C:\\tmp\\proactive-report.zip';
+    omb.setMedia('pro_att_1', proPath, { buf: zipBytes, mime: 'application/zip', name: 'proactive-report.zip' });
+    omb.broadcast({
+      kind: 'message',
+      threadId: 't1',
+      message: {
+        id: 'pro_att_1',
+        role: 'bot',
+        kind: 'text',
+        threadId: 't1',
+        text: '',
+        attachments: [{ kind: 'file', path: proPath, mime: 'application/zip', name: 'proactive-report.zip' }],
+        sentInTurn: 'pro_turn_1',
+      },
+    });
+    await until(() => filesSent.length === 2);
+    assert.equal(filesSent[1].name, 'proactive-report.zip');
+    assert.equal(filesSent[1].buf.equals(zipBytes), true);
+  } finally {
+    await bridge.stop();
+    await omb.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

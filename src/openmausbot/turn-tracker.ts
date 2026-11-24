@@ -15,6 +15,42 @@ import type {
 
 const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
 
+/** 收集属于本轮次的全部 Bot 消息（包含缺少 requestMessageId 但通过 sentInTurn / 位置窗口关联的独立附件消息）。 */
+function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, sendId: string | null): OmbMessage[] {
+  const uIdx = messages.findLastIndex(
+    (m) => m.role === 'user' && Boolean((reqMsgId && m.id === reqMsgId) || (sendId && m.sendId === sendId)),
+  );
+  let endIdx = messages.length;
+  if (uIdx >= 0) {
+    const nextUserIdx = messages.findIndex((m, idx) => idx > uIdx && m.role === 'user');
+    if (nextUserIdx >= 0) endIdx = nextUserIdx;
+  }
+  const windowBots = uIdx >= 0 ? messages.slice(uIdx + 1, endIdx).filter((m) => m.role === 'bot') : [];
+  const direct = reqMsgId ? messages.filter((m) => m.role === 'bot' && m.requestMessageId === reqMsgId) : [];
+  if (!direct.length) return windowBots;
+
+  const turnIds = new Set<string>();
+  for (const m of direct) {
+    if (m.turnId) turnIds.add(String(m.turnId));
+    if (m.sentInTurn) turnIds.add(String(m.sentInTurn));
+  }
+  const seen = new Set<OmbMessage>(direct);
+  for (const m of messages) {
+    if (m.role !== 'bot' || seen.has(m)) continue;
+    if (m.requestMessageId && reqMsgId && m.requestMessageId !== reqMsgId) continue;
+    if ((m.sentInTurn && turnIds.has(String(m.sentInTurn))) || (m.turnId && turnIds.has(String(m.turnId)))) {
+      seen.add(m);
+    }
+  }
+  for (const m of windowBots) {
+    if (seen.has(m) || m.requestMessageId) continue;
+    if (m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)) {
+      seen.add(m);
+    }
+  }
+  return messages.filter((m) => seen.has(m));
+}
+
 export interface TurnTrackerDeps {
   deliverBotReply: (args: {
     botId: string;
@@ -367,13 +403,7 @@ export function createTurnTracker(
 
       if (settled || stoppedByUser) return;
 
-      let matched = reqMsgId
-        ? messages.filter((m) => m.role === 'bot' && m.requestMessageId === reqMsgId)
-        : [];
-      if (!matched.length) {
-        const uIdx = messages.findLastIndex((m) => m.role === 'user' && (m.id === reqMsgId || m.sendId === sendId));
-        if (uIdx >= 0) matched = messages.slice(uIdx + 1).filter((m) => m.role === 'bot');
-      }
+      const matched = collectTurnMessages(messages, reqMsgId, sendId);
 
       const pendingMsg = matched.find((m) => messageNeedsInput(m));
       const earlyTexts = matched.filter((m) => m.kind === 'text');

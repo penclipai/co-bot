@@ -110,10 +110,13 @@ export interface OmbCard {
 }
 
 export interface OmbCardAttachment {
+  kind?: string;
+  mime?: string;
   path?: string;
   href?: string;
   url?: string;
   name?: string;
+  source?: string;
 }
 
 export interface OmbMessage {
@@ -122,6 +125,8 @@ export interface OmbMessage {
   kind?: string;
   threadId?: string;
   requestMessageId?: string;
+  turnId?: string;
+  sentInTurn?: string;
   sendId?: string;
   queueId?: string;
   text?: string;

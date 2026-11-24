@@ -59,7 +59,8 @@ interface SimHistoryItem {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIME: Record<string, string> = {
   '.md': 'text/markdown', '.html': 'text/html', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.pdf': 'application/pdf', '.zip': 'application/zip', '.csv': 'text/csv', '.gz': 'application/gzip', '.tar': 'application/x-tar',
 };
 const mimeOf = (name: string): string => MIME[path.extname(name).toLowerCase()] ?? 'application/octet-stream';
 const DEVICES: Record<string, InboundDevice> = {

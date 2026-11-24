@@ -217,7 +217,11 @@ export async function forwardBotMedia(
           fs.writeFileSync(dest, buf);
           await sendOutboundFile(bridge, dest, name, outOpts);
           forwarded += 1;
-        } catch { /* 图片回传失败不阻断正文 */ }
+        } catch (e) {
+          const reason = formatOmbError(e);
+          console.warn('[omb-media] 图片回传失败:', nameOrId(msg), reason);
+          bridge.emitTelemetry('media_failed', { chatId: chatId || bridge.selfChat || null, summary: `image ${msg.id}: ${reason}` });
+        }
       }
     }
     if (!canFiles) continue;
@@ -235,10 +239,18 @@ export async function forwardBotMedia(
         fs.writeFileSync(dest, res.buf);
         await sendOutboundFile(bridge, dest, safe, outOpts);
         forwarded += 1;
-      } catch { /* 附件回传失败不阻断正文 */ }
+      } catch (e) {
+        const reason = formatOmbError(e);
+        console.warn('[omb-media] 附件回传失败:', att.name || attPath, reason);
+        bridge.emitTelemetry('media_failed', { chatId: chatId || bridge.selfChat || null, summary: `file ${att.name || attPath}: ${reason}` });
+      }
     }
   }
   return forwarded;
+}
+
+function nameOrId(msg: OmbMessage): string {
+  return String(msg.id || 'unknown');
 }
 
 /** 投递审批、选项/提问或阻塞类卡片至控制会话并记录 pendingCards。 */
