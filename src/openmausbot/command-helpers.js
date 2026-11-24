@@ -49,10 +49,10 @@ export async function replyContextUsage(sensSink, { title, bot, threadId, task, 
   );
 }
 
-/** 返回应指向指定 Bot 的命令前缀（非主 Bot 用 `@<Bot名>`，主 Bot 用触发词）。 */
-export function botCommandTarget(bridge, botId, botName) {
-  if (botId && bridge.chiefBotId && botId !== bridge.chiefBotId && botName) {
-    return `@${showBotName(bridge, botId, botName)}`;
+/** 返回应指向指定 Bot 或群组的命令前缀（非主 Bot / 群组用 `@<名称>`，主 Bot 用触发词）。 */
+export function botCommandTarget(bridge, botId, botName, { isGroup = false } = {}) {
+  if (botName && (isGroup || (botId && bridge.chiefBotId && botId !== bridge.chiefBotId))) {
+    return `@${showBotName(bridge, botId, botName, isGroup)}`;
   }
   return bridge.trigger;
 }

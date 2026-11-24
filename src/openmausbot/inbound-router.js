@@ -625,7 +625,7 @@ export async function handleInboundEvent(bridge, ev) {
       }
     }
     if (!isSelfChat && privateReply && !bridge.selfChat) {
-      console.warn('[omb-bridge] 收到私密回复指令（@bot! / -p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 ipc.selfChatId');
+      console.warn('[omb-bridge] 收到私密回复指令（@bot! / -p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 channel.options.selfChatId');
       return;
     }
 
@@ -692,7 +692,7 @@ export async function handleInboundEvent(bridge, ev) {
     const isDraftFirst = Boolean(!isSelfChat && !privateReply && bridge.chats.externalReplyMode === 'draft_first' && bridge.selfChat);
     if (isDraftFirst) privateReply = true;
     if (!isSelfChat && privateReply && !bridge.selfChat) {
-      console.warn('[omb-bridge] 收到私密回复指令（-p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 ipc.selfChatId');
+      console.warn('[omb-bridge] 收到私密回复指令（-p），但尚未获知 selfChatId；请先在自聊发一条消息或配置 channel.options.selfChatId');
       return;
     }
     targetBot = {

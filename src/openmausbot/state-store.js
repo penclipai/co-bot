@@ -117,7 +117,7 @@ export function loadBridgeState(bridge) {
   } catch { /* 状态恢复兼容降级 */ }
 }
 
-export function writeBridgeStateNow(bridge) {
+function writeBridgeStateNow(bridge) {
   clearTimeout(bridge.stateSaveTimer);
   bridge.stateSaveTimer = null;
   if (!bridge.stateFile) return;

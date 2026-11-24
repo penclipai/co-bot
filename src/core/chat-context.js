@@ -294,54 +294,6 @@ export class ChatContextStore {
     return slice.reverse();
   }
 
-  search(chatId, query, { limit = 10 } = {}) {
-    if (!chatId) return [];
-    const q = String(query ?? '').trim().toLowerCase();
-    if (!q) return [];
-    this.#pruneExpired();
-    const bucket = this.chats.get(String(chatId));
-    if (!bucket) return [];
-    const max = Math.max(1, Math.min(50, Number(limit) || 10));
-    const hits = [];
-    for (let i = bucket.order.length - 1; i >= 0 && hits.length < max; i -= 1) {
-      const item = bucket.byId.get(bucket.order[i]);
-      if (!item) continue;
-      const hay = [
-        item.text,
-        item.senderName,
-        ...(item.attachments || []).map((a) => a.name),
-      ].filter(Boolean).join('\n').toLowerCase();
-      if (hay.includes(q)) hits.push(item);
-    }
-    return hits;
-  }
-
-  searchAll(query, { limit = 15, chatId = null, excludeSelf = true } = {}) {
-    const tokens = String(query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (!tokens.length) return [];
-    this.#pruneExpired();
-    const max = Math.max(1, Math.min(50, Number(limit) || 15));
-    const hits = [];
-    const targetBuckets = chatId
-      ? [this.chats.get(String(chatId))].filter(Boolean)
-      : [...this.chats.values()];
-    for (const bucket of targetBuckets) {
-      if (!chatId && excludeSelf && bucket.meta.type === 'self') continue;
-      for (let i = bucket.order.length - 1; i >= 0; i -= 1) {
-        const item = bucket.byId.get(bucket.order[i]);
-        if (!item) continue;
-        const hay = [
-          item.text,
-          item.senderName,
-          item.chatName,
-          ...(item.attachments || []).map((a) => a.name),
-        ].filter(Boolean).join('\n').toLowerCase();
-        if (tokens.every((t) => hay.includes(t))) hits.push(item);
-      }
-    }
-    return hits.sort((a, b) => b.ts - a.ts).slice(0, max);
-  }
-
   getChatMeta(chatId) {
     if (!chatId) return null;
     this.#pruneExpired();

@@ -16,16 +16,9 @@ export const defaults = {
     cliComputerOff: true,
     syncChiefIdentity: true,
   },
-  transport: 'sim', // 'sim'（网页自聊模拟器）| 'ipc'（真机 IM IPC 自聊）
   channel: {
-    use: '', // 可选通道插件（'sim' | 'ipc' | './im-plugin.js' | npm 包名）
+    use: 'sim', // 通道插件（'sim' | './im-plugin.js' | npm 包名）
     options: {},
-  },
-  ipc: {
-    client: '',
-    selfId: '',
-    selfChatId: '',
-    atAllCountsAsMention: false,
   },
   web: {
     host: '127.0.0.1',
@@ -69,6 +62,7 @@ export const defaults = {
     triggerAliases: [],
     contextWindow: 15,
     contextMaxMessagesPerChat: 120,
+    contextMaxChats: 200,
     contextTtlMs: 24 * 60 * 60_000,
     injectRecentContext: true,
     isolateThreadsByChat: true,
@@ -132,11 +126,10 @@ export function validateConfig(rawConfig = {}) {
     return { ok: false, errors: ['配置根节点必须是 JSON 对象'], warnings };
   }
 
-  checkUnknownKeys(rawConfig, { ...defaults, sim: defaults.web }, '', warnings);
+  checkUnknownKeys(rawConfig, defaults, '', warnings);
   checkUnknownKeys(rawConfig.openmausbot, defaults.openmausbot, 'openmausbot', warnings);
   checkUnknownKeys(rawConfig.channel, defaults.channel, 'channel', warnings);
-  checkUnknownKeys(rawConfig.ipc, defaults.ipc, 'ipc', warnings);
-  checkUnknownKeys(rawConfig.web ?? rawConfig.sim, defaults.web, 'web', warnings);
+  checkUnknownKeys(rawConfig.web, defaults.web, 'web', warnings);
   checkUnknownKeys(rawConfig.selfChat, defaults.selfChat, 'selfChat', warnings);
   checkUnknownKeys(rawConfig.selfChat?.quietHours, defaults.selfChat.quietHours, 'selfChat.quietHours', warnings);
   checkUnknownKeys(rawConfig.chats, defaults.chats, 'chats', warnings);
@@ -162,7 +155,7 @@ export function validateConfig(rawConfig = {}) {
     }
   }
 
-  const webPort = (rawConfig.web ?? rawConfig.sim)?.port;
+  const webPort = rawConfig.web?.port;
   if (webPort !== undefined) {
     const p = Number(webPort);
     if (!Number.isInteger(p) || p < 0 || p > 65535) {
@@ -248,7 +241,7 @@ export function validateConfig(rawConfig = {}) {
   return { ok: errors.length === 0, errors, warnings };
 }
 
-/** 读入 config.json 与命令行覆盖项（--config、--port、--omb、--omb-token、--transport、--channel）。 */
+/** 读入 config.json 与命令行覆盖项（--config、--port、--omb、--omb-token、--channel）。 */
 export function loadConfig(argv = process.argv.slice(2), explicitFile) {
   const flag = (k) => {
     const i = argv.indexOf(k);
@@ -264,19 +257,18 @@ export function loadConfig(argv = process.argv.slice(2), explicitFile) {
   const rawChan = typeof raw.channel === 'string'
     ? { use: raw.channel, options: {} }
     : (raw.channel && typeof raw.channel === 'object' ? raw.channel : {});
-  const configUseRaw = String(rawChan.use ?? '').trim();
-  const configUse = configUseRaw && isPathLikeSpecifier(configUseRaw)
-    ? path.resolve(base, configUseRaw)
-    : configUseRaw;
+  const configUseRaw = String(rawChan.use ?? defaults.channel.use).trim() || 'sim';
+  const normalizedUse = configUseRaw === 'web' ? 'sim' : configUseRaw;
+  const configUse = normalizedUse && isPathLikeSpecifier(normalizedUse)
+    ? path.resolve(base, normalizedUse)
+    : normalizedUse;
 
   const cfg = {
     openmausbot: { ...defaults.openmausbot, ...raw.openmausbot },
-    transport: raw.transport === 'web' ? 'sim' : (raw.transport ?? defaults.transport),
     channel: {
       use: configUse,
       options: { ...defaults.channel.options, ...(rawChan.options ?? {}) },
     },
-    ipc: { ...defaults.ipc, ...raw.ipc },
     web: { ...defaults.web, ...raw.web },
     selfChat: {
       ...defaults.selfChat,
@@ -302,11 +294,11 @@ export function loadConfig(argv = process.argv.slice(2), explicitFile) {
 
   if (flag('--omb')) cfg.openmausbot.url = flag('--omb');
   if (flag('--port')) cfg.web.port = Number(flag('--port'));
-  if (flag('--transport')) cfg.transport = flag('--transport') === 'web' ? 'sim' : flag('--transport');
   const cliChannel = flag('--channel');
   if (cliChannel) {
     const c = String(cliChannel).trim();
-    cfg.channel.use = isPathLikeSpecifier(c) ? path.resolve(process.cwd(), c) : c;
+    const normCli = c === 'web' ? 'sim' : c;
+    cfg.channel.use = isPathLikeSpecifier(normCli) ? path.resolve(process.cwd(), normCli) : normCli;
   }
 
   cfg.openmausbot.url = String(cfg.openmausbot.url || defaults.openmausbot.url).replace(/\/+$/, '');
@@ -314,6 +306,5 @@ export function loadConfig(argv = process.argv.slice(2), explicitFile) {
   cfg.openmausbot.syncChiefIdentity = cfg.openmausbot.syncChiefIdentity !== false;
   cfg.selfChat.botName = String(cfg.selfChat.botName || defaults.selfChat.botName).trim() || 'co-bot';
   cfg.dataDir = path.resolve(base, cfg.dataDir);
-  if (cfg.ipc.client) cfg.ipc.client = path.resolve(base, cfg.ipc.client);
   return cfg;
 }

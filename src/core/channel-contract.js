@@ -50,7 +50,7 @@ function normalizeLinkCard(rawCard) {
   };
 }
 
-export const DEFAULT_CAPABILITIES = Object.freeze({
+const DEFAULT_CAPABILITIES = Object.freeze({
   markdown: true,
   files: false,
   images: false,
@@ -68,7 +68,7 @@ export function clipSummary(text, max = 120) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-/** 为直连型传输适配器（如 WebSimTransport / IpcTransport）挂载统一脱敏遥测埋点，不改原返回值结构。 */
+/** 为直连型传输适配器（如 WebSimTransport / 第三方通道插件）挂载统一脱敏遥测埋点，不改原返回值结构。 */
 export function attachTransportTelemetry(transport, emit, name = transport?.constructor?.name || 'channel') {
   if (!transport || typeof emit !== 'function') return transport;
   const origStart = transport.start?.bind(transport);
@@ -138,8 +138,7 @@ export function normalizeCapabilities(raw = {}, adapter = null) {
   const hasHistory = Boolean(
     adapter
     && (typeof adapter.getHistory === 'function'
-      || typeof adapter.getMessage === 'function'
-      || typeof adapter.searchHistory === 'function'),
+      || typeof adapter.getMessage === 'function'),
   );
   const hasNotify = Boolean(adapter && typeof adapter.notify === 'function');
   const files = src.files !== undefined ? Boolean(src.files) : hasSendFile;
@@ -158,7 +157,7 @@ export function normalizeCapabilities(raw = {}, adapter = null) {
 }
 
 /** 将各家 IM 的结构化 `@提及` 列表归一化为 `[{ id, name?, isAll?, isSelf? }]`。 */
-export function normalizeMentions(rawMentions, { atUserIds, atAll = false, selfId = '' } = {}) {
+function normalizeMentions(rawMentions, { atUserIds, atAll = false, selfId = '' } = {}) {
   const selfStr = String(selfId ?? '');
   const list = [];
   const seen = new Set();
@@ -357,7 +356,7 @@ export function normalizeInboundEvent(raw, { selfId = '', selfChatId = '', atAll
     return ev;
   }
 
-  // 2. 扁平结构（兼容旧版 FlatMessage）
+  // 2. 扁平结构（FlatMessage 快捷映射）
   if (raw.msgId == null || raw.chatId == null) throw new Error('缺少 msgId 或 chatId');
   const chatId = String(raw.chatId);
   const type = raw.chatType === 'self' || (selfChatId && chatId === selfChatId)
@@ -628,12 +627,6 @@ export class ManagedChannel {
     return Array.isArray(list) ? list.map((m) => this.#normalizeMaybeEvent(m)).filter(Boolean) : [];
   }
 
-  async searchHistory(chatId, query, opts = {}) {
-    if (typeof this.adapter?.searchHistory !== 'function') return [];
-    const list = await this.adapter.searchHistory(chatId, query, opts);
-    return Array.isArray(list) ? list.map((m) => this.#normalizeMaybeEvent(m)).filter(Boolean) : [];
-  }
-
   async notify(payload = {}) {
     if (typeof this.adapter?.notify !== 'function') return false;
     try {
@@ -665,7 +658,7 @@ function pathBasename(p) {
 }
 
 /** 将 `{ name, capabilities, create(options, ctx) }` 声明封装为标准 Kernel ChannelPlugin。 */
-export function createManagedChannelPlugin(spec) {
+function createManagedChannelPlugin(spec) {
   if (!spec || typeof spec.create !== 'function') {
     throw new Error('createManagedChannelPlugin 需要提供 create(options, ctx) 方法');
   }

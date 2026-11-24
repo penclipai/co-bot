@@ -244,9 +244,7 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
 
   const makeCfg = () => ({
     openmausbot: { url: `http://127.0.0.1:${ombPort}`, timeoutMs: 3000, token: '', autoStart: false },
-    transport: 'sim',
     channel: { use: 'mock-0177', options: {} },
-    ipc: {},
     web: { host: '127.0.0.1', port: 0 },
     selfChat: { trigger: '@bot', fileRetentionDays: 0, stateSaveDebounceMs: 0 },
     chats: { mode: 'owner_everywhere', externalAckInSelf: false },

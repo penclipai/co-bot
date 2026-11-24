@@ -1,5 +1,5 @@
 /**
- * @mention 解析、防误触掩码、日程/时间解析与有界集合辅助函数（纯函数，零外部依赖）。
+ * @mention 解析、防误触掩码、免打扰时段解析与有界集合辅助函数（纯函数，零外部依赖）。
  */
 
 export function compactChatCtx(chatCtx) {

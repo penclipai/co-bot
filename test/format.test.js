@@ -76,30 +76,26 @@ test('format helpers: clip, fileSafe, plain, hardBreaks, mdClip', () => {
   assert.deepEqual(JSON.parse(fs.readFileSync(atomicPath, 'utf8')), { ok: true, count: 2 });
 });
 
-test('loadConfig: loads defaults, resolves relative paths, supports legacy web->sim and CLI overrides', () => {
+test('loadConfig: loads defaults, resolves relative paths, supports web->sim channel normalization and CLI overrides', () => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-cfg-')));
   const cfgPath = path.join(dir, 'config.json');
   fs.writeFileSync(cfgPath, JSON.stringify({
-    transport: 'web',
-    channel: { use: './cfg-chan.js' },
-    ipc: { client: './my-client.js', selfId: 'u1' },
+    channel: { use: 'web' },
     dataDir: './mydata',
     selfChat: { trigger: '@bot', commandDevices: ['mobile'], quietHours: { enabled: true } },
   }));
 
   const cfgFromFile = loadConfig(['--port', '9001', '--omb', 'http://127.0.0.1:9999/', '--config', cfgPath]);
-  assert.equal(cfgFromFile.transport, 'sim');
-  assert.equal(cfgFromFile.channel.use, path.join(dir, 'cfg-chan.js'));
+  assert.equal(cfgFromFile.channel.use, 'sim');
 
   const cfg = loadConfig(['--port', '9001', '--omb', 'http://127.0.0.1:9999/', '--channel', './cli-chan.js', '--config', cfgPath]);
-  assert.equal(cfg.transport, 'sim');
   assert.equal(cfg.channel.use, path.resolve(process.cwd(), './cli-chan.js'));
   assert.equal(cfg.web.port, 9001);
   assert.equal(cfg.openmausbot.url, 'http://127.0.0.1:9999');
   assert.equal(cfg.openmausbot.autoStart, true);
   assert.equal(cfg.openmausbot.cliComputerOff, true);
   assert.equal(cfg.dataDir, path.join(dir, 'mydata'));
-  assert.equal(cfg.ipc.client, path.join(dir, 'my-client.js'));
+  assert.equal(cfg.chats.contextMaxChats, 200);
   assert.deepEqual(cfg.selfChat.commandDevices, ['mobile']);
   assert.equal(cfg.selfChat.proactive, true);
   assert.equal(cfg.selfChat.softSplitChars, 2800);
@@ -327,7 +323,6 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
   const recent = store.getRecent('grp_1', { limit: 10 });
   assert.deepEqual(recent.map((m) => m.id), ['m3', 'm4', 'm5', 'm6']);
   assert.equal(store.getRecent('grp_1', { beforeMsgId: 'm5', limit: 2 }).map((m) => m.id).join(','), 'm3,m4');
-  assert.equal(store.search('grp_1', 'nginx').length, 4);
 
   const block = formatImContextBlock({
     triggerEvent: { id: 'm6', chat: { id: 'grp_1', type: 'group', name: '测试群' }, sender: { id: 'me', name: '我', isSelf: true }, replyTo: 'm3' },
@@ -356,7 +351,7 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
   assert.equal(dangerousOnly, '请 @Alice 和 @\u200B所有人 问 @\u200BPlum');
   assert.equal(sanitizeExternalMentions('@Alice hi', { mode: 'none' }), '@Alice hi');
 
-  // 撤回消息擦除并阻止历史补全复活 + 跨群检索 + 连续附件合批
+  // 撤回消息擦除并阻止历史补全复活 + 连续附件合批
   const store2 = new ChatContextStore({ maxPerChat: 20, ttlMs: 120_000, now: () => 500_000 });
   store2.recordInbound({
     id: 'g1',
@@ -398,9 +393,6 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
     sender: { id: 'alice', name: 'Alice', isSelf: false },
     text: 'secret temp_pass_999',
   }), null);
-  // 跨群搜索默认排除自聊
-  assert.equal(store2.searchAll('temp_pass_999').length, 0);
-  assert.equal(store2.searchAll('node1 error').length, 1);
 
   const recentA = store2.getRecent('grp_a', { limit: 10 });
   const unquotedArt = collectContextAttachments({

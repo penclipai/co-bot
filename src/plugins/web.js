@@ -11,7 +11,7 @@ export const webPlugin = {
   async apply(ctx) {
     const cfg = ctx.config;
     const web = new WebServer({ ...cfg.web, publicDir: path.join(APP_ROOT, 'public') });
-    web.route('GET', '/api/health', () => ({ ok: true, app: 'co-bot', transport: cfg.transport }));
+    web.route('GET', '/api/health', () => ({ ok: true, app: 'co-bot', channel: cfg.channel?.use || 'sim' }));
     await web.start();
     ctx.provide('web', web);
     ctx.effect(() => web.stop());

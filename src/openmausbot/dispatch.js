@@ -6,6 +6,7 @@ import { formatProjectContextBlock, resolveProjectBinding } from '../core/projec
 import { clip } from '../format.js';
 import { formatOmbError } from './cards.js';
 import { formatAttachmentTag, messageNeedsInput } from './client.js';
+import { botCommandTarget } from './command-helpers.js';
 import { claimUploads, deliverBotReply, emitCard, forwardBotMedia } from './delivery.js';
 import { buildExternalChatCtx } from './inbound-router.js';
 import { compactChatCtx, inQuietHours, rememberBounded } from './mentions.js';
@@ -178,7 +179,7 @@ async function trySteerQueueItem(bridge, { botId, botName, threadId, isGroup, qu
       const msg = typeof onQueuedText === 'function'
         ? onQueuedText(res)
         : `${banner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`;
-      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${bridge.displayBotName(botId, botName, { isGroup })}` : bridge.trigger;
+      const cmdTarget = botCommandTarget(bridge, botId, botName, { isGroup });
       await bridge.say(msg, route, null, typeof onQueuedText === 'function'
         ? [
             { label: '立即插队', text: `${cmdTarget} steer`, kind: 'primary' },
@@ -468,7 +469,7 @@ export async function dispatchToBot(bridge, bot, text, imMsgId, quotedId, replyT
     list.push(entry);
     bridge.queuedByThread.set(threadId, list);
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
-    const cmdTarget = isGroup || (bridge.chiefBotId && bot.id !== bridge.chiefBotId) ? `@${shownName}` : bridge.trigger;
+    const cmdTarget = botCommandTarget(bridge, bot.id, bot.name, { isGroup });
     await bridge.say(
       `${ctrlBanner}📥 ${who ? `${who} ` : ''}已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
       { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
@@ -504,7 +505,7 @@ export async function dispatchToBot(bridge, bot, text, imMsgId, quotedId, replyT
   });
   turn.startWatcher();
   if (isExternal && ctxInfo.silentProgress && bridge.chats.externalAckInSelf && bridge.selfChat) {
-    const cmdTarget = isGroup || (bridge.chiefBotId && bot.id !== bridge.chiefBotId) ? `@${shownName}` : bridge.trigger;
+    const cmdTarget = botCommandTarget(bridge, bot.id, bot.name, { isGroup });
     bridge.say(
       `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…`,
       { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: bridge.selfChat },

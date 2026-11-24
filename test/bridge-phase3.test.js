@@ -318,34 +318,18 @@ test('Phase 3 UX: remote skip/跳过 dismiss for secret, connector, and signIn c
 });
 
 test('Phase 3 UX: Chinese spoken ordinals across question cards and @bot task', async () => {
-  const omb = await startMockOmb(
-    [
-      {
-        id: 'b1',
-        name: 'MausBot',
-        threadId: 't1',
-        chiefOfStaff: true,
-        tasks: [
-          { threadId: 't1', title: '当前开发会话', updatedAt: 200 },
-          { threadId: 't_old', title: '线上回归排查', updatedAt: 100 },
-        ],
-      },
-    ],
+  const omb = await startMockOmb([
     {
-      instances: [
-        {
-          instanceId: 'opencodeGo',
-          snapshot: { state: 'available' },
-          models: {
-            options: [
-              { id: 'deepseek/deepseek-flash', label: 'Flash' },
-              { id: 'deepseek/deepseek-v4-pro', label: 'Pro' },
-            ],
-          },
-        },
+      id: 'b1',
+      name: 'MausBot',
+      threadId: 't1',
+      chiefOfStaff: true,
+      tasks: [
+        { threadId: 't1', title: '当前开发会话', updatedAt: 200 },
+        { threadId: 't_old', title: '线上回归排查', updatedAt: 100 },
       ],
     },
-  );
+  ]);
   const sent = [];
   const transport = makeIm(sent);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-p3-ordinals-'));

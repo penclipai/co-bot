@@ -157,9 +157,8 @@ async function handleDefaultCommand(bridge, raw, low, { quotedRoute, targetBot, 
   const replySink = makeCommandSink(bridge, chatCtx, { sensitive: false });
   const sensSink = makeCommandSink(bridge, chatCtx, { sensitive: true });
 
-  const helpM = raw.match(/^(?:help|帮助|\?|？)(?:\s+([\s\S]+))?$/i);
-  if ((!low && !quotedId && !hasAttachments) || helpM) {
-    await replySink.say(buildHelpText(bridge, helpM?.[1] ?? ''));
+  if ((!low && !quotedId && !hasAttachments) || /^(?:help|帮助|\?|？)$/i.test(raw)) {
+    await replySink.say(buildHelpText(bridge));
     return true;
   }
 
@@ -563,7 +562,7 @@ export async function handleCommand(bridge, cmdText, { isDefault, targetBot, quo
       : targetBot);
   const isGroup = Boolean(activeTarget.isGroup);
   const shownTargetName = showBotName(bridge, activeTarget.id, activeTarget.name, isGroup);
-  const cmdTarget = isGroup ? `@${shownTargetName}` : botCommandTarget(bridge, activeTarget.id, activeTarget.name);
+  const cmdTarget = botCommandTarget(bridge, activeTarget.id, activeTarget.name, { isGroup });
 
   const singleBotOnlyHint = async () => {
     await sensSink.say(`ℹ️ 群组「${activeTarget.name}」不支持该单 Bot 指令，请直接 \`@具体Bot名\` 操作。`);

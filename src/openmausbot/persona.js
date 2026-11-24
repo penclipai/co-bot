@@ -21,7 +21,3 @@ export const COBOT_COORDINATOR_PROFILE = {
   replyStyle: 'conversational',
   soul: COBOT_COORDINATOR_SOUL,
 };
-
-// 兼容旧导出名
-export const GROK_MOBILE_SOUL = COBOT_COORDINATOR_SOUL;
-export const GROK_MOBILE_PROFILE = COBOT_COORDINATOR_PROFILE;

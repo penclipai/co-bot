@@ -12,7 +12,7 @@
 | `npm start` / `npm run sim` | 前台启动（`sim` 强制使用 Web 模拟器，访问 `http://127.0.0.1:8787/sim`） |
 | `npm run status` / `restart` / `stop` | 查看状态 / 平滑重启 / 停止 `co-bot`（`npm run stop -- --all` 连带停止托管的 OpenMausBot CLI） |
 | `npm run omb -- status` | 单独管理托管的 OpenMausBot CLI（支持 `ensure\|start\|stop\|restart\|status\|logs`） |
-| `npm run check` | 校验 `config.json` 与 Node / `openmausbot` / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`、`-- --apply-style`） |
+| `npm run check` | 校验 `config.json` 与 Node / `openmausbot` / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`） |
 | `npm run pair` | OpenMausBot 桌面端一次性配对（弹窗点 Allow，或传 `-- <12位配对码>`） |
 | `npm run daemon -- install-service` | 安装开机自启（先加 `--dry` 预览 `systemd --user` / `LaunchAgents` / Windows 启动项；`uninstall-service` 卸载） |
 | `npm run lint` / `lint:fix` | 运行 ESLint 规范与单文件 1000 行上限校验 / 自动修复格式 |
@@ -42,7 +42,7 @@
 
 无需注册独立 Bot 账号，直接用本人账号在外部群或他人私聊触发（`chats.mode: "owner_everywhere"`，若只需自聊可设为 `"self_only"`）：
 
-- **安全触发与防误触**：默认仅**本人**消息可唤醒 Bot，群成员消息仅进环形上下文窗口（默认 15 条，内存可保留最多 200 条）；支持句首与句中自然召唤，自动跳过代码块、行内反引号、中英文引号及 Markdown 引用块（`> ...`）与 `@\u200Bbot`；仅发 `@bot` / `@bot!` 引用同事消息或附件时直接分析引用内容；引用 Bot 回复并 `@同事` 转交不重触 Bot。
+- **安全触发与防误触**：默认仅**本人**消息可唤醒 Bot，群成员消息仅进环形上下文窗口（默认 15 条，内存默认最多保留 120 条）；支持句首与句中自然召唤，自动跳过代码块、行内反引号、中英文引号及 Markdown 引用块（`> ...`）与 `@\u200Bbot`；仅发 `@bot` / `@bot!` 引用同事消息或附件时直接分析引用内容；引用 Bot 回复并 `@同事` 转交不重触 Bot。
 - **上下文增强与隔离**：自动携带同批次连续附件（默认 2 分钟内最多 4 个），支持通过通道可选 `getMessage` / `getHistory` 穿透更早历史，并在收到 `recall` 撤回事件时立即从上下文与缓存擦除；每个 `(chatId, botId)` 绑定独立 Thread（外群未建立隔离 Thread 时禁止误查或压缩自聊主线），外群上下文达 80% 时自聊提醒、达 92% 自动后台压缩；所有敏感指令与审批卡片在外部群执行时一律重定向回**自聊**并保留来源标注。
 - **原地直发 vs 私密起草（`@bot!` + `sendback`）**：
   - **原地直发**（`externalReplyMode: "inline"`）：静音中间思考，出站前自动对 `@所有人` / `@同事` 插入零宽空格防误艾特（保留邮箱与代码块）；
@@ -69,7 +69,7 @@
 | **对话与团队** | `@bot <问题>` / `@<Bot名>` / `@<群名>` | 向主 Bot 或指定 Bot / 群组提问；`@bot bye` 结束自聊连续对话 |
 | **私密草稿** | `@bot! <问题>` / `@bot -p <问题>` | 外部群提问并将草稿仅发回自聊 |
 |  | `@bot sendback [草稿ID]` | 在自聊预览草稿并确认发回原群（`确认发送` / `改：...` / `取消`） |
-| **管群与纪要** | `@bot chats [self\|all\|reset]` | 查看外部会话策略、批量切全静默 / 放行或重置单聊与外群绑定 |
+| **管群与纪要** | `@bot chats [self\|all\|reset]` | 查看外部会话策略、批量切全静默 / 放行或重置运行期静音与触发模式覆盖 |
 |  | `@bot mute\|unmute [群]` | 即时静音或取消静音当前群或指定外部群（`self` 不可静音） |
 |  | `@bot summary <群名> [条数] [重点]` | 在自聊悄悄生成外部群近况纪要（支持 `1～200` 条，别名 `汇总` / `纪要`） |
 | **项目与委托** | `@bot bind [项目\|路径\|unbind]` | 查看/绑定/解绑会话目录；支持 `bind <会话> <项目\|路径\|unbind>` |

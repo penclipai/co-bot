@@ -1,25 +1,21 @@
 #!/usr/bin/env node
 /**
  * co-bot 就绪自检（npm run check）：
- *   1. 检查 Node >= 22.5 与 PATH 中的 opencode CLI
+ *   1. 检查 Node >= 24 与 PATH 中的 opencode CLI
  *   2. 检查 OpenMausBot Harness 连通性、运行模式（CLI / 桌面端）与 CLI computer 设置（可选 --fix-cli）
- *   3. 若配置为 transport = ipc，检查 IPC client 文件与 selfId
+ *   3. 若配置外部 IM 通道插件，自动执行静态契约自检
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, validateConfig, APP_ROOT } from '../src/config.js';
 import { OpenMausBotClient } from '../src/openmausbot/client.js';
-import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE } from '../src/openmausbot/persona.js';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.js';
 import { probeOpenMausBot } from '../src/plugins/openmausbot.js';
 import { runChannelContractTest } from './channel-test.js';
 
 const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
-const applyStyle = argv.includes('--apply-style');
-const forceStyle = argv.includes('--force');
-const checkUpdate = argv.includes('--check-update');
 const cfgIdx = argv.indexOf('--config');
 const explicitCfg = cfgIdx >= 0 && argv[cfgIdx + 1] ? argv[cfgIdx + 1] : null;
 const rawCfgPath = explicitCfg ?? (fs.existsSync('config.json') ? 'config.json' : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null));
@@ -39,14 +35,12 @@ if (rawCfgPath && fs.existsSync(rawCfgPath)) {
 }
 
 const cfg = loadConfig(argv);
-const [maj, min] = process.versions.node.split('.').map(Number);
+const [maj] = process.versions.node.split('.').map(Number);
 
 if (maj >= 24) {
   console.log(`✓ Node.js v${process.versions.node}`);
-} else if (maj > 22 || (maj === 22 && min >= 5)) {
-  console.log(`⚠ Node.js v${process.versions.node}（co-bot 可运行，但内置 openmausbot 依赖需要 Node >= 24）`);
 } else {
-  console.error(`✗ Node.js 需要 >= 22.5（推荐 >= 24），当前 v${process.versions.node}`);
+  console.error(`✗ Node.js 需要 >= 24，当前 v${process.versions.node}`);
   fails++;
 }
 
@@ -104,19 +98,6 @@ if (probe) {
         console.log(`✓ OpenMausBot doctor 自检正常（已检 ${doc.checked ?? 0} 项${doc.fixed?.length ? `，自动修复 ${doc.fixed.length} 项` : ''}）`);
       }
     }
-    if (checkUpdate && ombHealth.version) {
-      const npmCmd = process.platform === 'win32' ? 'cmd.exe' : 'npm';
-      const npmArgs = process.platform === 'win32'
-        ? ['/d', '/s', '/c', 'npm view openmausbot version']
-        : ['view', 'openmausbot', 'version'];
-      const upRes = spawnSync(npmCmd, npmArgs, { timeout: 3500, encoding: 'utf8' });
-      const latestVer = upRes.status === 0 ? String(upRes.stdout || '').trim().split(/\r?\n/)[0].trim() : '';
-      if (latestVer && latestVer !== ombHealth.version) {
-        console.log(`⬆ 发现 OpenMausBot 新版本 v${latestVer}（当前 v${ombHealth.version}），可运行 \`npm install openmausbot@latest && npm run restart\` 升级。`);
-      } else if (latestVer) {
-        console.log(`✓ OpenMausBot 已是最新版 v${ombHealth.version}`);
-      }
-    }
     const scopes = Array.isArray(sess?.scopes) ? sess.scopes.join(', ') : '';
     const getPatchClient = () => (!desktopManaged && paired && !sess?.scopes?.includes('admin'))
       ? new OpenMausBotClient({ baseUrl: cfg.openmausbot.url, timeoutMs: 5000 })
@@ -150,33 +131,11 @@ if (probe) {
         }
       }
     }
-
-    if (applyStyle && chief) {
-      const hasSoul = Boolean(String(chief.soul ?? '').trim());
-      if (hasSoul && chief.replyStyle === COBOT_COORDINATOR_PROFILE.replyStyle && !forceStyle) {
-        console.log(`✓ 主 Bot「${chief.name}」已启用协调助手风格（${chief.replyStyle}）`);
-      } else if (!hasSoul || forceStyle) {
-        try {
-          const patch = {
-            ...COBOT_COORDINATOR_PROFILE,
-            ...(/^(open)?mausbot$/i.test(String(chief.name || '').trim()) ? { name: cfg.selfChat?.botName || 'co-bot' } : {}),
-            ...(!String(chief.title || '').trim() ? { title: COBOT_COORDINATOR_TITLE } : {}),
-          };
-          await getPatchClient().patchBot(chief.id, patch);
-          console.log(`✓ 已为主 Bot「${patch.name || chief.name}」启用协调助手风格（conversational + co-bot 精炼人格）`);
-        } catch (e) {
-          console.error(`✗ 应用私聊风格失败：${e.message}`);
-          fails++;
-        }
-      } else {
-        console.log(`ℹ 主 Bot「${chief.name}」已有自定义 soul，未覆盖（可加 --force 强制覆盖）。`);
-      }
-    }
   }
 }
 
 const chanSpec = resolveChannelSpec(cfg);
-if (chanSpec.kind === 'external' || chanSpec.name === 'ipc') {
+if (chanSpec.kind === 'external') {
   const res = await runChannelContractTest(cfg, { dry: true, log: () => {} });
   if (res.ok) {
     console.log(`✓ 通道插件「${res.channelName}」契约检查通过（诊断台 http://${cfg.web.host}:${cfg.web.port}/debug）`);
@@ -185,7 +144,7 @@ if (chanSpec.kind === 'external' || chanSpec.name === 'ipc') {
     fails++;
   }
 } else {
-  console.log(`✓ 传输模式：${cfg.transport}（Web 自聊模拟器 http://${cfg.web.host}:${cfg.web.port}/sim）`);
+  console.log(`✓ 通道模式：${chanSpec.name}（Web 自聊模拟器 http://${cfg.web.host}:${cfg.web.port}/sim）`);
 }
 
 if (fails) process.exitCode = 1;

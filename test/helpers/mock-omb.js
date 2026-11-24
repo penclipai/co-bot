@@ -58,12 +58,6 @@ export async function startMockOmb(botsSpec, opts = {}) {
   const steered = [];
   const cancelled = [];
   const compacts = [];
-  const routineRuns = [];
-  const routinePatches = [];
-  const taskPatches = [];
-  const memoryState = new Map(bots.map((b) => [b.id, { text: opts.initialMemory ?? '', topics: opts.memoryTopics ?? [] }]));
-  const routines = Array.isArray(opts.routines) ? opts.routines.map((r) => ({ ...r })) : [];
-  const instances = Array.isArray(opts.instances) ? opts.instances : [];
   let respondFailuresLeft = Number(opts.respondFailCount ?? 0);
   let dismissFailuresLeft = Number(opts.dismissFailCount ?? 0);
   const authHeaders = [];
@@ -246,74 +240,6 @@ export async function startMockOmb(botsSpec, opts = {}) {
       tasksSelected.push({ botId: bot.id, threadId: m[2] });
       return json(200, { bot });
     }
-    if (req.method === 'PATCH' && (m = /^\/api\/bots\/([^/]+)\/tasks\/([^/]+)$/.exec(u.pathname))) {
-      const bot = bots.find((x) => x.id === m[1]);
-      if (!bot) return json(404, { error: 'no such bot' });
-      const body = await readJson();
-      const task = (bot.tasks ?? []).find((t) => (t.threadId ?? t.id) === m[2]);
-      if (task) Object.assign(task, body);
-      if (body.modelSelection && bot.threadId === m[2]) bot.modelSelection = body.modelSelection;
-      taskPatches.push({ botId: bot.id, threadId: m[2], body });
-      return json(200, { bot, task });
-    }
-    if (req.method === 'GET' && u.pathname === '/api/instances') {
-      return json(200, instances);
-    }
-    if (req.method === 'GET' && u.pathname === '/api/search') {
-      const q = String(u.searchParams.get('q') ?? '').toLowerCase();
-      const hits = [];
-      for (const [tid, arr] of messages.entries()) {
-        const b = bots.find((x) => x.threadId === tid || (x.tasks ?? []).some((t) => (t.threadId ?? t.id) === tid));
-        const taskTitle = b?.tasks?.find((t) => (t.threadId ?? t.id) === tid)?.title || b?.name || '会话';
-        for (const msg of arr) {
-          if (String(msg.text || '').toLowerCase().includes(q)) {
-            hits.push({
-              threadId: tid, messageId: msg.id, at: msg.at || Date.now(), role: msg.role,
-              kind: msg.kind, snippet: msg.text, botId: b?.id || 'b1', name: b?.name || 'MausBot', task: taskTitle,
-            });
-          }
-        }
-      }
-      return json(200, { hits });
-    }
-    if (req.method === 'GET' && (m = /^\/api\/threads\/([^/]+)\/export$/.exec(u.pathname))) {
-      const tid = m[1];
-      const arr = messages.get(tid) ?? [];
-      const md = ['# 导出会话', '', ...arr.filter((x) => x.text).map((x) => `**${x.role}**: ${x.text}`)].join('\n');
-      res.writeHead(200, {
-        'content-type': 'text/markdown; charset=utf-8',
-        'content-disposition': `attachment; filename="session-${tid}.md"`,
-      });
-      return res.end(md);
-    }
-    if (req.method === 'GET' && u.pathname === '/api/routines') {
-      return json(200, { routines });
-    }
-    if (req.method === 'POST' && (m = /^\/api\/routines\/([^/]+)\/run$/.exec(u.pathname))) {
-      const r = routines.find((x) => x.id === m[1]);
-      if (!r) return json(404, { error: 'no such routine' });
-      routineRuns.push(r.id);
-      return json(201, { run: { id: `run_${routineRuns.length}`, routineId: r.id } });
-    }
-    if (req.method === 'PATCH' && (m = /^\/api\/routines\/([^/]+)$/.exec(u.pathname))) {
-      const r = routines.find((x) => x.id === m[1]);
-      if (!r) return json(404, { error: 'no such routine' });
-      const body = await readJson();
-      Object.assign(r, body);
-      routinePatches.push({ id: r.id, body });
-      return json(200, { routine: r });
-    }
-    if (req.method === 'GET' && (m = /^\/api\/bots\/([^/]+)\/memory$/.exec(u.pathname))) {
-      const mem = memoryState.get(m[1]) ?? { text: '', topics: [] };
-      return json(200, { botId: m[1], ...mem });
-    }
-    if (req.method === 'PUT' && (m = /^\/api\/bots\/([^/]+)\/memory$/.exec(u.pathname))) {
-      const body = await readJson();
-      const mem = memoryState.get(m[1]) ?? { text: '', topics: [] };
-      mem.text = String(body.text ?? '');
-      memoryState.set(m[1], mem);
-      return json(200, { ok: true, hash: 'h1' });
-    }
     if (req.method === 'POST' && (m = /^\/api\/bots\/([^/]+)\/queue\/([^/]+)\/steer$/.exec(u.pathname))) {
       const body = await readJson();
       steered.push({ botId: m[1], queueId: m[2], threadId: body.threadId });
@@ -481,10 +407,6 @@ export async function startMockOmb(botsSpec, opts = {}) {
     steered,
     cancelled,
     compacts,
-    routineRuns,
-    routinePatches,
-    taskPatches,
-    memoryState,
     bots,
     groups,
     authHeaders,

@@ -65,7 +65,7 @@ function chatMetaOf(chatId) {
 }
 
 /**
- * 网页自聊模拟器（本地浏览器访问 / 或 /sim），实现与 IpcTransport 相同的 Transport 契约。
+ * 网页自聊模拟器（本地浏览器访问 / 或 /sim），实现标准 IM 通道传输契约。
  */
 export class WebSimTransport {
   constructor({ web, filesDir, historyFile, fileRetentionDays = 7, botName = 'co-bot' }) {
@@ -180,13 +180,7 @@ export class WebSimTransport {
         throw Object.assign(new Error('无权撤回他人或助手消息'), { status: 403 });
       }
       const [dropped] = this.history.splice(idx, 1);
-      if (dropped?.file?.id && !this.history.some((m) => m.file?.id === dropped.file.id)) {
-        const gone = this.files.get(dropped.file.id);
-        this.files.delete(dropped.file.id);
-        if (gone?.path) {
-          try { fs.rmSync(gone.path, { force: true }); } catch { /* ignore */ }
-        }
-      }
+      this.#cleanupOrphanFile(dropped);
       this.#saveHistory();
       const ts = Date.now();
       const notice = { kind: 'recall', chatId: chat.id, recalledMsgId, ts };
@@ -374,24 +368,6 @@ export class WebSimTransport {
     return scoped.slice(Math.max(0, end - max), end).map((m) => this.#toInboundEvent(m)).filter(Boolean);
   }
 
-  async searchHistory(chatId, query, { limit = 10 } = {}) {
-    const cid = String(chatId || 'self');
-    const q = String(query ?? '').trim().toLowerCase();
-    if (!q) return [];
-    const max = Math.max(1, Math.min(50, Number(limit) || 10));
-    const hits = [];
-    for (let i = this.history.length - 1; i >= 0 && hits.length < max; i -= 1) {
-      const m = this.history[i];
-      if ((m.chatId || 'self') !== cid) continue;
-      const hay = [m.text, m.senderName, m.file?.name].filter(Boolean).join('\n').toLowerCase();
-      if (hay.includes(q)) {
-        const ev = this.#toInboundEvent(m);
-        if (ev) hits.push(ev);
-      }
-    }
-    return hits;
-  }
-
   async download(att, savePath) {
     const f = this.files.get(att.id);
     if (!f || !fs.existsSync(f.path)) throw new Error(`文件已过期：${att.name}`);
@@ -427,6 +403,15 @@ export class WebSimTransport {
 
   #card(f) { return { id: f.id, name: f.name, size: f.size, mime: f.mime, url: `/files/${f.id}` }; }
 
+  #cleanupOrphanFile(msg) {
+    if (!msg?.file?.id || this.history.some((m) => m.file?.id === msg.file.id)) return;
+    const gone = this.files.get(msg.file.id);
+    this.files.delete(msg.file.id);
+    if (gone?.path) {
+      try { fs.rmSync(gone.path, { force: true }); } catch { /* ignore */ }
+    }
+  }
+
   #broadcastSse(payload) {
     const chunk = `data: ${JSON.stringify(payload)}\n\n`;
     for (const c of [...this.clients]) {
@@ -445,14 +430,7 @@ export class WebSimTransport {
   #push(msg) {
     this.history.push(msg);
     if (this.history.length > 300) {
-      const dropped = this.history.shift();
-      if (dropped?.file?.id && !this.history.some((m) => m.file?.id === dropped.file.id)) {
-        const gone = this.files.get(dropped.file.id);
-        this.files.delete(dropped.file.id);
-        if (gone?.path) {
-          try { fs.rmSync(gone.path, { force: true }); } catch { /* ignore */ }
-        }
-      }
+      this.#cleanupOrphanFile(this.history.shift());
     }
     this.#saveHistory();
     this.#broadcastSse(msg);

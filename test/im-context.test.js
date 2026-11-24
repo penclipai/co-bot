@@ -382,8 +382,6 @@ test('chats 白名单/黑名单/self_only 策略与 WebSimTransport 多会话接
     const grpHist = await sim.getHistory('grp_dev');
     assert.equal(grpHist.length, 1);
     assert.equal(grpHist[0].text, '接口返回 504');
-    const hits = await sim.searchHistory('grp_dev', '504');
-    assert.equal(hits.length, 1);
   } finally {
     await sim.stop();
     await web.stop();

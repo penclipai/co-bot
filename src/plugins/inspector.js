@@ -73,7 +73,7 @@ export const inspectorPlugin = {
       const kernelStatus = ctx.kernel.status();
       const chPlugin = kernelStatus.plugins.find((p) => p.kind === 'channel');
       return {
-        name: st?.kind || chPlugin?.name || cfg.channel?.use || cfg.transport,
+        name: st?.kind || chPlugin?.name || cfg.channel?.use || 'sim',
         capabilities: caps,
         status: st,
         plugins: kernelStatus.plugins,
@@ -89,7 +89,6 @@ export const inspectorPlugin = {
       return {
         ok: true,
         runtime: runtimeSnapshot(),
-        transport: cfg.transport,
         trigger: cfg.selfChat?.trigger ?? '@bot',
         openmausbot: omb,
         im: snap.status,

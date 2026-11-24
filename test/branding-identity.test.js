@@ -239,10 +239,9 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     await until(() => tr.sent.some((m) => m.text.includes('API Key')));
     assert.ok(tr.sent.at(-1).text.includes('管理后台'));
 
-    // 6. 所有内建控制命令（help/help all/status/new/task/compact/chats/mute/unmute）均零泄露
+    // 6. 所有内建控制命令（help/status/new/task/compact/chats/mute/unmute）均零泄露
     const cmds = [
       '@bot help',
-      '@bot help all',
       '@bot status',
       '@bot new',
       '@bot task',

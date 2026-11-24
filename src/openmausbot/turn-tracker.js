@@ -3,6 +3,7 @@
  */
 import { formatActivity, formatOmbError } from './cards.js';
 import { messageNeedsInput } from './client.js';
+import { botCommandTarget } from './command-helpers.js';
 import { compactChatCtx, rememberBounded } from './mentions.js';
 
 const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
@@ -191,7 +192,7 @@ export function createTurnTracker(
         ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId}」**\n`
         : '';
       const shownName = bridge.displayBotName(botId, botName, { isGroup });
-      const cmdTarget = isGroup || (bridge.chiefBotId && botId !== bridge.chiefBotId) ? `@${shownName}` : bridge.trigger;
+      const cmdTarget = botCommandTarget(bridge, botId, botName, { isGroup });
       bridge.emitTelemetry?.('turn_stalled', {
         botName: shownName,
         chatId: ctrlChat || null,

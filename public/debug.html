@@ -277,7 +277,7 @@
       const chBox = el('channelBox');
       chBox.replaceChildren();
       const ch = st.channel || {};
-      chBox.appendChild(badge(ch.name || st.transport || '-', ch.status?.connected === false ? 'err' : 'ok'));
+      chBox.appendChild(badge(ch.name || '-', ch.status?.connected === false ? 'err' : 'ok'));
       addLine(chBox, 'selfChatId', ch.status?.selfChatId || '尚未学习');
       if (ch.status?.reconnectAttempts) addLine(chBox, '重连次数', String(ch.status.reconnectAttempts));
       if (ch.status?.lastError) addLine(chBox, '最近错误', ch.status.lastError);

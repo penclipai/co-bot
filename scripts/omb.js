@@ -11,7 +11,7 @@ import { loadConfig, APP_ROOT } from '../src/config.js';
 import { OpenMausBotClient } from '../src/openmausbot/client.js';
 
 const ACTIONS = new Set(['ensure', 'start', 'stop', 'restart', 'status', 'logs']);
-const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--transport']);
+const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--channel']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 export function isLoopbackUrl(rawUrl) {

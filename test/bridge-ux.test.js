@@ -422,24 +422,18 @@ test('P0 reliability: say() retry backoff, full state persistence (quietQueue/pe
   }
 });
 
-test('P1 commands: @bot status context & >80% warning, @bot compact, and retired command passthrough', async () => {
-  const omb = await startMockOmb(
-    [
-      {
-        id: 'b1',
-        name: 'MausBot',
-        threadId: 't1',
-        chiefOfStaff: true,
-        tasks: [
-          { threadId: 't1', title: '主研发任务', updatedAt: 200, usage: { turns: 5, context: { tokens: 85_000, window: 100_000 } } },
-        ],
-      },
-    ],
+test('P1 commands: @bot status context & >80% warning, @bot compact, help scoping, and retired command passthrough', async () => {
+  const omb = await startMockOmb([
     {
-      initialMemory: '- 回复简短优先\n',
-      memoryTopics: [{ name: 'projects.md', path: 'memory/projects.md' }],
+      id: 'b1',
+      name: 'MausBot',
+      threadId: 't1',
+      chiefOfStaff: true,
+      tasks: [
+        { threadId: 't1', title: '主研发任务', updatedAt: 200, usage: { turns: 5, context: { tokens: 85_000, window: 100_000 } } },
+      ],
     },
-  );
+  ]);
 
   const sent = [];
   const transport = makeIm(sent);
@@ -467,17 +461,19 @@ test('P1 commands: @bot status context & >80% warning, @bot compact, and retired
     const warnCountBefore = sent.filter((m) => m.text.includes('上下文已达 85%')).length;
     assert.equal(warnCountBefore, 1);
 
-    // 2. @bot compact 清除警告标记
+    // 2. @bot compact 清除警告标记，且无参 @bot help 返回帮助而 @bot help me debug 透传给 Agent
     await transport.emitUser('@bot compact');
     await until(() => sent.some((m) => m.text.includes('压缩当前会话上下文')));
 
-    // 3. 已精简的旧命令（memory/记住/approval/digest/bots/tasks/context）不再作为内建命令拦截，均正常透传给 Agent
-    for (const cmd of ['@bot memory', '@bot 记住 用中文总结代码变更', '@bot approval auto', '@bot digest', '@bot bots', '@bot tasks', '@bot context']) {
+    await transport.emitUser('@bot help');
+    await until(() => sent.some((m) => m.text.includes('常用指南')));
+
+    // 3. 已精简的旧命令及带参数 help me debug 不再被内建命令拦截，均正常透传给 Agent
+    for (const cmd of ['@bot help me debug', '@bot memory', '@bot 记住 用中文总结代码变更', '@bot approval auto', '@bot digest', '@bot bots', '@bot tasks', '@bot context']) {
       const stripped = cmd.replace(/^@bot\s+/, '');
       await transport.emitUser(cmd);
       await until(() => sent.some((m) => m.text.includes(`完成：${stripped}`)));
     }
-    assert.equal(omb.memoryState.get('b1').text, '- 回复简短优先\n');
   } finally {
     await bridge.stop();
     await omb.close();

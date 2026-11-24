@@ -22,7 +22,7 @@ import { installService, uninstallService } from './service.js';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.js';
 
 const ACTIONS = new Set(['start', 'stop', 'restart', 'status', 'logs', 'install-service', 'uninstall-service']);
-const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--transport', '--channel']);
+const VALUE_FLAGS = new Set(['--config', '--port', '--omb', '--omb-token', '--channel']);
 
 function parseArgs(argv) {
   let action = '';
@@ -59,7 +59,7 @@ function usage() {
     '  npm run status               # 查看运行状态与连通情况',
     '  npm run daemon -- install-service        # 安装开机自启服务（支持 --dry 仅预览）',
     '  npm run daemon -- uninstall-service      # 卸载开机自启服务（支持 --dry 仅预览）',
-    '可选参数：--config <path> --port <port> --omb <url> --transport <sim|ipc> --dry',
+    '可选参数：--config <path> --port <port> --omb <url> --channel <sim|./im-plugin.js> --dry',
   ].join('\n'));
 }
 

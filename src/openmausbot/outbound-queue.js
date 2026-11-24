@@ -9,7 +9,7 @@ export function isTransportDisconnected(bridge) {
   return bridge.transport?.status?.()?.connected === false;
 }
 
-export function bufferOutboundItem(bridge, item) {
+function bufferOutboundItem(bridge, item) {
   const now = bridge.now();
   bridge.disconnectedBuffer = bridge.disconnectedBuffer.filter((x) => x.expiresAt > now);
   bridge.disconnectedBuffer.push(item);
@@ -21,7 +21,7 @@ export function bufferOutboundItem(bridge, item) {
   });
 }
 
-export function enqueueOutboundTask(bridge, chatId, fn) {
+function enqueueOutboundTask(bridge, chatId, fn) {
   const key = String(chatId || '_default');
   const prev = bridge.outboundQueue.get(key) ?? Promise.resolve();
   const task = prev.then(fn, fn);
@@ -71,7 +71,7 @@ export async function sendBridgeText(bridge, text, route = null, replyTo = null,
   if (!chatId) {
     if (!bridge.warnedMissingSelfChat) {
       bridge.warnedMissingSelfChat = true;
-      console.warn('[omb-send] 尚未获知目标会话 ID，请先在自聊发一条消息或在 config.json 配置 ipc.selfChatId');
+      console.warn('[omb-send] 尚未获知目标会话 ID，请先在自聊发一条消息或在 config.json 配置 channel.options.selfChatId');
     }
     return null;
   }

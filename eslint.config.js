@@ -35,7 +35,6 @@ export default [
       'node_modules/**',
       'data/**',
       'config.json',
-      'ipc-client.js',
       'im-plugin.js',
     ],
   },

@@ -226,7 +226,7 @@ test('channel-contract: normalizeInboundEvent, ManagedChannel reconnect & selfCh
   await k.stop();
 });
 
-test('loadChannelPlugin: dynamically loads declarative defineChannelPlugin, Cordis apply plugin, and legacy ipc-client', async () => {
+test('loadChannelPlugin: dynamically loads declarative defineChannelPlugin and Cordis apply plugin, rejecting legacy module', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-chan-load-'));
   const contractUrl = new URL('../src/core/channel-contract.js', import.meta.url).href;
 
@@ -246,10 +246,10 @@ test('loadChannelPlugin: dynamically loads declarative defineChannelPlugin, Cord
       },
     });
   `);
-  const resNew = await loadChannelPlugin({ channel: { use: pNew, options: { token: 'ok' } }, ipc: { client: './legacy.js', selfId: 'leak' } });
+  const resNew = await loadChannelPlugin({ channel: { use: pNew, options: { token: 'ok' } } });
   assert.equal(resNew.resolvedName, 'custom-im');
   assert.equal(resNew.plugin.kind, 'channel');
-  assert.deepEqual(resNew.options, { token: 'ok' }, '外部插件不应被无关 cfg.ipc 字段污染');
+  assert.deepEqual(resNew.options, { token: 'ok' });
 
   // 2. 原生 apply(ctx) 插件
   const pApply = path.join(dir, 'custom-apply.mjs');
@@ -267,35 +267,19 @@ test('loadChannelPlugin: dynamically loads declarative defineChannelPlugin, Cord
       },
     };
   `);
-  const resApply = await loadChannelPlugin({ channel: { use: pApply, options: {} }, ipc: {} });
+  const resApply = await loadChannelPlugin({ channel: { use: pApply, options: {} } });
   assert.equal(resApply.resolvedName, 'apply-im');
 
-  // 3. 向后兼容旧版 connect / send 文件（通过 wrapLegacyClientPlugin 托管）
+  // 3. 拒绝不符合 defineChannelPlugin / apply 契约的旧式导出模块
   const pLegacy = path.join(dir, 'legacy-client.mjs');
   fs.writeFileSync(pLegacy, `
-    let handler = null;
-    export const sent = [];
-    export async function connect(onMsg) { handler = onMsg; }
-    export async function send(payload) { sent.push(payload); return { msgId: 'leg1' }; }
-    export function push(msg) { return handler?.(msg); }
+    export async function connect() {}
+    export async function send() { return { msgId: 'leg1' }; }
   `);
-  const resLegacy = await loadChannelPlugin({ channel: { use: pLegacy, options: {} }, ipc: { selfId: 'u1' } });
-  assert.equal(resLegacy.resolvedName, 'ipc');
-  assert.equal(typeof resLegacy.options.clientModule.connect, 'function');
-
-  const legKernel = new Kernel({ config: { ipc: resLegacy.options } });
-  legKernel.use(resLegacy.plugin, resLegacy.options);
-  await legKernel.start();
-  const legChan = legKernel.get('channel');
-  const legEvents = [];
-  await legChan.start((ev) => legEvents.push(ev));
-  assert.equal(legChan.capabilities.files, false);
-  await resLegacy.options.clientModule.push({ msgId: 'm_leg', chatId: 'self_99', chatType: 'self', fromId: 'u1', text: 'hello' });
-  assert.equal(legChan.selfChatId, 'self_99');
-  assert.equal(legEvents[0].chat.type, 'self');
-  assert.equal(await legChan.send('self_99', 'ok'), 'leg1');
-  assert.deepEqual(resLegacy.options.clientModule.sent[0], { chatId: 'self_99', text: 'ok', quoteMsgId: undefined });
-  await legKernel.stop();
+  await assert.rejects(
+    () => loadChannelPlugin({ channel: { use: pLegacy, options: {} } }),
+    /不符合插件契约/,
+  );
 });
 
 test('OpenMausBotBridge capability-aware degradation: strips markdown, honors maxChars/replyTo/actions/files', async () => {
@@ -411,9 +395,7 @@ test('Kernel full-stack: WebPlugin + custom channel + OpenMausBotPlugin + Inspec
 
   const cfg = {
     openmausbot: { url: `http://127.0.0.1:${ombPort}`, timeoutMs: 3000, token: '', autoStart: false, cliComputerOff: false },
-    transport: 'ipc',
-    channel: { use: 'custom-mock', options: {} },
-    ipc: { selfId: 'u_me', selfChatId: 'chat_1' },
+    channel: { use: 'custom-mock', options: { selfId: 'u_me', selfChatId: 'chat_1' } },
     web: { host: '127.0.0.1', port: webPort },
     selfChat: { trigger: '@bot', fileRetentionDays: 0 },
     dataDir,
@@ -489,14 +471,14 @@ test('scripts/channel-test.js: --dry validates custom channel plugins and catche
 
   const logs = [];
   const resOk = await runChannelContractTest(
-    { transport: 'sim', channel: { use: validPath, options: {} }, ipc: {}, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
+    { channel: { use: validPath, options: {} }, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
     { dry: true, baseDir: APP_ROOT, log: (s) => logs.push(s) },
   );
   assert.equal(resOk.ok, true);
   assert.equal(resOk.channelName, 'ok-im');
 
   const resBroken = await runChannelContractTest(
-    { transport: 'sim', channel: { use: brokenPath, options: {} }, ipc: {}, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
+    { channel: { use: brokenPath, options: {} }, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
     { dry: true, baseDir: APP_ROOT, log: () => {} },
   );
   assert.equal(resBroken.ok, false);
@@ -521,7 +503,7 @@ test('scripts/channel-test.js: --dry validates custom channel plugins and catche
     });
   `);
   const resWait = await runChannelContractTest(
-    { transport: 'sim', channel: { use: inboundPath, options: { selfId: 'u1', selfChatId: 'preset_chat' } }, ipc: {}, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
+    { channel: { use: inboundPath, options: { selfId: 'u1', selfChatId: 'preset_chat' } }, web: { host: '127.0.0.1', port: 0 }, dataDir: dir },
     { dry: false, waitSec: 2, waitExplicit: true, sendText: 'ping', log: () => {} },
   );
   assert.equal(resWait.ok, true);

@@ -273,7 +273,7 @@ test('Resilience A4: stall watchdog alerts once on idle turn and stays quiet on 
   await bridge.stop();
 });
 
-test('Usability B1+B2: validateConfig catches typos/bad values and scripts/setup.js scaffolds clean config', async () => {
+test('Usability B1+B2: validateConfig catches typos and invalid config values', async () => {
   const bad = validateConfig({
     web: { port: 70000 },
     openmausbot: { url: 'ftp://invalid' },
@@ -325,9 +325,7 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
 
   const cfg = {
     openmausbot: { url: `http://127.0.0.1:${ombPort}`, timeoutMs: 3000, token: 'omb_sess_top_secret_999', autoStart: false },
-    transport: 'sim',
-    channel: { use: 'mock-ops', options: {} },
-    ipc: { selfId: 'u_secret_self_id', selfChatId: 'chat_self' },
+    channel: { use: 'mock-ops', options: { selfId: 'u_secret_self_id', selfChatId: 'chat_self' } },
     web: { host: '127.0.0.1', port: 0 },
     selfChat: { trigger: '@bot', fileRetentionDays: 0 },
     chats: { mode: 'owner_everywhere' },
@@ -352,7 +350,7 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
     assert.match(bundleResp.headers.get('content-disposition') || '', /attachment; filename="co-bot-diag-/);
     const bundle = await bundleResp.json();
     assert.equal(bundle.sanitizedConfig.openmausbot.token, '[REDACTED]');
-    assert.equal(bundle.sanitizedConfig.ipc.selfId, '[REDACTED]');
+    assert.equal(bundle.sanitizedConfig.channel.options.selfId, '[REDACTED]');
     assert.ok(bundle.runtime.memoryRssMB > 0);
     assert.ok(Array.isArray(bundle.events));
 

@@ -38,7 +38,7 @@ function parseArgs(argv) {
 function usage() {
   console.log([
     '用法：npm run channel:test -- [--channel <名称或路径>] [--config config.json] [--dry] [--wait 15] [--send "你好"] [--check-file]',
-    '  --channel     指定待检通道插件（如 sim、ipc、./im-plugin.js；默认读取 config.json）',
+    '  --channel     指定待检通道插件（如 sim、./im-plugin.js；默认读取 config.json）',
     '  --dry         仅做静态加载、方法导出与 capabilities 契约校验（不实际建立长连接）',
     '  --wait N      实时模式：最多等待 N 秒接收一条消息并检验 InboundEvent 字段映射（默认 10s）',
     '  --send T      实时模式：拿到 selfChatId 后回发一条测试文本验证 send()',
@@ -83,7 +83,7 @@ export async function runChannelContractTest(cfg, {
   try {
     loaded = await loadChannelPlugin(cfg, { overrideUse, baseDir });
   } catch (e) {
-    return { ok: false, channelName: overrideUse || cfg?.channel?.use || cfg?.transport || 'sim', errors: [e.message], warnings };
+    return { ok: false, channelName: overrideUse || cfg?.channel?.use || 'sim', errors: [e.message], warnings };
   }
 
   const kernel = new Kernel({ config: cfg, logger: { warn: () => {}, error: () => {} } });
@@ -120,10 +120,6 @@ export async function runChannelContractTest(cfg, {
     check = validateChannelAdapter(targetForValidation, channel.capabilities);
     errors.push(...check.errors);
     warnings.push(...check.warnings);
-
-    if (loaded.resolvedName === 'ipc' && !loaded.options?.clientModule && !loaded.options?.client) {
-      errors.push('ipc.client 未填写');
-    }
 
     log(`✓ 已加载通道插件「${loaded.resolvedName}」`);
     log(`  能力声明：${JSON.stringify(check.capabilities)}`);

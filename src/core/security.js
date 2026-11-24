@@ -75,7 +75,7 @@ export function scanAndRedactOutbound(text) {
 }
 
 /** 判断文件名或路径是否为适合做文本凭证扫描的文本类附件。 */
-export function isTextLikeFile(nameOrPath) {
+function isTextLikeFile(nameOrPath) {
   const base = path.basename(String(nameOrPath || '')).toLowerCase();
   if (base === '.env' || base.startsWith('.env.')) return true;
   const ext = path.extname(base);

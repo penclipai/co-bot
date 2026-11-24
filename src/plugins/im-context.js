@@ -36,7 +36,7 @@ export const imContextPlugin = {
     const channel = ctx.get('channel');
 
     const store = new ChatContextStore({
-      maxPerChat: chatsCfg.contextMaxMessagesPerChat ?? 200,
+      maxPerChat: chatsCfg.contextMaxMessagesPerChat ?? 120,
       maxChats: chatsCfg.contextMaxChats ?? 200,
       ttlMs: chatsCfg.contextTtlMs ?? 24 * 60 * 60_000,
     });

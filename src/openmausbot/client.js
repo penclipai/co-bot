@@ -8,7 +8,7 @@ import path from 'node:path';
 const enc = encodeURIComponent;
 
 /** 按 OpenMausBot 契约转义附件标签属性值。 */
-export function escapeAttachmentAttr(value) {
+function escapeAttachmentAttr(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('"', '&quot;')
@@ -233,16 +233,6 @@ export class OpenMausBotClient {
 
   patchBot(botId, patch) {
     return this.#json(`/api/bots/${enc(botId)}`, { method: 'PATCH', body: patch });
-  }
-
-  async listInstances() {
-    const data = await this.#json('/api/instances');
-    const instances = Array.isArray(data) ? data : (Array.isArray(data?.instances) ? data.instances : []);
-    return { instances };
-  }
-
-  patchTask(botId, threadId, patch) {
-    return this.#json(`/api/bots/${enc(botId)}/tasks/${enc(threadId)}`, { method: 'PATCH', body: patch });
   }
 
   createTask(botId, { title, select = true } = {}) {
