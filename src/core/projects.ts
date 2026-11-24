@@ -90,6 +90,14 @@ export function isProjectAuthorized(
   return Array.isArray(project.aliases) && project.aliases.some((a) => allowSet.has(a.toLowerCase()));
 }
 
+function isAccessibleDir(absPath: string): boolean {
+  try {
+    return fs.existsSync(absPath) && fs.statSync(absPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** 根据用户输入的项目名、别名或路径解析待绑定项目。 */
 export function matchProjectSpec(
   query: unknown,
@@ -113,7 +121,7 @@ export function matchProjectSpec(
       if (!rootHit) {
         return { ok: false, error: `路径「${abs}」不在已配置的 projects 白名单目录内` };
       }
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+      if (!isAccessibleDir(abs)) {
         return { ok: false, error: `目录不存在或不可访问：${abs}` };
       }
       return { ok: true, project: { name: rootHit.name, path: abs } };
@@ -121,7 +129,7 @@ export function matchProjectSpec(
     if (!allowArbitraryPath) {
       return { ok: false, error: '未配置允许任意路径绑定' };
     }
-    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+    if (!isAccessibleDir(abs)) {
       return { ok: false, error: `目录不存在或不可访问：${abs}` };
     }
     return { ok: true, project: { name: path.basename(abs) || abs, path: abs } };

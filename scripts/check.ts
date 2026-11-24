@@ -13,7 +13,7 @@ import { OpenMausBotClient } from '../src/openmausbot/client.ts';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.ts';
 import { probeOpenMausBot, type ProbeOpenMausBotResult } from '../src/plugins/openmausbot.ts';
 import { runChannelContractTest } from './channel-test.ts';
-import { findOpenMausBotServer } from './omb.ts';
+import { findOpenMausBotServer, probeHostOf } from './omb.ts';
 
 const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
@@ -35,7 +35,13 @@ if (rawCfgPath && fs.existsSync(rawCfgPath)) {
   }
 }
 
-const cfg = loadConfig(argv);
+let cfg: ReturnType<typeof loadConfig>;
+try {
+  cfg = loadConfig(argv);
+} catch (e) {
+  console.error(`✗ 加载配置失败：${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}
 const [maj] = process.versions.node.split('.').map(Number);
 
 if (maj >= 24) {
@@ -131,16 +137,17 @@ if (probe) {
 }
 
 const chanSpec = resolveChannelSpec(cfg);
+const webBase = `http://${probeHostOf(cfg.web.host)}:${cfg.web.port}`;
 if (chanSpec.kind === 'external') {
   const res = await runChannelContractTest(cfg, { dry: true, log: () => {} });
   if (res.ok) {
-    console.log(`✓ 通道插件「${res.channelName}」契约检查通过（诊断台 http://${cfg.web.host}:${cfg.web.port}/debug）`);
+    console.log(`✓ 通道插件「${res.channelName}」契约检查通过（诊断台 ${webBase}/debug）`);
   } else {
     for (const err of res.errors) console.error(`✗ 通道插件「${chanSpec.spec}」：${err}`);
     fails++;
   }
 } else {
-  console.log(`✓ 通道模式：${chanSpec.name}（Web 自聊模拟器 http://${cfg.web.host}:${cfg.web.port}/sim）`);
+  console.log(`✓ 通道模式：${chanSpec.name}（Web 自聊模拟器 ${webBase}/sim）`);
 }
 
 if (fails) process.exitCode = 1;

@@ -255,6 +255,10 @@ async function handleDefaultCommand(
   if (muteM) {
     const isMute = /^(?:mute|静音)$/i.test(muteM[1]);
     const arg = (muteM[2] ?? '').trim();
+    if (!arg && !isExternal) {
+      await sensSink.say(`用法：\`${bridge.trigger} ${isMute ? 'mute' : 'unmute'} <群名|chatId>\`，发 \`${bridge.trigger} chats\` 查看已知会话。`);
+      return true;
+    }
     const target = resolveChatOrId(bridge, arg, { isExternal, chatCtx });
     if (!target) {
       await sensSink.say(`未找到匹配会话「${arg}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
@@ -354,7 +358,7 @@ async function handleDefaultCommand(
         }
         if (targetChat) break;
       }
-      if (!targetChat) {
+      if (!targetChat && !(extCtx && /^-?\d+(?:\s|$)/.test(restRaw))) {
         const sp = restRaw.match(/^(\S+)(?:\s+([\s\S]*))?$/);
         const fuzzy = sp ? bridge.resolveKnownChat(sp[1]) : null;
         if (fuzzy) {
@@ -697,7 +701,24 @@ export async function handleCommand(
           await sensSink.say(`**${freshName}** 暂无可切换的历史会话，可发 \`${cmdTarget} new\` 创建新会话。`);
           return true;
         }
-        const route: MsgRoute = { botId: fresh.id, botName: freshName, threadId: fresh.threadId, ...(isGroup ? { isGroup: true } : {}) };
+        const activeTid = activeTarget.threadId || fresh.threadId;
+        const route: MsgRoute = { botId: fresh.id, botName: freshName, threadId: activeTid, ...(isGroup ? { isGroup: true } : {}) };
+        const lines = top.map((t, i) => {
+          const cur = (t.threadId ?? t.id) === activeTid ? '（当前）' : '';
+          const busy = t.busy ? ' · 运行中' : '';
+          return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
+        });
+        const actions = top.map((t, i) => ({
+          label: `${i + 1}. ${clip(t.title || '会话', 16)}`,
+          text: String(i + 1),
+          ...((t.threadId ?? t.id) === activeTid ? { kind: 'primary' } : {}),
+        }));
+        const sentId = await sensSink.say(
+          `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
+          route,
+          null,
+          actions,
+        );
         bridge.clearPickers();
         bridge.pendingTaskPick = {
           botId: fresh.id,
@@ -705,23 +726,12 @@ export async function handleCommand(
           isGroup,
           tasks: top,
           expiresAt: bridge.now() + TASK_PICK_TTL,
+          imMsgId: sentId,
+          isExternal,
+          originChatId: extCtx?.originChatId ?? null,
+          chatId: sensSink.chatId,
+          banner: sensSink.banner,
         };
-        const lines = top.map((t, i) => {
-          const cur = (t.threadId ?? t.id) === fresh.threadId ? '（当前）' : '';
-          const busy = t.busy ? ' · 运行中' : '';
-          return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
-        });
-        const actions = top.map((t, i) => ({
-          label: `${i + 1}. ${clip(t.title || '会话', 16)}`,
-          text: String(i + 1),
-          ...((t.threadId ?? t.id) === fresh.threadId ? { kind: 'primary' } : {}),
-        }));
-        await sensSink.say(
-          `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
-          route,
-          null,
-          actions,
-        );
       } catch (e) {
         await sensSink.say(`❌ 获取会话列表失败：${formatOmbError(e)}`);
       }

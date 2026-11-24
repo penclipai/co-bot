@@ -92,10 +92,11 @@ test('openmausbot bridge: throttled activity milestone, approval ok/no, bots and
     });
 
     await transport.emitUser('@bot 帮我检查并拉取代码');
-    await until(() => sent.some((m) => m.text.includes('正在执行')) && sent.some((m) => m.text.includes('回复 `ok` 允许')));
+    await until(() => sent.some((m) => m.text.includes('正在执行')) && sent.some((m) => m.text.includes('运行命令：git fetch origin')));
 
-    const cardBubble = sent.find((m) => m.text.includes('回复 `ok` 允许'))!;
+    const cardBubble = sent.find((m) => m.text.includes('运行命令：git fetch origin'))!;
     assert.equal(cardBubble.text.includes('**[MausBot]**'), false);
+    assert.ok(cardBubble.text.includes('允许'));
 
     await transport.emitUser('ok');
     await until(() => sent.some((m) => m.text.includes('已执行命令，结果正常')));

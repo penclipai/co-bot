@@ -2,7 +2,7 @@
  * OpenMausBot 单轮执行追踪器：监听 SSE 消息与 /job 轮询，合并中间气泡、推送去噪进度并在轮次完成时收口交付。
  */
 import type { OpenMausBotBridge } from './bridge.ts';
-import { formatActivity, formatOmbError } from './cards.ts';
+import { formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
 import { messageNeedsInput } from './client.ts';
 import { botCommandTarget } from './command-helpers.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
@@ -44,7 +44,7 @@ function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, se
   }
   for (const m of windowBots) {
     if (seen.has(m) || m.requestMessageId) continue;
-    if (m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)) {
+    if (m.kind === 'screen' || m.kind === 'burst' || m.kind === 'goal.run' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)) {
       seen.add(m);
     }
   }
@@ -115,6 +115,7 @@ export function createTurnTracker(
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let intermediateTimer: ReturnType<typeof setTimeout> | null = null;
   let stallTimer: ReturnType<typeof setInterval> | null = null;
+  let resumedWatchAc: AbortController | null = null;
   let progressCount = 0;
   let intermediateBubbleCount = 0;
   let lastProgressAt = 0;
@@ -238,8 +239,9 @@ export function createTurnTracker(
     const elapsed = Math.max(1, Math.round((now - startedAt) / 1000));
     const who = bridge.botPrefix(botId, botName, { isGroup });
     const head = who ? `${who} ` : '';
+    const targetChatId = chatCtx?.replyChatId || bridge.selfChat;
     await enqueueEmit(() => bridge.say(`${head}${latestActivity}（已 ${elapsed}秒）`, {
-      botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}),
+      botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(targetChatId ? { targetChatId } : {}),
     }));
   };
 
@@ -250,7 +252,8 @@ export function createTurnTracker(
     const now = bridge.now();
     const untilDelay = Math.max(0, startedAt + bridge.progressDelayMs - now);
     const untilInterval = lastProgressAt ? Math.max(0, lastProgressAt + bridge.progressIntervalMs - now) : 0;
-    const wait = Math.max(untilDelay, untilInterval);
+    const untilHuman = lastHumanTextAt ? Math.max(0, lastHumanTextAt + bridge.progressDelayMs - now) : 0;
+    const wait = Math.max(untilDelay, untilInterval, untilHuman);
     progressTimer = setTimeout(() => {
       progressTimer = null;
       pushProgress(true).catch(() => {});
@@ -260,6 +263,8 @@ export function createTurnTracker(
 
   const dispose = (): void => {
     ac.abort();
+    resumedWatchAc?.abort();
+    resumedWatchAc = null;
     if (progressTimer) {
       clearTimeout(progressTimer);
       progressTimer = null;
@@ -318,8 +323,15 @@ export function createTurnTracker(
 
   const startWatcher = (afterInput = false): void => {
     ensureStallWatchdog();
-    const watchAc = afterInput ? new AbortController() : ac;
-    if (afterInput) ac.signal.addEventListener('abort', () => watchAc.abort(), { once: true });
+    let watchAc: AbortController;
+    if (afterInput) {
+      resumedWatchAc?.abort();
+      resumedWatchAc = new AbortController();
+      watchAc = resumedWatchAc;
+      ac.signal.addEventListener('abort', () => watchAc.abort(), { once: true });
+    } else {
+      watchAc = ac;
+    }
     (async () => {
       let since: unknown;
       let version: unknown;
@@ -413,11 +425,28 @@ export function createTurnTracker(
         || pendingIntermediates.length > 0
         || heldIntermediates.length > 0
         || earlyTexts.some((m) => String(m.text ?? '').trim())
-        || matched.some((m) => m.turnFailed || m.error || m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)),
+        || matched.some((m) => m.turnFailed || m.error || m.kind === 'screen' || m.kind === 'burst' || m.kind === 'goal.run' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)),
       );
 
       // `!evt.bot.busy` SSE 事件可能在新轮次尚未落库或上一轮尾波瞬间到达，避免过早判定空转
       if (!hasEarlyContent && jobState === null && (bridge.now() - startedAt) < 3000) {
+        return;
+      }
+
+      const awaitsTurnResume = Boolean(
+        pendingMsg
+        && (pendingMsg.card || pendingMsg.secret || pendingMsg.connector || pendingMsg.signIn)
+        && !matched.some((m) => m.kind === 'text' && m.turnTerminal),
+      );
+      if (pendingMsg && awaitsTurnResume) {
+        waitingForInput = true;
+        await emitChain.catch(() => {});
+        if (stoppedByUser) return;
+        await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
+        if (!settled && !stoppedByUser) {
+          bridge.activeTurns.set(key, turn);
+          startWatcher(true);
+        }
         return;
       }
 
@@ -433,12 +462,6 @@ export function createTurnTracker(
 
       if (pendingMsg) {
         await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
-        if (!matched.some((m) => m.kind === 'text' && m.turnTerminal)) {
-          settled = false;
-          bridge.activeTurns.set(key, turn);
-          startWatcher(true);
-          return;
-        }
       }
 
       const seenInMatched = new Set(matched.map((m) => m?.id).filter((x): x is string => Boolean(x)).map(String));
@@ -459,6 +482,27 @@ export function createTurnTracker(
       const hasAnyText = undeliveredTexts.some((m) => String(m.text ?? '').trim());
 
       if (!hasAnyText) {
+        const terminalGoal = matched.findLast((m) => m.kind === 'goal.run' && m.goalRun?.status && m.goalRun.status !== 'working');
+        if (terminalGoal) {
+          const goalBody = String(terminalGoal.text || terminalGoal.goalRun?.detail || '').trim();
+          if (goalBody && deliveredIntermediateIds.size === 0 && (!terminalGoal.id || !bridge.deliveredOmbIds.has(String(terminalGoal.id)))) {
+            if (terminalGoal.id) rememberBounded(bridge.deliveredOmbIds, terminalGoal.id);
+            await deliverBotReply({
+              botId,
+              botName,
+              threadId,
+              text: goalBody,
+              finalMsg: terminalGoal,
+              mediaMessages: matched,
+              proactive: false,
+              isGroup,
+              speakerName: isGroup ? (terminalGoal.from?.name || '') : '',
+              chatCtx,
+            });
+            await maybeWarnHighContext(botId, threadId, chatCtx);
+            return;
+          }
+        }
         if (deliveredIntermediateIds.size > 0) {
           if (!isExternal) bridge.lastBotReplyAt = bridge.now();
           bridge.saveState();
@@ -479,7 +523,8 @@ export function createTurnTracker(
         } else {
           const forwardedMedia = await forwardBotMedia(threadId, matched, { chatId: chatCtx?.replyChatId || bridge.selfChat });
           const hasMediaMsg = matched.some((m) => m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0));
-          if (!forwardedMedia && !hasMediaMsg && !stoppedByUser) {
+          const hasBurstCard = matched.some((m) => m.kind === 'burst');
+          if (!forwardedMedia && !hasMediaMsg && !hasBurstCard && !stoppedByUser) {
             const listed = typeof bridge.client.listBots === 'function' ? await bridge.client.listBots().catch(() => null) : null;
             const curBot = (listed?.bots ?? []).find((b) => b.id === botId);
             const isDead = curBot?.activity === 'dead';
@@ -566,6 +611,15 @@ export function createTurnTracker(
       if (msg.kind === 'activity') {
         latestActivity = formatActivity(msg);
         scheduleProgress();
+        return;
+      }
+      if (msg.kind === 'goal.run') {
+        if (!msg.goalRun?.status || msg.goalRun.status === 'working') {
+          latestActivity = formatGoalProgress(msg);
+          scheduleProgress();
+          return;
+        }
+        complete().catch(() => {});
         return;
       }
       if (messageNeedsInput(msg)) {

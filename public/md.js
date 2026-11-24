@@ -2,6 +2,14 @@
 (function () {
   const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+  function trimBareUrl(u) {
+    let url = u.replace(/[.,;:!?*~_>]+$/, '');
+    while (url.endsWith(')') && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
+      url = url.slice(0, -1).replace(/[.,;:!?*~_>]+$/, '');
+    }
+    return url;
+  }
+
   function inline(src) {
     const keep = [];
     const hold = (html) => `\u0000${keep.push(html) - 1}\u0000`;
@@ -9,13 +17,21 @@
       .replace(/\\([\\`*_[\]<>|#])/g, (_, c) => hold(esc(c)))
       .replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${esc(c)}</code>`))
       .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(t)}</a>`))
-      .replace(/https?:\/\/[^\s<>()]+[^\s<>().,;:!?，。；：！？）]/g, (u) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`));
+      .replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/g, (raw) => {
+        const u = trimBareUrl(raw);
+        const tail = raw.slice(u.length);
+        return u ? `${hold(`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`)}${tail}` : raw;
+      });
     s = esc(s)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>')
       .replace(/~~(.+?)~~/g, '<del>$1</del>');
     // eslint-disable-next-line no-control-regex
-    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
+    for (let pass = 0; pass < 5 && /\u0000\d+\u0000/.test(s); pass++) {
+      // eslint-disable-next-line no-control-regex
+      s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i] ?? '');
+    }
+    return s;
   }
 
   function render(md) {

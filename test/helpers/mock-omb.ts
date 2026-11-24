@@ -5,7 +5,7 @@ import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import path from 'node:path';
 import type { BridgeTransport, OmbBot, OmbGroup, OmbMessage } from '../../src/openmausbot/types.ts';
-import type { ChannelSendFileInput, ChannelSendOptions, InboundAttachment, InboundDevice, InboundEvent } from '../../src/types.ts';
+import type { ChannelAction, ChannelSendFileInput, ChannelSendOptions, InboundAttachment, InboundDevice, InboundEvent } from '../../src/types.ts';
 
 export async function getFreePort(): Promise<number> {
   const srv = net.createServer();
@@ -34,6 +34,7 @@ export interface MockScenarioContext {
   bot?: OmbBot;
   group?: OmbGroup;
   reqMsg: OmbMessage;
+  mode?: string | null;
   threadId: string;
   messages: OmbMessage[];
   jobs: Map<string, MockJobState>;
@@ -59,6 +60,7 @@ export interface SentImItem {
   id: string;
   text: string;
   replyTo: string | null;
+  actions?: ChannelAction[];
 }
 
 export interface SentImFileItem {
@@ -108,6 +110,14 @@ export async function startMockOmb(
   const steered: Array<Record<string, unknown>> = [];
   const cancelled: Array<Record<string, unknown>> = [];
   const compacts: Array<Record<string, unknown>> = [];
+  const burstActions: Array<{ burstId: string; action: string }> = [];
+  let burstHandler: ((args: {
+    burstId: string;
+    action: string;
+    broadcast: (payload: Record<string, unknown>) => void;
+    messages: Map<string, OmbMessage[]>;
+    nextId: () => string;
+  }) => Record<string, unknown> | void) | null = null;
   let respondFailuresLeft = Number(opts.respondFailCount ?? 0);
   let dismissFailuresLeft = Number(opts.dismissFailCount ?? 0);
   const authHeaders: Array<{ method?: string; path: string; auth: string | null }> = [];
@@ -350,8 +360,15 @@ export async function startMockOmb(
       const bot = bots.find((x) => x.id === m![1]);
       if (!bot) return json(404, { error: 'no such bot' });
       const body = await readJson();
+      if (body.mode !== undefined && body.mode !== 'chat' && body.mode !== 'goal') {
+        return json(400, { error: 'mode must be chat or goal' });
+      }
+      if (body.mode === 'goal' && !String(body.text ?? '').trim()) {
+        return json(400, { error: 'a goal is a plain typed message' });
+      }
+      const mode = body.mode ? String(body.mode) : null;
       const threadId = String(body.threadId || bot.threadId);
-      sentToOmb.push({ botId: bot.id, threadId, text: body.text, sendId: body.sendId });
+      sentToOmb.push({ botId: bot.id, threadId, text: body.text, sendId: body.sendId, mode });
       if (opts.queueWhenBusy && jobs.get(threadId)?.state === 'running') {
         const queueId = `q_${++msgSeq}`;
         return json(202, { ok: true, queued: true, queueId, threadId });
@@ -365,15 +382,22 @@ export async function startMockOmb(
       jobs.set(threadId, { state: 'running', version: `v${++seq}`, needsInput: [] });
       res.writeHead(202, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, threadId, message: reqMsg }));
-      if (scenario) scenario({ bot, reqMsg, threadId, messages: messages.get(threadId)!, jobs, broadcast, nextId: () => `m${++msgSeq}` });
+      if (scenario) scenario({ bot, reqMsg, mode, threadId, messages: messages.get(threadId)!, jobs, broadcast, nextId: () => `m${++msgSeq}` });
       return;
     }
     if (req.method === 'POST' && (m = /^\/api\/groups\/([^/]+)\/messages$/.exec(u.pathname))) {
       const group = groups.find((g) => g.id === m![1]);
       if (!group) return json(404, { error: 'no such group' });
       const body = await readJson();
+      if (body.mode !== undefined && body.mode !== 'chat' && body.mode !== 'goal') {
+        return json(400, { error: 'mode must be chat or goal' });
+      }
+      if (body.mode === 'goal' && !String(body.text ?? '').trim()) {
+        return json(400, { error: 'a goal is a plain typed message' });
+      }
+      const mode = body.mode ? String(body.mode) : null;
       const threadId = String(body.threadId || group.threadId);
-      sentToOmb.push({ groupId: group.id, threadId, text: body.text, sendId: body.sendId, replyToId: body.replyToId ?? null });
+      sentToOmb.push({ groupId: group.id, threadId, text: body.text, sendId: body.sendId, replyToId: body.replyToId ?? null, mode });
       if (opts.queueWhenBusy && jobs.get(threadId)?.state === 'running') {
         const queueId = `gq_${++msgSeq}`;
         return json(202, { ok: true, queued: true, queueId, threadId });
@@ -387,7 +411,7 @@ export async function startMockOmb(
       jobs.set(threadId, { state: 'running', version: `v${++seq}`, needsInput: [] });
       res.writeHead(202, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, threadId, message: reqMsg }));
-      if (scenario) scenario({ group, reqMsg, threadId, messages: messages.get(threadId)!, jobs, broadcast, nextId: () => `m${++msgSeq}` });
+      if (scenario) scenario({ group, reqMsg, mode, threadId, messages: messages.get(threadId)!, jobs, broadcast, nextId: () => `m${++msgSeq}` });
       return;
     }
     if (req.method === 'POST' && (m = /^\/api\/groups\/([^/]+)\/interrupt$/.exec(u.pathname))) {
@@ -443,6 +467,20 @@ export async function startMockOmb(
       uploads.push(item);
       return json(201, { url: item.url, path: `C:\\tmp\\${name}` });
     }
+    if (req.method === 'POST' && (m = /^\/api\/bursts\/([^/]+)\/(run|cancel|retry)$/.exec(u.pathname))) {
+      const burstId = m[1];
+      const action = m[2];
+      burstActions.push({ burstId, action });
+      for (const arr of messages.values()) {
+        for (const msg of arr) {
+          if (msg.burst?.burstId === burstId) {
+            msg.burst.phase = action === 'cancel' ? 'cancelled' : 'running';
+          }
+        }
+      }
+      const custom = burstHandler?.({ burstId, action, broadcast, messages, nextId: () => `m${++msgSeq}` });
+      return json(200, custom ?? { ok: true, burstId, phase: action === 'run' ? 'running' : (action === 'cancel' ? 'cancelled' : 'running') });
+    }
     json(404, { error: `unhandled ${req.method} ${u.pathname}` });
   });
 
@@ -460,6 +498,7 @@ export async function startMockOmb(
     steered,
     cancelled,
     compacts,
+    burstActions,
     bots,
     groups,
     authHeaders,
@@ -473,6 +512,7 @@ export async function startMockOmb(
       mediaFiles.set(`${msgId}:${key}`, val);
     },
     setScenario(fn: ((ctx: MockScenarioContext) => void) | null) { scenario = fn; },
+    setBurstHandler(fn: typeof burstHandler) { burstHandler = fn; },
     close: async () => {
       for (const c of sseClients) c.end();
       server.closeAllConnections?.();
@@ -505,7 +545,7 @@ export function makeIm(
     async stop() {},
     async send(_chatId: string, text: string, opts?: ChannelSendOptions) {
       const id = `im${++seq}`;
-      sentList.push({ id, text, replyTo: opts?.replyTo ?? null });
+      sentList.push({ id, text, replyTo: opts?.replyTo ?? null, actions: opts?.actions });
       return id;
     },
     async sendFile(_chatId: string, file: ChannelSendFileInput, opts?: ChannelSendOptions) {

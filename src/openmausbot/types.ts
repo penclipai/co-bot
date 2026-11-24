@@ -90,7 +90,16 @@ export interface OmbCardOption {
 
 export interface OmbCardQuestion {
   question?: string;
+  header?: string;
+  multiSelect?: boolean;
   options?: Array<string | OmbCardOption>;
+}
+
+export interface NormalizedCardQuestion {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description: string }>;
 }
 
 export interface OmbCard {
@@ -106,7 +115,54 @@ export interface OmbCard {
   expired?: boolean;
   quotaSwitch?: boolean;
   questions?: OmbCardQuestion[];
+  questionRequest?: {
+    version?: number;
+    questions?: OmbCardQuestion[];
+  };
   options?: Array<string | OmbCardOption>;
+  teamSetupRequest?: Record<string, unknown>;
+  profileRequest?: Record<string, unknown>;
+  appSettingRequest?: Record<string, unknown>;
+  mcpRequest?: Record<string, unknown>;
+  skillRequest?: Record<string, unknown>;
+  routineRequest?: Record<string, unknown>;
+  modelRequest?: Record<string, unknown>;
+}
+
+export interface OmbBurstCard {
+  version?: number;
+  burstId: string;
+  botId?: string;
+  task?: string;
+  phase: 'preview' | 'running' | 'merging' | 'done' | 'cancelled' | 'failed' | string;
+  total?: number;
+  requested?: number;
+  parallel?: number;
+  modelName?: string;
+  estimateMinutes?: number;
+  counts?: {
+    queued?: number;
+    running?: number;
+    done?: number;
+    failed?: number;
+    cancelled?: number;
+  };
+  sample?: Array<string | { title?: string; item?: string }>;
+  failed?: Array<{ title?: string; reason?: string }>;
+  failedMore?: number;
+}
+
+export interface OmbGoalRun {
+  runId?: string;
+  goal?: string;
+  status?: 'working' | 'completed' | 'done' | 'failed' | 'cancelled' | 'timed_out' | 'stopped' | string;
+  coordinatorBotId?: string;
+  coordinatorName?: string;
+  turnCount?: number;
+  maxTurns?: number;
+  detail?: string;
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 export interface OmbCardAttachment {
@@ -137,6 +193,8 @@ export interface OmbMessage {
   from?: { name?: string; botId?: string };
   tool?: { name?: string; spoken?: string };
   card?: OmbCard;
+  burst?: OmbBurstCard;
+  goalRun?: OmbGoalRun;
   secret?: { label?: string; target?: string; provided?: boolean; dismissed?: boolean; superseded?: boolean };
   connector?: { label?: string; slug?: string; dismissed?: boolean; resumed?: boolean; status?: string };
   signIn?: { done?: boolean; cancelled?: boolean; superseded?: boolean; answeredInChat?: boolean; url?: string };
@@ -303,18 +361,36 @@ export interface PendingSendBack {
 
 export interface PendingCard {
   imMsgId: string;
-  cardKind: 'card' | 'secret' | 'connector' | 'signIn';
+  cardKind: 'card' | 'secret' | 'connector' | 'signIn' | 'burst';
   cardBotId: string;
   requestId: string | null;
+  burstId?: string | null;
   threadId: string;
   botId: string;
   botName: string;
   isGroup?: boolean;
   ombMsgId?: string;
   isQuestion: boolean;
+  isReviewProposal?: boolean;
+  title?: string;
   options: Array<{ label: string; description: string }>;
+  questions?: NormalizedCardQuestion[];
+  questionIndex?: number;
+  collectedAnswers?: string[];
   canRememberCommand: boolean;
   chatCtx?: CompactChatContext | null;
+}
+
+export interface ActiveBurstWatch {
+  burstId: string;
+  botId: string;
+  botName: string;
+  threadId: string;
+  isGroup?: boolean;
+  chatCtx?: CompactChatContext | null;
+  startedAt: number;
+  deliveredText?: boolean;
+  doneSeen?: boolean;
 }
 
 export interface PendingTaskPick {
@@ -323,6 +399,11 @@ export interface PendingTaskPick {
   isGroup: boolean;
   tasks: OmbTaskSummary[];
   expiresAt: number;
+  imMsgId?: string | null;
+  isExternal?: boolean;
+  originChatId?: string | null;
+  chatId?: string | null;
+  banner?: string;
 }
 
 export interface QuietQueueItem {

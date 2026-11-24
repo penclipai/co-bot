@@ -74,7 +74,7 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       for (const [k, v] of raw.pendingCards.slice(-20)) {
         if (k && v?.botId && v?.threadId) {
           bridge.pendingCards.set(String(k), v);
-          rememberBounded(bridge.deliveredCards, v.requestId || v.ombMsgId);
+          rememberBounded(bridge.deliveredCards, v.requestId || (v.burstId ? `burst:${v.burstId}` : v.ombMsgId));
         }
       }
     }

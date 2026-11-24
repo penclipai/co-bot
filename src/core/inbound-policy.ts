@@ -88,7 +88,7 @@ export function evaluateInboundPolicy(
     return { allowed: false, reason: 'missing_sender_id' };
   }
   const list = Array.isArray(collaborators)
-    ? (collaborators as CollaboratorRule[])
+    ? normalizeCollaborators(collaborators)
     : normalizeCollaborators(collaborators);
   const entry = list.find((c) => c.id === senderId);
   if (!entry) {

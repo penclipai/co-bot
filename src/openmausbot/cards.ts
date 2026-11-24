@@ -1,8 +1,8 @@
 import { clip } from '../format.ts';
 import type { ChannelAction } from '../types.ts';
-import type { OmbHttpError, OmbMessage } from './types.ts';
+import type { NormalizedCardQuestion, OmbCardQuestion, OmbHttpError, OmbMessage } from './types.ts';
 
-const SIMPLE_ALLOW_RE = /^(ok|okay|yes|y|allow|allow once|always|always allow|deny|no|cancel|reject|允许|仅此一次|总是允许|拒绝|取消)$/i;
+const SIMPLE_ALLOW_RE = /^(ok|okay|yes|y|allow|allow once|always|always allow|apply|approve|save|confirm|create|deny|no|cancel|reject|允许|仅此一次|总是允许|应用|保存|确认|拒绝|取消)$/i;
 const GENERIC_SPOKEN_RE = /^(running a command|reading a file|searching|searching files|editing a file|writing a file|thinking|working)\.?$/i;
 
 const CHOICE_DIGIT_MAP: Record<string, number> = {
@@ -13,16 +13,18 @@ const CHOICE_INDEX_RE = /^(?:(?:选|选择|要|用|就|就选|切|切到|换|换
 
 export interface ExtractedCardInfo {
   isQuestion: boolean;
+  isReviewProposal: boolean;
   title: string;
   questionText: string;
   options: Array<{ label: string; description: string }>;
+  questions: NormalizedCardQuestion[];
   canRememberCommand: boolean;
 }
 
 export interface FormattedCardPrompt {
   text: string;
   actions: ChannelAction[];
-  info: ExtractedCardInfo | { cardKind: 'secret' | 'connector' | 'signIn'; isQuestion?: boolean; options?: never[]; canRememberCommand?: boolean } | null;
+  info: ExtractedCardInfo | { cardKind: 'secret' | 'connector' | 'signIn' | 'burst'; isQuestion?: boolean; options?: never[]; canRememberCommand?: boolean } | null;
 }
 
 /** 解析纯序号或中文口语序数（如 `2`、`2.`、`第二个`、`选一`、`三号`），返回 1..9 或 null。 */
@@ -31,6 +33,34 @@ export function parseChoiceIndex(rawText: unknown): number | null {
   if (!s) return null;
   const m = CHOICE_INDEX_RE.exec(s);
   return m ? (CHOICE_DIGIT_MAP[m[1]] ?? null) : null;
+}
+
+/** 解析单选或逗号/空格分隔的多选序号（如 `1,2`、`1 3`、`1、2`），返回映射后的选项文本。 */
+export function parseMultiChoiceAnswer(
+  rawText: unknown,
+  options: Array<{ label: string }>,
+  multiSelect = false,
+): string | null {
+  const s = String(rawText ?? '').trim();
+  if (!s || !Array.isArray(options) || !options.length) return null;
+  if (multiSelect && /^\d+(?:\s*[,，、\s]\s*\d+)+$/.test(s)) {
+    const nums = [...new Set(s.split(/[,，、\s]+/).map(Number))];
+    const picked = nums
+      .filter((n) => Number.isInteger(n) && n >= 1 && n <= options.length)
+      .map((n) => options[n - 1]?.label)
+      .filter((v): v is string => Boolean(v));
+    if (picked.length) return picked.join(', ');
+  }
+  const single = parseChoiceIndex(s);
+  if (single && options[single - 1]?.label) return options[single - 1].label;
+  return null;
+}
+
+/** 格式化多题提问卡收集到的全部问答结果。 */
+export function formatMultiQuestionAnswers(questions: NormalizedCardQuestion[], answers: string[]): string {
+  return questions
+    .map((q, i) => `Q: ${q.question || q.header || `问题${i + 1}`}\nA: ${answers[i] ?? ''}`)
+    .join('\n\n');
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -90,6 +120,16 @@ export function formatActivity(msg: OmbMessage | null | undefined): string {
   return '⏳ 还在处理中…';
 }
 
+/** 格式化 /goal 运行中的进度摘要。 */
+export function formatGoalProgress(msg: OmbMessage | null | undefined): string {
+  const run = msg?.goalRun;
+  if (!run) return clip(String(msg?.text ?? '').trim() || '🎯 目标推进中…', 60);
+  const step = run.turnCount && run.maxTurns ? `（第 ${run.turnCount}/${run.maxTurns} 步）` : '';
+  const detail = String(run.detail ?? '').trim();
+  const suffix = detail ? `：${clip(detail, 50)}` : '…';
+  return `🎯 目标推进中${step}${suffix}`;
+}
+
 /** 格式化 OpenMausBot HTTP/SSE 错误信息，401/403 时附带配对修复指引。 */
 export function formatOmbError(e: unknown): string {
   const err = e as OmbHttpError | null | undefined;
@@ -117,81 +157,182 @@ function normalizeCardOptions(arr: unknown): Array<{ label: string; description:
   return out;
 }
 
+function normalizeCardQuestions(raw: unknown): NormalizedCardQuestion[] {
+  if (!Array.isArray(raw)) return [];
+  const out: NormalizedCardQuestion[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const q = item as OmbCardQuestion;
+    out.push({
+      question: String(q.question ?? '').trim(),
+      header: String(q.header ?? '').trim(),
+      multiSelect: Boolean(q.multiSelect),
+      options: normalizeCardOptions(q.options),
+    });
+  }
+  return out;
+}
+
+export interface CardRenderOpts {
+  multiCard?: boolean;
+}
+
+function formatQuoteBlock(text: string, maxChars: number): string {
+  const clipped = clip(String(text ?? '').trim(), maxChars);
+  if (!clipped) return '';
+  return clipped.split('\n').map((line) => (line.trim() ? `> ${line}` : '>')).join('\n');
+}
+
+const multiCardNotice = (multiCard?: boolean): string => (
+  multiCard ? '\n> 💡 当前有多条待确认，请**引用本条消息**回复' : ''
+);
+
+/** 渲染提问卡指定题号的 Markdown 伪卡片文案（无真卡片按钮，适配全 IM 客户端）。 */
+export function formatQuestionStepPrompt(
+  whoPrefix: string,
+  title: string,
+  questions: NormalizedCardQuestion[],
+  stepIndex = 0,
+  opts: CardRenderOpts = {},
+): { text: string; actions: ChannelAction[] } {
+  const head = whoPrefix ? `${whoPrefix} ` : '';
+  const q = questions[stepIndex] ?? { question: '', header: '', multiSelect: false, options: [] };
+  const total = questions.length;
+  const metaParts: string[] = [];
+  if (total > 1) metaParts.push(`${stepIndex + 1}/${total}${q.header ? ` · ${q.header}` : ''}`);
+  if (q.multiSelect) metaParts.push('可多选');
+  const metaSuffix = metaParts.length ? `（${metaParts.join(' · ')}）` : '';
+  const lines = [`${head}❓ **${title}${metaSuffix}**`];
+  if (q.question && q.question !== title) {
+    const quoted = formatQuoteBlock(q.question, 300);
+    if (quoted) lines.push(quoted);
+  }
+  if (q.options.length) {
+    lines.push('');
+    q.options.forEach((opt, i) => {
+      lines.push(`${i + 1}. **${opt.label}**${opt.description ? ` — ${clip(opt.description, 80)}` : ''}`);
+    });
+    const multiHint = q.multiSelect ? '（多选 **`1,2`**）' : '';
+    lines.push(
+      '---',
+      `👉 回复序号 **\`1\`**${multiHint}、直接打字自定义，或 **\`0\` 取消**${multiCardNotice(opts.multiCard)}`,
+    );
+  } else {
+    lines.push('---', `👉 直接回复你的想法，或 **\`0\` 取消**${multiCardNotice(opts.multiCard)}`);
+  }
+  return { text: lines.join('\n'), actions: [] };
+}
+
 /** 解析 OpenMausBot 审批卡或提问选项卡结构。 */
 export function extractCardInfo(msg: OmbMessage | null | undefined): ExtractedCardInfo | null {
   const card = msg?.card;
   if (!card || typeof card !== 'object') return null;
-  const questions = Array.isArray(card.questions) ? card.questions : [];
-  const firstQ = questions[0] && typeof questions[0] === 'object' ? questions[0] : null;
-  const options = firstQ ? normalizeCardOptions(firstQ.options) : normalizeCardOptions(card.options);
+  const rawQuestions = Array.isArray(card.questionRequest?.questions) && card.questionRequest.questions.length
+    ? card.questionRequest.questions
+    : (Array.isArray(card.questions) ? card.questions : []);
+  const questions = normalizeCardQuestions(rawQuestions);
+  const firstQ = questions[0] ?? null;
+  const options = firstQ?.options.length ? firstQ.options : normalizeCardOptions(card.options);
   const simpleAllowDeny = options.length > 0 && options.length <= 3 && options.every((o) => SIMPLE_ALLOW_RE.test(o.label));
-  const isQuestion = card.requestType === 'question'
+  const isReviewProposal = Boolean(
+    card.teamSetupRequest
+    || card.profileRequest
+    || card.appSettingRequest
+    || card.mcpRequest
+    || card.skillRequest
+    || card.routineRequest
+    || card.modelRequest,
+  );
+  const isQuestion = !isReviewProposal && (
+    card.requestType === 'question'
+    || Boolean(card.questionRequest)
     || questions.length > 0
-    || (options.length > 0 && card.requestType !== 'permission' && !simpleAllowDeny);
+    || (options.length > 0 && card.requestType !== 'permission' && !simpleAllowDeny)
+  );
   const titleRaw = String(card.title || '').trim();
   const title = (isQuestion && /^your bot has a question$/i.test(titleRaw))
     ? '需要你做个决定'
     : (titleRaw || (isQuestion ? '需要你选择' : '需要你确认操作'));
   const questionText = String(firstQ?.question || card.subtitle || (isQuestion ? msg?.text : '') || '').trim();
   const canRememberCommand = Boolean(card.command || card.canRememberCommand || card.rememberCommand);
-  return { isQuestion, title, questionText, options, canRememberCommand };
+  return { isQuestion, isReviewProposal, title, questionText, options, questions, canRememberCommand };
 }
 
-/** 渲染审批卡、选项/提问卡或授权提示，同时返回 Web 模拟器快捷按钮。 */
-export function formatCardPrompt(_botName: string, msg: OmbMessage, whoPrefix: string): FormattedCardPrompt {
+/** 渲染结构化 Markdown 伪卡片文案（去掉真卡片按钮，适配全 IM 客户端）。 */
+export function formatCardPrompt(
+  _botName: string,
+  msg: OmbMessage,
+  whoPrefix: string,
+  opts: CardRenderOpts = {},
+): FormattedCardPrompt {
   const head = whoPrefix ? `${whoPrefix} ` : '';
+  const multiNote = multiCardNotice(opts.multiCard);
   if (msg.card) {
     const info = extractCardInfo(msg)!;
     if (info.isQuestion) {
-      const lines = [`${head}❓ ${info.title}`];
-      if (info.questionText && info.questionText !== info.title) lines.push(clip(info.questionText, 300));
-      if (info.options.length) {
-        lines.push('');
-        info.options.forEach((opt, i) => {
-          lines.push(`${i + 1}. **${opt.label}**${opt.description ? ` — ${clip(opt.description, 80)}` : ''}`);
-        });
-        lines.push('', '回复序号（如 `1`）或直接回复你的想法');
-      } else {
-        lines.push('', '请直接回复你的想法');
-      }
-      const actions: ChannelAction[] = info.options.slice(0, 6).map((opt, i) => ({
-        label: `${i + 1}. ${clip(opt.label, 22)}`,
-        text: String(i + 1),
-        ...(i === 0 ? { kind: 'primary' } : {}),
-      })) as unknown as ChannelAction[];
-      return { text: lines.join('\n'), actions, info };
+      const qs = info.questions.length
+        ? info.questions
+        : [{ question: info.questionText, header: '', multiSelect: false, options: info.options }];
+      const rendered = formatQuestionStepPrompt(whoPrefix, info.title, qs, 0, opts);
+      return { text: rendered.text, actions: [], info };
     }
-    const sub = msg.card.subtitle ? `\n${clip(msg.card.subtitle, 240)}` : '';
+    const lines = [`${head}⏸️ **需要确认 · ${info.title}**`];
+    const subRaw = String(msg.card.subtitle ?? '').trim();
+    if (subRaw) lines.push(formatQuoteBlock(subRaw, 260));
+    const cmdRaw = String(msg.card.command ?? '').trim();
+    if (cmdRaw && !subRaw.includes(cmdRaw)) {
+      lines.push('```sh', clip(cmdRaw, 200), '```');
+    }
+    if (info.isReviewProposal) {
+      lines.push('---', `👉 回复 **\`1\` 允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`no\`）${multiNote}`);
+    } else {
+      lines.push('---', `👉 回复 **\`1\` 允许** · **\`2\` 总是允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`always\` / \`no\`）${multiNote}`);
+    }
+    return { text: lines.join('\n'), actions: [], info };
+  }
+  if (msg.burst?.burstId) {
+    const b = msg.burst;
+    const total = Number(b.total ?? b.requested ?? b.counts?.queued ?? 0) || (Array.isArray(b.sample) ? b.sample.length : 0);
+    const metaParts: string[] = [];
+    if (total > 0) metaParts.push(`共 ${total} 项`);
+    if (b.parallel) metaParts.push(`并发 ${b.parallel}`);
+    if (b.estimateMinutes) metaParts.push(`预计约 ${b.estimateMinutes} 分钟`);
+    const sampleLines = Array.isArray(b.sample)
+      ? b.sample.slice(0, 5).map((item) => {
+          const rawTitle = typeof item === 'string' ? item : (item?.title ?? item?.item ?? '');
+          return clip(String(rawTitle).trim(), 60);
+        }).filter(Boolean).map((s) => `- ${s}`)
+      : [];
+    const lines = [`${head}⚡ **并发任务待确认 · ${clip(b.task || '并行任务', 120)}**`];
+    if (metaParts.length) lines.push(`> ${metaParts.join(' · ')}`);
+    if (sampleLines.length) lines.push(...sampleLines);
+    lines.push('---', `👉 回复 **\`1\` 开始执行** · **\`0\` 取消**（也支持 \`ok\` / \`no\`）${multiNote}`);
     return {
-      text: `${head}⏸️ ${info.title}${sub}\n\n回复 \`ok\` 允许，\`always\` 总是允许，\`no\` 拒绝`,
-      actions: [
-        { label: '允许', text: 'ok', kind: 'primary' },
-        { label: '总是允许', text: 'always' },
-        { label: '拒绝', text: 'no', kind: 'danger' },
-      ] as unknown as ChannelAction[],
-      info,
+      text: lines.join('\n'),
+      actions: [],
+      info: { cardKind: 'burst' },
     };
   }
   if (msg.secret) {
     return {
-      text: `${head}🔐 需要补充凭据「${msg.secret.label || msg.secret.target || '密钥'}」，请到管理后台输入；或回复 \`skip\` / \`跳过\` 先跳过。`,
-      actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
+      text: `${head}🔐 **需要补充凭据 · 「${msg.secret.label || msg.secret.target || '密钥'}」**\n> 请到管理后台输入对应凭据。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      actions: [],
       info: { cardKind: 'secret' },
     };
   }
   if (msg.connector) {
     return {
-      text: `${head}🔌 需要授权连接器「${msg.connector.label || msg.connector.slug || ''}」，请到管理后台完成；或回复 \`skip\` / \`跳过\` 先跳过。`,
-      actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
+      text: `${head}🔌 **需要授权连接器 · 「${msg.connector.label || msg.connector.slug || ''}」**\n> 请到管理后台完成连接器授权。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      actions: [],
       info: { cardKind: 'connector' },
     };
   }
   if (msg.signIn) {
     return {
-      text: `${head}🔑 需要完成登录验证，请到管理后台操作；或回复 \`skip\` / \`跳过\` 先跳过。`,
-      actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
+      text: `${head}🔑 **需要完成登录验证**\n> 请到管理后台完成登录后继续。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      actions: [],
       info: { cardKind: 'signIn' },
     };
   }
-  return { text: `${head}⏸️ 需要你在管理后台确认下一步操作。`, actions: [], info: null };
+  return { text: `${head}⏸️ **需要确认**\n> 请在管理后台确认下一步操作。`, actions: [], info: null };
 }

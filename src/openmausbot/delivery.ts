@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isAudioAttachment } from '../core/channel-contract.ts';
 import { sanitizeExternalMentions } from '../core/chat-context.ts';
-import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend } from '../core/security.ts';
+import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
 import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
@@ -159,9 +159,6 @@ export async function claimUploads(
         path: res?.path || res?.url || dest,
       });
     } catch (e) {
-      if (isAudio && directTranscript) {
-        transcripts.push({ name: a.name || safe, durationSec: a.durationSec, text: directTranscript });
-      }
       const failTarget = errChatId || bridge.selfChat;
       if (failTarget) {
         await bridge.say(`📎 附件 ${a.name} 上传失败：${formatOmbError(e)}`, { targetChatId: failTarget });
@@ -262,16 +259,16 @@ export async function emitCard(
   msg: OmbMessage,
   { isGroup = false, chatCtx = null }: { isGroup?: boolean; chatCtx?: CompactChatContext | BridgeChatContext | null } = {},
 ): Promise<void> {
-  const cid = msg.card?.requestId || msg.id;
+  const cid = msg.card?.requestId || (msg.burst?.burstId ? `burst:${msg.burst.burstId}` : msg.id);
   if (!cid || bridge.deliveredCards.has(cid)) return;
   const ctrlChat = chatCtx?.readonly
     ? (bridge.selfChat || '')
     : bridge.resolveControlChatId(chatCtx);
-  if (chatCtx?.readonly && !ctrlChat) return;
+  if (!ctrlChat) return;
   rememberBounded(bridge.deliveredCards, cid);
-  const cardKind: 'card' | 'secret' | 'connector' | 'signIn' | null = msg.card
+  const cardKind: 'card' | 'secret' | 'connector' | 'signIn' | 'burst' | null = msg.card
     ? 'card'
-    : (msg.secret ? 'secret' : (msg.connector ? 'connector' : (msg.signIn ? 'signIn' : null)));
+    : (msg.burst?.burstId ? 'burst' : (msg.secret ? 'secret' : (msg.connector ? 'connector' : (msg.signIn ? 'signIn' : null))));
   const speakerName = isGroup ? (msg.from?.name || '') : '';
   const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
   const shownName = bridge.displayBotName(botId, botName, { isGroup });
@@ -285,29 +282,43 @@ export async function emitCard(
     ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
   };
   const who = bridge.botPrefix(botId, botName, { isGroup, speakerName, speakerBotId });
-  const prompt = formatCardPrompt(shownName, msg, who);
+  const multiCard = bridge.pendingCards.size >= 1;
+  const prompt = formatCardPrompt(shownName, msg, who, { multiCard });
   const originBanner = isExternal && ctrlChat === bridge.selfChat
     ? `📍 **来自「${chatCtx?.chatName || chatCtx?.originChatId || ''}」的审批 / 确认**\n`
     : '';
-  const sentId = await bridge.say(`${originBanner}${prompt.text}`, route, null, prompt.actions);
+  const sentId = await bridge.say(`${originBanner}${prompt.text}`, route, null, null, { noBuffer: true });
+  if (!sentId) {
+    bridge.deliveredCards.delete(cid);
+    return;
+  }
   bridge.emitTelemetry('card', { botName: shownName, kind: cardKind || 'card', summary: prompt.text });
   if (ctrlChat === bridge.selfChat) {
     bridge.notifySelf({ title: '需要审批/确认', body: prompt.text, chatId: ctrlChat, urgent: true });
   }
-  if (sentId && cardKind) {
+  if (cardKind) {
     const compacted = compactChatCtx(chatCtx);
+    const title = prompt.info && 'title' in prompt.info
+      ? prompt.info.title
+      : (msg.burst?.task || msg.secret?.label || msg.connector?.label || (msg.signIn ? '登录验证' : '待确认操作'));
     bridge.pendingCards.set(sentId, {
       imMsgId: sentId,
       cardKind,
       cardBotId: msg.from?.botId || botId,
       requestId: msg.card?.requestId ?? null,
+      ...(msg.burst?.burstId ? { burstId: msg.burst.burstId } : {}),
       threadId,
       botId,
       botName,
       ...(isGroup ? { isGroup: true } : {}),
       ombMsgId: msg.id,
+      title: clip(title, 60),
       isQuestion: Boolean(prompt.info && 'isQuestion' in prompt.info && prompt.info.isQuestion),
+      ...(prompt.info && 'isReviewProposal' in prompt.info && prompt.info.isReviewProposal ? { isReviewProposal: true } : {}),
       options: (prompt.info && 'options' in prompt.info && prompt.info.options) ? prompt.info.options : [],
+      ...(prompt.info && 'questions' in prompt.info && prompt.info.questions.length
+        ? { questions: prompt.info.questions, questionIndex: 0, collectedAnswers: [] }
+        : {}),
       canRememberCommand: Boolean(prompt.info && 'canRememberCommand' in prompt.info && prompt.info.canRememberCommand),
       ...(compacted ? { chatCtx: compacted } : {}),
     });
@@ -455,9 +466,11 @@ export async function deliverBotReply(
     ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${bridge.trigger} sendback ${draftKey}` }]
     : null;
 
-  let firstSentId: string | null = null;
+  const safeFull = scanAndRedactOutbound(full).text;
+  const sentIds: string[] = [];
   if (full.length <= effResult) {
-    firstSentId = await bridge.say(full, route, quoteReplyId, draftActions);
+    const sid = await bridge.say(full, route, quoteReplyId, draftActions);
+    if (sid) sentIds.push(sid);
   } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
     let chunks: string[];
     if (badge) {
@@ -485,7 +498,7 @@ export async function deliverBotReply(
         i === 0 ? quoteReplyId : null,
         i === chunks.length - 1 ? draftActions : null,
       );
-      if (i === 0) firstSentId = sid;
+      if (sid) sentIds.push(sid);
     }
   } else {
     const canAttach = bridge.supportsFiles();
@@ -505,20 +518,28 @@ export async function deliverBotReply(
       wasCut = clipped.cut;
       out = `${clipped.text}${clipped.cut ? note : ''}${delegationTagSuffix}`;
     }
-    firstSentId = await bridge.say(out, route, quoteReplyId, draftActions);
+    const sid = await bridge.say(out, route, quoteReplyId, draftActions);
+    if (sid) sentIds.push(sid);
 
     if (wasCut && canAttach) {
+      let mdPath = '';
       try {
         fs.mkdirSync(bridge.inDir, { recursive: true });
-        const mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
+        mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
         fs.writeFileSync(mdPath, `${full}\n`);
         await sendOutboundFile(bridge, mdPath, `${fileSafe(shownName) || 'reply'}.md`, {
           chatId: targetChatId,
           ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
         });
       } catch { /* 附件失败不影响正文 */ }
+      finally {
+        if (mdPath && safeFull !== full) {
+          try { fs.writeFileSync(mdPath, `${safeFull}\n`); } catch { /* ignore */ }
+        }
+      }
     }
   }
+  const firstSentId = sentIds[0] ?? null;
 
   if (isDirectDelegationRes && chatCtx?.delegationReq?.id) {
     bridge.emitTelemetry('delegation_res', {
@@ -528,6 +549,7 @@ export async function deliverBotReply(
     });
   }
 
+  const safeTextSummary = scanAndRedactOutbound(text).text;
   if (draftMeta && draftKey) {
     const draftObj: PrivateDraft = {
       id: draftKey,
@@ -542,17 +564,17 @@ export async function deliverBotReply(
       createdAt: bridge.now(),
     };
     bridge.privateDrafts.set(draftKey, draftObj);
-    if (firstSentId) bridge.privateDrafts.set(firstSentId, draftObj);
+    for (const sid of sentIds) bridge.privateDrafts.set(sid, draftObj);
     bridge.lastPrivateDraftId = firstSentId || draftKey;
     trimMapCap(bridge.privateDrafts, 40);
     if (isPrivDraft && targetChatId === bridge.selfChat) {
-      bridge.notifySelf({ title: '待确认草稿', body: text, chatId: targetChatId, urgent: false });
+      bridge.notifySelf({ title: '待确认草稿', body: safeTextSummary, chatId: targetChatId, urgent: false });
     }
   }
 
   bridge.recordOutboundToContext(targetChatId, {
     id: firstSentId ?? undefined,
-    text: full,
+    text: safeFull,
     replyTo: quoteReplyId ?? undefined,
     senderName: speakerName || botName,
   });
@@ -561,7 +583,7 @@ export async function deliverBotReply(
     isGroup,
     chatId: targetChatId || null,
     chatType: isExternal ? (chatCtx?.privateReply ? 'self' : chatCtx?.chatType) : 'self',
-    summary: text,
+    summary: safeTextSummary,
   });
 
   if (!proactive && !isExternal) {

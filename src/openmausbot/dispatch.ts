@@ -24,6 +24,116 @@ import type {
   QueuedTurnEntry,
 } from './types.ts';
 
+const GOAL_CMD_RE = /^\/goal(?:\s+([\s\S]*))?$/i;
+const SLASH_CMD_RE = /^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\s+([\s\S]*))?$/;
+const BARE_SLASH_WITHOUT_CONTEXT = new Set(['learn', 'setup', 'burst']);
+
+/**
+ * 处理 OpenMausBot 原生斜杠命令（`/goal`、`/learn`、`/burst`、`/setup`、自定义 `/<skill>`）：
+ * - `/goal <目标>` 剥离前缀并切换为 `mode: 'goal'`；空 `/goal` 返回提示标记；
+ * - 其余斜杠命令置于句首（上下文放末尾），确保服务端 `^\/...` 正则准确命中。
+ */
+export function prepareSlashOutbound(
+  text: string,
+  contextBlock: string,
+): { mode?: 'goal'; outboundText: string; emptyGoal?: boolean } {
+  const raw = String(text ?? '');
+  const trimmed = raw.trim();
+  const goalM = GOAL_CMD_RE.exec(trimmed);
+  if (goalM) {
+    const goalBody = (goalM[1] ?? '').trim();
+    if (!goalBody) return { mode: 'goal', outboundText: '', emptyGoal: true };
+    const tail = contextBlock.trim();
+    return {
+      mode: 'goal',
+      outboundText: tail ? `${goalBody}\n\n${tail}` : goalBody,
+    };
+  }
+  const slashM = SLASH_CMD_RE.exec(trimmed);
+  if (slashM) {
+    const cmdName = slashM[1].toLowerCase();
+    const cmdArg = (slashM[2] ?? '').trim();
+    if (!cmdArg && BARE_SLASH_WITHOUT_CONTEXT.has(cmdName)) {
+      return { outboundText: `/${cmdName}` };
+    }
+    const tail = contextBlock.trim();
+    return {
+      outboundText: tail ? `${trimmed}\n\n${tail}` : trimmed,
+    };
+  }
+  return { outboundText: `${contextBlock}${raw}` };
+}
+
+async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: string, msg: OmbMessage): Promise<boolean> {
+  const watches = [...bridge.activeBursts.values()].filter((w) => w.threadId === threadId);
+  if (!watches.length) return false;
+  const watch = watches[watches.length - 1];
+  const mid = msg.id ? String(msg.id) : null;
+
+  if (msg.kind === 'text') {
+    const trimmed = String(msg.text ?? '').trim();
+    if (!trimmed) return false;
+    if (mid && bridge.deliveredOmbIds.has(mid)) return true;
+    if (mid) rememberBounded(bridge.deliveredOmbIds, mid);
+    if (msg.turnTerminal !== false || watch.doneSeen) watch.deliveredText = true;
+    await deliverBotReply(bridge, {
+      botId: watch.botId,
+      botName: watch.botName,
+      threadId,
+      text: trimmed,
+      finalMsg: msg,
+      mediaMessages: [msg],
+      proactive: false,
+      isGroup: Boolean(watch.isGroup),
+      speakerName: watch.isGroup ? (msg.from?.name || '') : '',
+      chatCtx: watch.chatCtx ?? null,
+    });
+    if (watch.doneSeen && watch.deliveredText) {
+      bridge.activeBursts.delete(watch.burstId);
+    }
+    return true;
+  }
+
+  if (msg.kind === 'burst' && msg.burst?.burstId === watch.burstId) {
+    const phase = String(msg.burst.phase || '');
+    if (phase === 'failed' || phase === 'cancelled') {
+      bridge.activeBursts.delete(watch.burstId);
+      if (!watch.deliveredText) {
+        const failLines = Array.isArray(msg.burst.failed)
+          ? msg.burst.failed.slice(0, 5).map((f) => `- ${f.title || '子任务'}：${f.reason || '失败'}`)
+          : [];
+        const body = phase === 'cancelled'
+          ? '⏹️ 并发拆分任务已取消。'
+          : `❌ 并发拆分任务执行失败${failLines.length ? `：\n${failLines.join('\n')}` : '。'}`;
+        await deliverBotReply(bridge, {
+          botId: watch.botId,
+          botName: watch.botName,
+          threadId,
+          text: body,
+          finalMsg: msg,
+          proactive: false,
+          isGroup: Boolean(watch.isGroup),
+          chatCtx: watch.chatCtx ?? null,
+        });
+      }
+    } else if (phase === 'done') {
+      watch.doneSeen = true;
+      if (watch.deliveredText) {
+        bridge.activeBursts.delete(watch.burstId);
+      } else {
+        // 等待紧随其后的合并文本到达，超时后自动清理防止悬挂
+        const timer = setTimeout(() => {
+          const cur = bridge.activeBursts.get(watch.burstId);
+          if (cur === watch) bridge.activeBursts.delete(watch.burstId);
+        }, 10_000);
+        timer.unref?.();
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 function pickQueuedEntry(
   bridge: OpenMausBotBridge,
   preferredThreadId?: string | null,
@@ -116,6 +226,30 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
 
   if (messageNeedsInput(msg)) {
     await emitCard(bridge, botId, botName, threadId, msg, { isGroup, chatCtx: proChatCtx });
+    return;
+  }
+  if (msg.kind === 'burst') return;
+  if (msg.kind === 'goal.run') {
+    if (!msg.goalRun?.status || msg.goalRun.status === 'working') return;
+    const goalText = String(msg.text || msg.goalRun.detail || '').trim();
+    if (!goalText) return;
+    rememberBounded(bridge.deliveredOmbIds, msg.id);
+    if (inQuietHours(bridge.now(), bridge.quietHours)) {
+      bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: goalText, finalMsg: msg });
+      bridge.saveState();
+      return;
+    }
+    await deliverBotReply(bridge, {
+      botId,
+      botName,
+      threadId,
+      text: goalText,
+      finalMsg: msg,
+      proactive: true,
+      isGroup,
+      speakerName,
+      chatCtx: proChatCtx,
+    });
     return;
   }
 
@@ -433,16 +567,31 @@ export async function dispatchToBot(
   replyToOmbId: string | null,
   chatCtx: BridgeChatContext | null = null,
 ): Promise<unknown> {
-  const ctxInfo = chatCtx ?? buildExternalChatCtx(bridge, {
-    isSelfChat: true,
-    chatId: bridge.selfChat,
-    chatType: 'self' as ChatType,
-    chatName: '',
-    mid: null,
-    privateReply: false,
-    ev: null,
-  });
+  const ctxInfo: BridgeChatContext = chatCtx
+    ? { ...chatCtx }
+    : buildExternalChatCtx(bridge, {
+        isSelfChat: true,
+        chatId: bridge.selfChat,
+        chatType: 'self' as ChatType,
+        chatName: '',
+        mid: null,
+        privateReply: false,
+        ev: null,
+      });
   const isExternal = Boolean(ctxInfo.isExternal);
+  if (
+    isExternal
+    && !ctxInfo.privateReply
+    && !ctxInfo.readonly
+    && ctxInfo.preformattedHeader === undefined
+    && bridge.chats.externalReplyMode === 'draft_first'
+    && bridge.selfChat
+  ) {
+    ctxInfo.privateReply = true;
+    ctxInfo.replyChatId = bridge.selfChat;
+    ctxInfo.replyToImMsgId = null;
+    ctxInfo.draftFirst = true;
+  }
   const isGroup = Boolean(bot.isGroup);
   let threadId = bot.threadId;
 
@@ -487,7 +636,21 @@ export async function dispatchToBot(
     ? ''
     : formatProjectContextBlock({ project, source, isExternal, isReadonly: Boolean(ctxInfo.readonly) });
   const sharedBlock = skipScope ? '' : bridge.sharedContext.formatPromptPointer();
-  let outboundText = `${guardBlock}${projectBlock}${sharedBlock}${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}${text}`;
+  const contextBlock = `${guardBlock}${projectBlock}${sharedBlock}${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}`;
+  const prepared = ctxInfo.readonly
+    ? { outboundText: `${contextBlock}${text}` }
+    : prepareSlashOutbound(text, contextBlock);
+  if (prepared.emptyGoal) {
+    const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
+    const head = who ? `${who} ` : '';
+    const replyChat = ctxInfo.replyChatId || bridge.selfChat;
+    await bridge.say(
+      `${head}🎯 请在 \`/goal\` 后写明要达成的目标，例如：\`${bridge.trigger} /goal 梳理本周发布风险并给出检查清单\``,
+      replyChat ? { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: replyChat } : null,
+    );
+    return null;
+  }
+  let outboundText = prepared.outboundText;
   if (uploads.length) {
     const tags = uploads.map((u) => formatAttachmentTag(u));
     outboundText = `${outboundText}\n\n${tags.join('\n')}`;
@@ -510,9 +673,15 @@ export async function dispatchToBot(
     summary: text,
   });
 
+  const sendOpts = {
+    text: outboundText,
+    sendId,
+    replyToId: replyToOmbId,
+    ...(prepared.mode ? { mode: prepared.mode } : {}),
+  };
   const sendReq = (tid: string) => (isGroup && typeof bridge.client.sendGroupMessage === 'function'
-    ? bridge.client.sendGroupMessage(bot.id, { text: outboundText, threadId: tid, sendId, replyToId: replyToOmbId })
-    : bridge.client.sendMessage(bot.id, { text: outboundText, threadId: tid, sendId, replyToId: replyToOmbId }));
+    ? bridge.client.sendGroupMessage(bot.id, { ...sendOpts, threadId: tid })
+    : bridge.client.sendMessage(bot.id, { ...sendOpts, threadId: tid }));
 
   let receipt: { queued?: boolean; queueId?: string; blockedBy?: string; steered?: boolean; message?: OmbMessage };
   bridge.pendingThreads.add(threadId);
@@ -566,15 +735,14 @@ export async function dispatchToBot(
     const ctrlBanner = ctxInfo.steerBanner
       || (isExternal && ctrlChat === bridge.selfChat ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n` : '');
     if (ctxInfo.autoSteer && receipt.queueId) {
+      list.push(entry);
+      bridge.queuedByThread.set(threadId, list);
       const steerRes = await trySteerQueueItem(bridge, entry, {
         targetChatId: ctrlChat,
         banner: ctrlBanner,
         onQueuedText: (res) => `${ctrlBanner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已加入队列等待上一轮完成。`,
       });
-      if (!steerRes.steered) {
-        list.push(entry);
-        bridge.queuedByThread.set(threadId, list);
-      }
+      if (steerRes.steered) removeQueued(bridge, threadId, entry.queueId);
       return receipt;
     }
     list.push(entry);
@@ -599,7 +767,9 @@ export async function dispatchToBot(
   if (receipt?.steered === true && alreadyTracking) {
     if (!isExternal || ctxInfo.controlChatId === bridge.selfChat) {
       const ctrlChat = bridge.resolveControlChatId(ctxInfo);
-      await bridge.say('⚡ 已将补充信息插入当前任务。', { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) });
+      const ctrlBanner = ctxInfo.steerBanner
+        || (isExternal && ctrlChat === bridge.selfChat ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n` : '');
+      await bridge.say(`${ctrlBanner}⚡ 已将补充信息插入当前任务。`, { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) });
     }
     return receipt;
   }
@@ -647,7 +817,10 @@ export async function handleSseEvent(bridge: OpenMausBotBridge, evt: OmbSseEvent
         handled = true;
       }
     }
-    if (!handled) await handleProactiveMessage(bridge, threadId, evt.message);
+    if (!handled) {
+      const burstHandled = await handleActiveBurstMessage(bridge, threadId, evt.message);
+      if (!burstHandled) await handleProactiveMessage(bridge, threadId, evt.message);
+    }
     return;
   }
   if (evt.kind === 'bot' && evt.bot) {

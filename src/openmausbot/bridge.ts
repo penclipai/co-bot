@@ -40,7 +40,7 @@ import {
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
 import { createTurnTracker } from './turn-tracker.ts';
 import type {
-  BridgeChatContext, BridgeFocus, BridgeOptions, BridgeTransport, ChatThreadEntry,
+  ActiveBurstWatch, BridgeChatContext, BridgeFocus, BridgeOptions, BridgeTransport, ChatThreadEntry,
   CompactChatContext, FileMsgEntry, ImContextService, InFlightTurnMeta, KnownChatSummary,
   MsgRoute, OmbBot, OmbGroup, OmbHttpError, OmbTargetBot, OmbTaskSummary, OutboundBufferItem,
   PendingCard, PendingSendBack, PendingTaskPick, PrivateDraft, QueuedTurnEntry,
@@ -122,6 +122,7 @@ export class OpenMausBotBridge {
   msgRoute = new Map<string, MsgRoute>();
   pendingCards = new Map<string, PendingCard>();
   activeTurns = new Map<string, TurnTrackerHandle>();
+  activeBursts = new Map<string, ActiveBurstWatch>();
   pendingThreads = new Set<string>();
   queuedByThread = new Map<string, QueuedTurnEntry[]>();
   steeredQueue = new Map<string, QueuedTurnEntry>();
@@ -135,6 +136,7 @@ export class OpenMausBotBridge {
   lastPrivateDraftId: string | null = null;
   pendingSendBack: PendingSendBack | null = null;
   inFlightTurns = new Map<string, InFlightTurnMeta>();
+  pendingChatThreads = new Map<string, Promise<OmbTargetBot>>();
   outboundQueue = new Map<string, Promise<unknown>>();
   disconnectedBuffer: OutboundBufferItem[] = [];
   stateSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -853,28 +855,36 @@ export class OpenMausBotBridge {
     const key = `${chatId}:${targetBot.id}`;
     const existing = this.chatThreads.get(key);
     if (existing?.threadId) return { ...targetBot, threadId: existing.threadId };
+    const inflight = this.pendingChatThreads.get(key);
+    if (inflight) return inflight;
 
-    const title = clip(`${chatType === 'group' ? '群聊' : '私聊'} · ${chatName || chatId}`, 40);
-    let created;
-    try {
-      created = targetBot.isGroup && typeof this.client.createGroupTask === 'function'
-        ? await this.client.createGroupTask(targetBot.id, { title })
-        : (typeof this.client.createTask === 'function'
-          ? await this.client.createTask(targetBot.id, { title, select: false })
-          : null);
-    } catch {
-      return targetBot;
-    }
-    const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId ?? targetBot.threadId;
-    if (!newTid) return targetBot;
-    if (targetBot.isGroup) {
-      this.groupByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid, isGroup: true });
-    } else {
-      this.botByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid });
-    }
-    const nextTarget = { ...targetBot, threadId: newTid };
-    this.setChatThread(chatId, nextTarget);
-    return nextTarget;
+    const task = (async (): Promise<OmbTargetBot> => {
+      const title = clip(`${chatType === 'group' ? '群聊' : '私聊'} · ${chatName || chatId}`, 40);
+      let created;
+      try {
+        created = targetBot.isGroup && typeof this.client.createGroupTask === 'function'
+          ? await this.client.createGroupTask(targetBot.id, { title })
+          : (typeof this.client.createTask === 'function'
+            ? await this.client.createTask(targetBot.id, { title, select: false })
+            : null);
+      } catch {
+        return targetBot;
+      }
+      const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
+      if (!newTid) return targetBot;
+      if (targetBot.isGroup) {
+        this.groupByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid, isGroup: true });
+      } else {
+        this.botByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid });
+      }
+      const nextTarget = { ...targetBot, threadId: newTid };
+      this.setChatThread(chatId, nextTarget);
+      return nextTarget;
+    })().finally(() => {
+      this.pendingChatThreads.delete(key);
+    });
+    this.pendingChatThreads.set(key, task);
+    return task;
   }
 
   getKnownBotNames(): string[] {

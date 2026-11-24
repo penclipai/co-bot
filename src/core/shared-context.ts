@@ -3,6 +3,7 @@
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { redactSecrets } from './chat-context.ts';
 
 export type SharedContextSyncStatus = 'idle' | 'ok' | 'error' | 'unavailable';
 
@@ -35,11 +36,11 @@ function defaultExecGit(dir: string, timeoutMs = 8000): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('git', ['-C', dir, 'pull', '--ff-only'], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
-        const detail = String(stderr || err.message || 'git pull failed').trim();
+        const detail = redactSecrets(String(stderr || err.message || 'git pull failed')).trim();
         reject(new Error(detail));
         return;
       }
-      resolve(String(stdout || '').trim());
+      resolve(redactSecrets(String(stdout || '')).trim());
     });
   });
 }
@@ -100,7 +101,7 @@ export class SharedContextManager {
         this.onTelemetry?.('shared_context_sync', { summary: `ok: ${out ? out.split(/\r?\n/)[0].slice(0, 80) : 'synced'}` });
         return { ok: true, status: 'ok', output: out };
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = redactSecrets(e instanceof Error ? e.message : String(e));
         this.lastSyncAt = this.now();
         this.lastStatus = 'error';
         this.lastError = msg;

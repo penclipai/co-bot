@@ -6,13 +6,13 @@
 <title>自聊 · co-bot</title>
 <style>
   :root {
-    --bg: #ededed; --bar: #f7f7f7; --bubble: #ffffff; --ink: #191919; --muted: #8a8a8a; --line: #dcdcdc;
+    --bg: #ededed; --bar: #f7f7f7; --bubble: #ffffff; --ink: #191919; --muted: #8a8a8a; --line: #dcdcdc; --bubble-line: #d4d4d4;
     --accent: #2b6cb0;
     --sans: -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #111111; --bar: #1c1c1c; --bubble: #2c2c2c; --ink: #e8e8e8; --muted: #8d8d8d; --line: #333; --accent: #7fb0e8; }
+    :root { --bg: #111111; --bar: #1c1c1c; --bubble: #2c2c2c; --ink: #e8e8e8; --muted: #8d8d8d; --line: #333; --bubble-line: #4a4a4a; --accent: #7fb0e8; }
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -40,12 +40,12 @@
   .when { align-self: center; color: var(--muted); font-size: 13px; margin: 14px 0 8px; }
   .row { display: flex; justify-content: flex-end; align-items: flex-start; gap: 8px; margin: 6px 0; }
   .row.other { justify-content: flex-start; }
-  .col { display: flex; flex-direction: column; align-items: flex-end; max-width: calc(100% - 56px); }
+  .col { display: flex; flex-direction: column; align-items: flex-end; max-width: calc(100% - 56px); min-width: 0; }
   .row.other .col { align-items: flex-start; }
   .sender-lbl { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; padding-left: 2px; }
   .avatar { width: 40px; height: 40px; border-radius: 6px; flex: none; background: linear-gradient(160deg, #dbe9f7, #b8cfe8); display: grid; place-items: center; font-size: 11px; font-weight: 600; color: #34506e; }
   .row.other .avatar { background: linear-gradient(160deg, #f5e2cf, #e2c1a0); color: #634120; }
-  .bubble { position: relative; background: var(--bubble); border-radius: 6px; padding: 9px 12px; overflow-wrap: anywhere; cursor: pointer; }
+  .bubble { position: relative; background: var(--bubble); border-radius: 6px; padding: 9px 12px; max-width: 100%; overflow-wrap: anywhere; cursor: pointer; }
   .bubble::after { content: ""; position: absolute; right: -6px; top: 13px; border: 6px solid transparent; border-right: 0; border-left-color: var(--bubble); }
   .row.other .bubble::after { right: auto; left: -6px; border-left: 0; border-right: 6px solid var(--bubble); border-right-color: var(--bubble); }
   .bubble p { margin: 0; white-space: pre-wrap; }
@@ -58,10 +58,12 @@
   .md code { font: 13px var(--mono); background: rgba(127,127,127,.15); padding: 0 4px; border-radius: 4px; }
   .md pre { margin: 4px 0 6px; padding: 8px 10px; background: rgba(127,127,127,.12); border-radius: 6px; overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
   .md pre code { background: none; padding: 0; }
-  .md blockquote { margin: 2px 0 6px; padding: 0 8px; border-left: 3px solid var(--line); color: var(--muted); }
+  .md pre .add { color: #27ae60; } .md pre .del { color: #e74c3c; }
+  .md blockquote { margin: 2px 0 6px; padding: 0 8px; border-left: 3px solid var(--bubble-line); color: var(--muted); }
+  .md blockquote p:last-child { margin-bottom: 0; }
   .md a { color: var(--accent); }
-  .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
-  .md .tbl { overflow-x: auto; } .md table { border-collapse: collapse; font-size: 14px; } .md th, .md td { border: 1px solid var(--line); padding: 2px 6px; }
+  .md hr { border: 0; border-top: 1px solid var(--bubble-line); margin: 8px 0; }
+  .md .tbl { overflow-x: auto; } .md table { border-collapse: collapse; font-size: 14px; } .md th, .md td { border: 1px solid var(--bubble-line); padding: 2px 6px; }
   .file { display: flex; align-items: center; gap: 10px; min-width: 200px; max-width: 260px; text-decoration: none; color: inherit; }
   .file .fi { flex: none; width: 36px; height: 44px; border-radius: 4px; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; background: #5b8def; }
   .file .fi.md { background: #3a8f5c; } .file .fi.html { background: #e07b39; }
@@ -139,7 +141,16 @@
   const DEV = { mobile: '手机发', desktop: '电脑发' };
 
   const pad = (n) => String(n).padStart(2, '0');
-  const stamp = (ts) => { const d = new Date(ts); return `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const stamp = (ts) => {
+    const d = new Date(ts), now = new Date();
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if (dayKey(d) === dayKey(now)) return `今天 ${hm}`;
+    const yest = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    if (dayKey(d) === dayKey(yest)) return `昨天 ${hm}`;
+    if (d.getFullYear() === now.getFullYear()) return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+  };
   const snip = (t) => String(t || '').replace(/\s+/g, ' ').slice(0, 50);
   const label = (m) => (m.file ? `[文件] ${m.file.name}` : snip(m.text));
   const size = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
@@ -151,7 +162,7 @@
     d.className = 'empty';
     d.id = 'empty';
     if (activeChat === 'self') {
-      d.innerHTML = '这里模拟 IM 手机端自聊 → co-bot（Coordinator Bot 个人协调助手）。<br><br>试试：<b>@bot 你好</b> · <b>@bot help</b>（查看指令清单）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群协同：<b>@bot chats</b> · <b>@bot mute/unmute &lt;群&gt;</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b> · <b>@bot bind</b> · <b>@bot delegate</b><br>会话与控制：<b>@bot status [群]</b> · <b>@bot new</b> · <b>@bot task [序号]</b> · <b>@bot compact [群]</b> · <b>@bot stop</b> · <b>@bot bye</b>（审批卡回 <b>ok / always / no / 1 / 2</b>）<br><br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
+      d.innerHTML = '这里模拟 IM 手机端自聊 → co-bot（Coordinator Bot 个人协调助手）。<br><br>试试：<b>@bot 你好</b> · <b>@bot help</b>（查看指令清单）<br>回复后 2 分钟内可直接续聊免 <b>@bot</b>，连续贴图也能直接发送（<b>#</b>/备忘开头只记笔记）<br>跨群协同：<b>@bot chats</b> · <b>@bot mute/unmute &lt;群&gt;</b> · <b>@bot summary &lt;群&gt;</b> · <b>@bot sendback</b> · <b>@bot bind</b> · <b>@bot delegate</b><br>会话与控制：<b>@bot status [群]</b> · <b>@bot new</b> · <b>@bot task [序号]</b> · <b>@bot compact [群]</b> · <b>@bot stop</b> · <b>@bot bye</b>（审批/提问卡回 <b>1 / 2 / 0</b> 或 <b>ok / always / no</b>）<br><br>支持 <b>Ctrl+V</b> 粘贴截图（点图放大预览），或点右下角 <b>+</b> 发文件。';
     } else {
       d.innerHTML = `这是模拟<b>${CHATS[activeChat].name}</b>（群聊 / 私聊场景）。<br><br>1. 点击输入框左侧 <b>我 / Alice / Bob</b> 切换身份发送或<b>撤回</b>消息/文件，构建多轮上下文；<br>2. 点任意气泡上的 <b>引用</b>，再切回 <b>我</b> 发送 <b>@bot 怎么看？</b>（原地回复）；<br>3. 发送 <b>@bot! 总结上面讨论</b> 或 <b>@bot -p ...</b> 可将结果私密发回「自聊」，确认后再 <b>@bot sendback</b> 回发。`;
     }
@@ -181,7 +192,8 @@
     }
   }
 
-  function appendMsgDom(msg) {
+  function appendMsgDom(msg, forceScroll = false) {
+    const nearBottom = forceScroll || msg.from === 'me' || (list.scrollHeight - list.scrollTop - list.clientHeight < 80);
     $('#empty')?.remove();
     if (msg.ts - lastTs > 3 * 60 * 1000) {
       const w = document.createElement('div');
@@ -220,6 +232,7 @@
         img.className = 'thumb';
         img.src = f.url;
         img.alt = f.name;
+        img.addEventListener('load', () => { if (nearBottom) list.scrollTop = list.scrollHeight; });
         img.addEventListener('click', (e) => { e.stopPropagation(); openLightbox(f); });
         b.append(img);
       } else {
@@ -263,7 +276,7 @@
           e.stopPropagation();
           for (const sibling of wrap.querySelectorAll('button')) sibling.disabled = true;
           btn.classList.add('picked');
-          send(act.text);
+          send(act.text, { fromInput: false });
         });
         wrap.append(btn);
       }
@@ -294,13 +307,16 @@
       rc.textContent = '撤回';
       rc.onclick = async (e) => {
         e.stopPropagation();
-        const r = await post('/recall', { chatId: msg.chatId || activeChat, msgId: msg.id, sender: msg.senderId || sender });
-        if (!r.ok) alert((await r.json().catch(() => ({}))).error || '撤回失败');
+        const res = await post('/recall', { chatId: msg.chatId || activeChat, msgId: msg.id, sender: msg.senderId || sender });
+        if (!res.ok) alert((await res.json().catch(() => ({}))).error || '撤回失败');
       };
       dv.append(rc);
     }
     b.title = '点一下引用这条消息';
-    b.addEventListener('click', (e) => { if (!e.target.closest('a, button, img')) setReply(msg); });
+    b.addEventListener('click', (e) => {
+      if (window.getSelection()?.toString()) return;
+      if (!e.target.closest('a, button, img')) setReply(msg);
+    });
 
     const av = document.createElement('div');
     av.className = 'avatar';
@@ -308,7 +324,7 @@
     if (rowKind === 'other') row.append(av, col);
     else row.append(col, av);
     list.append(row);
-    list.scrollTop = list.scrollHeight;
+    if (nearBottom) list.scrollTop = list.scrollHeight;
   }
 
   function renderActiveChat() {
@@ -316,7 +332,7 @@
     lastTs = 0;
     const msgs = allMsgs.filter((m) => (m.chatId || 'self') === activeChat);
     if (!msgs.length) renderEmptyHint();
-    else for (const m of msgs) appendMsgDom(m);
+    else for (const m of msgs) appendMsgDom(m, true);
   }
 
   function add(msg) {
@@ -344,10 +360,7 @@
     }
     const cid = ev.chatId || 'self';
     if (cid === activeChat) {
-      for (const el of list.querySelectorAll('.row')) {
-        if (el.dataset.msgId === mid) el.remove();
-      }
-      if (!list.querySelector('.row')) renderEmptyHint();
+      renderActiveChat();
     } else if (unread[cid] > 0) {
       unread[cid] = Math.max(0, unread[cid] - 1);
       updateChatChrome();
@@ -362,6 +375,7 @@
     replyBar.classList.remove('on');
     updateChatChrome();
     renderActiveChat();
+    refreshStatus();
   }
 
   for (const tab of document.querySelectorAll('#chatTabs .ctab')) {
@@ -382,7 +396,11 @@
   }
   $('#lbClose').onclick = () => { $('#lightbox').hidden = true; $('#lbImg').src = ''; };
   $('#lightbox').onclick = (e) => { if (e.target.id === 'lightbox') $('#lbClose').click(); };
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#lightbox').hidden) $('#lbClose').click(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('#lightbox').hidden) $('#lbClose').click();
+    else if (replyTo) $('#replyX').click();
+  });
 
   function setReply(msg) {
     replyTo = msg.id;
@@ -393,28 +411,39 @@
   $('#replyX').onclick = () => { replyTo = null; replyBar.classList.remove('on'); };
   $('#devBtn').onclick = () => { device = device === 'mobile' ? 'desktop' : 'mobile'; $('#devBtn').textContent = DEV[device]; };
 
-  async function send(text) {
+  async function send(text, { fromInput = true } = {}) {
     const prev = text;
     text = text.trim();
     if (!text) return;
-    const body = { chatId: activeChat, sender, text, replyTo, device };
-    const prevReply = replyTo;
-    box.value = ''; replyTo = null; replyBar.classList.remove('on'); grow();
+    const prevReply = fromInput ? replyTo : null;
+    const body = { chatId: activeChat, sender, text, replyTo: prevReply, device };
+    if (fromInput) {
+      box.value = '';
+      replyTo = null;
+      replyBar.classList.remove('on');
+      grow();
+    }
     try {
       const r = await post('/send', body);
       if (!r.ok) {
         const err = (await r.json().catch(() => ({}))).error || '发送失败';
-        box.value = prev;
-        replyTo = prevReply;
-        if (prevReply) replyBar.classList.add('on');
-        grow();
+        if (fromInput) {
+          box.value = prev;
+          replyTo = prevReply;
+          if (prevReply) replyBar.classList.add('on');
+          grow();
+        }
         alert(err);
         return;
       }
       setTimeout(refreshStatus, 180);
     } catch (e) {
-      box.value = prev;
-      grow();
+      if (fromInput) {
+        box.value = prev;
+        replyTo = prevReply;
+        if (prevReply) replyBar.classList.add('on');
+        grow();
+      }
       alert(e.message || '网络异常，发送失败');
     }
   }
@@ -422,16 +451,29 @@
   async function uploadFileObj(f) {
     if (!f) return;
     if (f.size > 8 * 1024 * 1024) return alert('模拟器最大支持 8 MB 文件');
-    const data = await new Promise((res) => {
-      const r = new FileReader();
-      r.onload = () => res(String(r.result).split(',')[1] ?? '');
-      r.readAsDataURL(f);
-    });
-    const name = f.name || `screenshot-${Date.now()}.png`;
-    const body = { chatId: activeChat, sender, name, data, device, replyTo };
-    replyTo = null; replyBar.classList.remove('on');
-    const r = await post('/upload', body);
-    if (!r.ok) alert((await r.json()).error || '上传失败');
+    const prevReply = replyTo;
+    replyTo = null;
+    replyBar.classList.remove('on');
+    try {
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(',')[1] ?? '');
+        r.onerror = () => rej(new Error('读取文件失败'));
+        r.readAsDataURL(f);
+      });
+      const name = f.name || `screenshot-${Date.now()}.png`;
+      const body = { chatId: activeChat, sender, name, data, device, replyTo: prevReply };
+      const r = await post('/upload', body);
+      if (!r.ok) {
+        replyTo = prevReply;
+        if (prevReply) replyBar.classList.add('on');
+        alert((await r.json().catch(() => ({}))).error || '上传失败');
+      }
+    } catch (e) {
+      replyTo = prevReply;
+      if (prevReply) replyBar.classList.add('on');
+      alert(e?.message || '上传失败');
+    }
   }
 
   function grow() {
@@ -473,7 +515,9 @@
           const whoBusy = busyBot ? (busyBot.displayName || busyBot.name) : focusName;
           const qText = (br?.queuedCount ?? 0) > 0 ? ` · 排队 ${br.queuedCount}` : '';
           $('#sub').textContent = `${whoBusy} 正在处理…${qText}`;
-          box.placeholder = '输入继续补充，或发 @bot steer 插队…';
+          if (activeChat === 'self' || sender === 'me') {
+            box.placeholder = '输入继续补充，或发 @bot steer 插队…';
+          }
         } else if (activeChat !== 'self') {
           $('#sub').textContent = `${brandName} · @bot 原地回复 / @bot! 私聊`;
           box.placeholder = sender === 'me'
@@ -498,12 +542,39 @@
   setInterval(() => { if (!document.hidden) refreshStatus(); }, 3000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
 
+  let replayingHistory = false;
+  let replayBuf = [];
   const es = new EventSource('/events');
   es.onopen = () => $('#dot').classList.add('on');
   es.onerror = () => $('#dot').classList.remove('on');
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
+    if (msg.kind === 'history_start') {
+      replayingHistory = true;
+      replayBuf = [];
+      return;
+    }
+    if (msg.kind === 'history_end') {
+      replayingHistory = false;
+      seen.clear();
+      allMsgs.length = 0;
+      for (const m of replayBuf) {
+        if (!seen.has(m.id)) {
+          seen.set(m.id, m);
+          allMsgs.push(m);
+        }
+      }
+      replayBuf = [];
+      renderActiveChat();
+      updateChatChrome();
+      refreshStatus();
+      return;
+    }
     if (msg.kind === 'recall') { handleRecall(msg); return; }
+    if (replayingHistory) {
+      replayBuf.push(msg);
+      return;
+    }
     add(msg);
     if (msg.from === 'bot') refreshStatus();
   };

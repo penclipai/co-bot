@@ -41,6 +41,7 @@ export class Kernel implements KernelLike {
   entries: Array<KernelEntry<Record<string, unknown>>>;
   mounted: Array<KernelEntry<Record<string, unknown>>>;
   started: boolean;
+  #runGen = 0;
 
   constructor({ config = {}, logger = console }: { config?: Partial<AppConfig> | RawConfig; logger?: LoggerLike } = {}) {
     this.config = config as AppConfig;
@@ -178,8 +179,13 @@ export class Kernel implements KernelLike {
 
   async start(): Promise<void> {
     if (this.started) return;
+    const gen = ++this.#runGen;
     const ordered = this.#resolveOrder();
     for (const entry of ordered) {
+      if (this.#runGen !== gen) {
+        await this.stop();
+        return;
+      }
       const ctx: KernelContext = {
         config: this.config,
         kernel: this,
@@ -208,6 +214,11 @@ export class Kernel implements KernelLike {
       try {
         const ret = await entry.apply(ctx, entry.options);
         if (typeof ret === 'function') entry.effects.push(ret);
+        if (this.#runGen !== gen) {
+          await this.#unmount(entry);
+          await this.stop();
+          return;
+        }
         for (const svc of entry.provides) {
           if (!this.services.has(svc)) {
             throw new Error(`插件「${entry.name}」声明提供服务「${svc}」但未调用 ctx.provide()`);
@@ -221,10 +232,11 @@ export class Kernel implements KernelLike {
         throw err;
       }
     }
-    this.started = true;
+    if (this.#runGen === gen) this.started = true;
   }
 
   async stop(): Promise<void> {
+    this.#runGen += 1;
     this.started = false;
     const mounted = this.mounted.splice(0).reverse();
     for (const entry of mounted) {

@@ -16,25 +16,48 @@ export const clip = (s: unknown, n: number): string => {
   return text.length > n ? text.slice(0, n) + '…' : text;
 };
 
-const FENCE = /^\s*(```|~~~)/;
+function nextFenceState(line: string, openFence: OpenFenceState | null): { openFence: OpenFenceState | null; isFenceLine: boolean } {
+  const m = /^\s*(```+|~~~+)(.*)$/.exec(line);
+  if (!m) return { openFence, isFenceLine: false };
+  const ch = m[1][0];
+  const len = m[1].length;
+  if (!openFence) {
+    return {
+      openFence: { marker: ch.repeat(len), line: line.trim(), char: ch, len },
+      isFenceLine: true,
+    };
+  }
+  if (ch === openFence.char && len >= openFence.len && !m[2].trim()) {
+    return { openFence: null, isFenceLine: true };
+  }
+  return { openFence, isFenceLine: false };
+}
 
 /** 不渲染 Markdown 的 IM：去掉加粗、标题、行内代码、代码块围栏，代码块内容保留 2 空格缩进。 */
 export function plain(text: unknown): string {
-  let inFence = false;
+  let openFence: OpenFenceState | null = null;
   const out: string[] = [];
-  for (let line of String(text ?? '').split('\n')) {
-    if (FENCE.test(line)) { inFence = !inFence; continue; }
-    if (inFence) {
+  for (let line of String(text ?? '').replace(/\r\n/g, '\n').split('\n')) {
+    const f = nextFenceState(line, openFence);
+    openFence = f.openFence;
+    if (f.isFenceLine) continue;
+    if (openFence) {
       out.push(line ? `  ${line}` : '');
       continue;
     }
+    const codeSpans: string[] = [];
+    line = line.replace(/`([^`\n]+)`/g, (_, code: string) => {
+      const idx = codeSpans.push(code) - 1;
+      return `\u0000${idx}\u0000`;
+    });
     line = line.replace(/^#{1,6}\s+/, '')
       .replace(/\*\*(.+?)\*\*/g, '$1')
       .replace(/__([^_\n]+)__/g, '$1')
-      .replace(/`([^`\n]+)`/g, '$1')
       .replace(/^(\s*)[*+]\s+/, '$1- ')
       .replace(/^>\s?/, '')
       .replace(/\\([\\*_`[\]<>|])/g, '$1');
+    // eslint-disable-next-line no-control-regex
+    line = line.replace(/\u0000(\d+)\u0000/g, (_, idx: string) => codeSpans[Number(idx)] ?? '');
     out.push(line);
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -42,14 +65,17 @@ export function plain(text: unknown): string {
 
 /** 渲染 Markdown 的 IM：在连续正文的换行前补两个空格，防止不同客户端把单换行吞成空格。 */
 export function hardBreaks(md: unknown): string {
-  const lines = String(md ?? '').split('\n');
-  let inFence = false;
-  const BLOCK = /^\s*([-*+]\s|\d+[.)]\s|#{1,6}\s|>|```|~~~|\|)/;
+  const lines = String(md ?? '').replace(/\r\n/g, '\n').split('\n');
+  let openFence: OpenFenceState | null = null;
+  const HR = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
+  const BLOCK = /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|```|~~~|\||([-*_])(?:\s*\1){2,}\s*$)/;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (FENCE.test(l)) { inFence = !inFence; continue; }
+    const f = nextFenceState(l, openFence);
+    openFence = f.openFence;
+    if (f.isFenceLine) continue;
     const next = lines[i + 1];
-    if (inFence || !l.trim() || next == null || !next.trim() || BLOCK.test(next) || /^\s*\|/.test(l) || / {2}$/.test(l)) continue;
+    if (openFence || !l.trim() || HR.test(l) || next == null || !next.trim() || BLOCK.test(next) || /^\s*\|/.test(l) || / {2}$/.test(l)) continue;
     lines[i] = l + '  ';
   }
   return lines.join('\n');
@@ -58,12 +84,17 @@ export function hardBreaks(md: unknown): string {
 /** 截断 Markdown：尽量在换行处断开；若断在代码块中间则补上闭合围栏。 */
 export function mdClip(text: unknown, n: number): { text: string; cut: boolean } {
   const t = String(text ?? '');
-  if (t.length <= n) return { text: t, cut: false };
-  let at = t.lastIndexOf('\n', n);
-  if (at < n * 0.6) at = n;
+  const limit = Number(n);
+  if (!(limit > 0)) return t ? { text: '…', cut: true } : { text: '', cut: false };
+  if (t.length <= limit) return { text: t, cut: false };
+  let at = t.lastIndexOf('\n', limit);
+  if (at < limit * 0.6) at = limit;
   let out = t.slice(0, at).trimEnd();
-  const fences = out.split('\n').filter((l) => FENCE.test(l)).length;
-  if (fences % 2) out += '\n```';
+  let openFence: OpenFenceState | null = null;
+  for (const line of out.split('\n')) {
+    openFence = nextFenceState(line, openFence).openFence;
+  }
+  if (openFence) out += `\n${openFence.marker}`;
   return { text: out + '\n\n…', cut: true };
 }
 
@@ -107,15 +138,7 @@ export function mdSplit(text: unknown, maxChunkChars: number): string[] {
 
     let openFence: OpenFenceState | null = null;
     for (const line of piece.split('\n')) {
-      const m = /^\s*(```+|~~~+)(.*)$/.exec(line);
-      if (!m) continue;
-      const ch = m[1][0];
-      const len = m[1].length;
-      if (!openFence) {
-        openFence = { marker: ch.repeat(len), line: line.trim(), char: ch, len };
-      } else if (ch === openFence.char && len >= openFence.len && !m[2].trim()) {
-        openFence = null;
-      }
+      openFence = nextFenceState(line, openFence).openFence;
     }
 
     if (openFence && rest) {
@@ -141,8 +164,9 @@ export function mdSplit(text: unknown, maxChunkChars: number): string[] {
 export const fileSafe = (s: unknown): string => String(s ?? '')
   .replace(/[\\/:*?"<>|\s]+/g, '-')
   .replace(/-+/g, '-')
+  .replace(/^[.-]+|[.-]+$/g, '')
   .slice(0, 40)
-  .replace(/^-|-$/g, '');
+  .replace(/^[.-]+|[.-]+$/g, '');
 
 /** 统一清洗入站/出站附件文件名，去除路径段、危险字符与前导点。 */
 export function safeAttachmentName(raw: unknown, fallback = 'file'): string {
@@ -174,7 +198,11 @@ export function pruneExpiredFiles(dir: string, maxAgeMs: number, { keepPaths, no
   const ttl = Number(maxAgeMs);
   if (!dir || !(ttl > 0) || !fs.existsSync(dir)) return 0;
   const cutoff = now - ttl;
-  const keep = keepPaths ? new Set([...keepPaths].map((p) => path.resolve(String(p)))) : null;
+  const normPath = (p: string): string => {
+    const abs = path.resolve(p);
+    return process.platform === 'win32' ? abs.toLowerCase() : abs;
+  };
+  const keep = keepPaths ? new Set([...keepPaths].map((p) => normPath(String(p)))) : null;
   let removed = 0;
 
   const walk = (cur: string, isRoot: boolean): void => {
@@ -185,7 +213,7 @@ export function pruneExpiredFiles(dir: string, maxAgeMs: number, { keepPaths, no
       if (ent.isDirectory()) {
         walk(full, false);
       } else if (ent.isFile()) {
-        if (keep?.has(path.resolve(full))) continue;
+        if (keep?.has(normPath(full))) continue;
         try {
           if (fs.statSync(full).mtimeMs < cutoff) {
             fs.rmSync(full, { force: true });

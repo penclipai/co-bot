@@ -212,9 +212,12 @@ export class WebSimTransport {
     web.route('GET', '/events', ({ req, res }) => {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       res.write(': ok\n\n'); // 历史为空时也立即冲刷响应头，避免 fetch/EventSource 首包等待心跳
+      res.write(`data: ${JSON.stringify({ kind: 'history_start' })}\n\n`);
       for (const m of this.history) res.write(`data: ${JSON.stringify(m)}\n\n`);
+      res.write(`data: ${JSON.stringify({ kind: 'history_end' })}\n\n`);
       this.clients.add(res);
       const hb = setInterval(() => res.write(': hb\n\n'), 20_000);
+      hb.unref?.();
       req.on('close', () => { clearInterval(hb); this.clients.delete(res); });
     });
 
@@ -335,10 +338,16 @@ export class WebSimTransport {
       return { ok: true, id, chatId: chat.id, file: this.#card(file) };
     }, { limit: 12 * 1024 * 1024 });
 
-    web.route('GET', /^\/files\/([\w-]+)$/, ({ res, params, url }) => {
+    web.route('GET', /^\/files\/([\w-]+)$/, ({ req, res, params, url }) => {
       const fid = params?.[1] ?? '';
       const f = this.files.get(fid);
-      if (!f || !fs.existsSync(f.path)) throw Object.assign(new Error('not found'), { status: 404 });
+      let stat: fs.Stats;
+      try {
+        if (!f) throw new Error('missing');
+        stat = fs.statSync(f.path);
+      } catch {
+        throw Object.assign(new Error('not found'), { status: 404 });
+      }
       if (f.mime === 'text/markdown' && url.searchParams.get('raw') !== '1') {
         res.writeHead(302, { location: `/view?f=${encodeURIComponent(f.id)}` });
         res.end();
@@ -346,12 +355,22 @@ export class WebSimTransport {
       }
       res.writeHead(200, {
         'content-type': `${f.mime}${f.mime.startsWith('text/') ? '; charset=utf-8' : ''}`,
+        'content-length': String(stat.size),
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
         'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(f.name)}`,
         ...(f.mime === 'text/html' ? { 'content-security-policy': "default-src 'none'; sandbox; script-src 'none'; style-src 'unsafe-inline'; img-src data:" } : {}),
       });
-      fs.createReadStream(f.path).pipe(res);
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      const stream = fs.createReadStream(f.path);
+      stream.on('error', () => {
+        if (!res.headersSent) res.writeHead(404);
+        if (!res.writableEnded) res.destroy();
+      });
+      stream.pipe(res);
     });
   }
 

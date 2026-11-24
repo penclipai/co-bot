@@ -61,7 +61,10 @@ export function messageNeedsInput(msg: OmbMessage | null | undefined): boolean {
     && !msg.signIn.cancelled
     && !msg.signIn.superseded
     && !msg.signIn.answeredInChat;
-  return Boolean(card || connector || secret || signIn);
+  const burst = msg.burst && typeof msg.burst === 'object'
+    && Boolean(msg.burst.burstId)
+    && msg.burst.phase === 'preview';
+  return Boolean(card || connector || secret || signIn || burst);
 }
 
 function parseDispositionName(header: string | null, fallbackPath: string): string {
@@ -89,16 +92,19 @@ function buildMsgBody({
   threadId,
   sendId,
   replyToId,
+  mode,
 }: {
   text?: string;
   threadId?: string | null;
   sendId?: string | null;
   replyToId?: string | null;
+  mode?: 'chat' | 'goal';
 } = {}): Record<string, string> {
   const body: Record<string, string> = { text: String(text ?? '') };
   if (threadId) body.threadId = String(threadId);
   if (sendId) body.sendId = String(sendId);
   if (replyToId) body.replyToId = String(replyToId);
+  if (mode) body.mode = String(mode);
   return body;
 }
 
@@ -257,7 +263,7 @@ export class OpenMausBotClient {
     return pool.length ? matchByNameOrId(pool, q) : null;
   }
 
-  sendMessage(botId: string, opts: { text?: string; threadId?: string | null; sendId?: string | null; replyToId?: string | null } = {}): Promise<{
+  sendMessage(botId: string, opts: { text?: string; threadId?: string | null; sendId?: string | null; replyToId?: string | null; mode?: 'chat' | 'goal' } = {}): Promise<{
     queued?: boolean;
     queueId?: string;
     blockedBy?: string;
@@ -267,7 +273,7 @@ export class OpenMausBotClient {
     return this.#json(`/api/bots/${enc(botId)}/messages`, { method: 'POST', body: buildMsgBody(opts) });
   }
 
-  sendGroupMessage(groupId: string, opts: { text?: string; threadId?: string | null; sendId?: string | null; replyToId?: string | null } = {}): Promise<{
+  sendGroupMessage(groupId: string, opts: { text?: string; threadId?: string | null; sendId?: string | null; replyToId?: string | null; mode?: 'chat' | 'goal' } = {}): Promise<{
     queued?: boolean;
     queueId?: string;
     blockedBy?: string;
@@ -352,6 +358,18 @@ export class OpenMausBotClient {
 
   cancelSignInCard(botId: string, messageId: string, threadId?: string | null): Promise<Record<string, unknown>> {
     return this.#json(`/api/bots/${enc(botId)}/sign-in-cards/${enc(messageId)}/cancel`, { method: 'POST', body: threadBody(threadId) });
+  }
+
+  runBurst(burstId: string): Promise<Record<string, unknown>> {
+    return this.#json(`/api/bursts/${enc(burstId)}/run`, { method: 'POST', body: {} });
+  }
+
+  cancelBurst(burstId: string): Promise<Record<string, unknown>> {
+    return this.#json(`/api/bursts/${enc(burstId)}/cancel`, { method: 'POST', body: {} });
+  }
+
+  retryBurst(burstId: string): Promise<Record<string, unknown>> {
+    return this.#json(`/api/bursts/${enc(burstId)}/retry`, { method: 'POST', body: {} });
   }
 
   getMessages(threadId: string, limit = 20): Promise<{ messages?: OmbMessage[] }> {

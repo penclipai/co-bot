@@ -68,6 +68,9 @@ export async function flushOutboundBuffer(bridge: OpenMausBotBridge): Promise<nu
     if (sid != null) {
       replayed += 1;
       bridge.outboundReplayed += 1;
+    } else if (isTransportDisconnected(bridge)) {
+      for (const rem of items.slice(i)) bufferOutboundItem(bridge, rem);
+      break;
     }
   }
   if (replayed > 0) {
@@ -99,14 +102,6 @@ export async function sendBridgeText(
     ? { text: formatted, redacted: false, hits: [], totalHits: 0 }
     : scanAndRedactOutbound(formatted);
   const body = scan.text;
-  if (scan.redacted) {
-    bridge.securityRedactions = (Number(bridge.securityRedactions) || 0) + scan.totalHits;
-    bridge.emitTelemetry('security_redacted', {
-      chatId,
-      kind: 'text',
-      summary: `count=${scan.totalHits} types=${scan.hits.map((h) => h.type).join(',')}`,
-    });
-  }
   bridge.rememberEcho(body);
   const opts: ChannelSendOptions = {
     ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
@@ -125,6 +120,14 @@ export async function sendBridgeText(
         expiresAt: bridge.now() + (Number(bridge.outboundBufferTtlMs) || 5 * 60_000),
       });
       return null;
+    }
+    if (scan.redacted) {
+      bridge.securityRedactions = (Number(bridge.securityRedactions) || 0) + scan.totalHits;
+      bridge.emitTelemetry('security_redacted', {
+        chatId,
+        kind: 'text',
+        summary: `count=${scan.totalHits} types=${scan.hits.map((h) => h.type).join(',')}`,
+      });
     }
     const retries = Math.max(0, Number(bridge.sendRetries) || 0);
     for (let attempt = 0; attempt <= retries; attempt += 1) {

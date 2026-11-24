@@ -21,11 +21,12 @@ import type {
   LinkCard,
   LoggerLike,
 } from '../types.ts';
-import { redactSecrets } from './chat-context.ts';
+import { isAudioAttachment, redactSecrets } from './chat-context.ts';
+
+export { isAudioAttachment };
 
 const CHAT_TYPES = new Set<string>(['self', 'direct', 'group', 'system']);
 const DEVICE_TYPES = new Set<string>(['mobile', 'desktop', 'pad', 'web', 'unknown']);
-const AUDIO_EXT_RE = /\.(mp3|wav|m4a|ogg|opus|amr|aac|flac|webm)$/i;
 
 type AnyRecord = Record<string, unknown>;
 
@@ -40,15 +41,6 @@ export interface ManagedChannelOptions {
   maxReconnectDelayMs?: number;
   emitTelemetry?: ((type: string, data: Record<string, unknown>) => void) | null;
   logger?: LoggerLike;
-}
-
-/** 判断附件是否为语音/音频消息。 */
-export function isAudioAttachment(att: Partial<InboundAttachment> | null | undefined): boolean {
-  if (!att || typeof att !== 'object') return false;
-  if (att.kind === 'audio' || att.kind === 'voice') return true;
-  if (typeof att.mime === 'string' && att.mime.toLowerCase().startsWith('audio/')) return true;
-  if (typeof att.name === 'string' && AUDIO_EXT_RE.test(att.name)) return true;
-  return false;
 }
 
 /** 格式化微信/飞书等 IM 的链接卡片 / 转发摘要。 */
@@ -167,7 +159,7 @@ export function attachTransportTelemetry<T extends TelemetryTransportLike>(
           kind: 'file',
           chatId: chatId ? String(chatId) : null,
           msgId: id ? String(id) : null,
-          summary: clipSummary(file?.name || file?.path),
+          summary: clipSummary(file?.name || pathBasename(file?.path)),
         });
       } catch { /* ignore */ }
       return id;
@@ -211,22 +203,28 @@ function normalizeMentions(
 ): InboundMention[] {
   const selfStr = String(selfId ?? '');
   const list: InboundMention[] = [];
-  const seen = new Set<string>();
+  const byKey = new Map<string, InboundMention>();
   const push = (item: { id?: unknown; name?: unknown; isAll?: boolean; isSelf?: unknown }): void => {
     const isAll = Boolean(item.isAll);
     const id = String(item.id || (isAll ? '__all__' : (item.name || ''))).trim();
     if (!id) return;
     const name = item.name ? String(item.name).replace(/^@/, '').trim() : undefined;
     const isSelf = typeof item.isSelf === 'boolean' ? item.isSelf : Boolean(selfStr && id === selfStr);
-    const key = isAll ? '__all__' : `${id}:${name || ''}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    list.push({
+    const key = isAll ? '__all__' : id;
+    const prev = byKey.get(key);
+    if (prev) {
+      if (name && !prev.name) prev.name = name;
+      if (isSelf) prev.isSelf = true;
+      return;
+    }
+    const entry: InboundMention = {
       id,
       ...(name ? { name } : {}),
       ...(isAll ? { isAll: true } : {}),
       ...(isSelf ? { isSelf: true } : {}),
-    });
+    };
+    byKey.set(key, entry);
+    list.push(entry);
   };
   if (Array.isArray(rawMentions)) {
     for (const m of rawMentions) {
@@ -408,7 +406,7 @@ export function normalizeInboundEvent(
           .map((a) => ({
             id: String(a.id),
             msgId: String(a.msgId ?? r.id),
-            name: String(a.name ?? a.id),
+            name: String(a.name || a.id),
             ...(Number(a.size) ? { size: Number(a.size) } : {}),
             ...(a.mime ? { mime: String(a.mime) } : {}),
             ...(a.kind ? { kind: String(a.kind) } : {}),
@@ -451,7 +449,7 @@ export function normalizeInboundEvent(
       : undefined,
     text: String(r.text ?? ''),
     ...(linkCard ? { linkCard } : {}),
-    mentionsMe: Boolean((selfStr && at.includes(selfStr)) || (r.atAll && atAllCountsAsMention) || mentions.some((m) => m.isSelf)),
+    mentionsMe: Boolean((r.mentionsMe !== undefined ? r.mentionsMe : false) || (selfStr && at.includes(selfStr)) || (r.atAll && atAllCountsAsMention) || mentions.some((m) => m.isSelf)),
     ...(mentions.length ? { mentions } : {}),
     replyTo: r.quoteMsgId != null ? String(r.quoteMsgId) : undefined,
     ...(Array.isArray(r.files) && r.files.length ? {
@@ -460,7 +458,7 @@ export function normalizeInboundEvent(
         .map((f) => ({
           id: String(f.fileId),
           msgId: String(r.msgId),
-          name: String(f.name ?? f.fileId),
+          name: String(f.name || f.fileId),
           size: Number(f.size) || undefined,
           mime: f.mime ? String(f.mime) : undefined,
           ...(f.kind ? { kind: String(f.kind) } : {}),
@@ -469,6 +467,8 @@ export function normalizeInboundEvent(
         })),
     } : {}),
   };
+  const checked = validateInboundEvent(ev);
+  if (!checked.ok) throw new Error(checked.errors.join('；'));
   return ev;
 }
 
@@ -543,7 +543,7 @@ export class ManagedChannel {
     this.selfChatId = selfChatId ? String(selfChatId) : '';
     this.atAllCountsAsMention = Boolean(atAllCountsAsMention);
     this.reconnectDelayMs = Number(reconnectDelayMs ?? 2000);
-    this.maxReconnectDelayMs = Number(maxReconnectDelayMs ?? 30_000);
+    this.maxReconnectDelayMs = Math.max(this.reconnectDelayMs, Number(maxReconnectDelayMs ?? 30_000));
     this.emitTelemetry = emitTelemetry;
     this.logger = logger;
     this.connected = false;
@@ -579,6 +579,8 @@ export class ManagedChannel {
 
   async #connectAdapter(): Promise<void> {
     if (this.stopped) return;
+    let disconnectedDuringConnect = false;
+    let connectPending = true;
     await this.adapter.start(
       (rawMsg) => {
         let ev: InboundEvent;
@@ -610,10 +612,24 @@ export class ManagedChannel {
           this.logger.error?.(`[channel:${this.name}] 处理入站事件异常：`, e instanceof Error ? e.message : e);
         });
       },
-      { onDisconnect: (err) => this.#handleDisconnect(err) },
+      {
+        onDisconnect: (err) => {
+          if (connectPending) {
+            disconnectedDuringConnect = true;
+            this.lastError = err instanceof Error ? err.message : String(err || 'disconnected');
+            return;
+          }
+          this.#handleDisconnect(err);
+        },
+      },
     );
+    connectPending = false;
     if (this.stopped) {
       await Promise.resolve(this.adapter.stop?.()).catch(() => {});
+      return;
+    }
+    if (disconnectedDuringConnect) {
+      this.#handleDisconnect(this.lastError || 'disconnected');
       return;
     }
     this.connected = true;
@@ -676,6 +692,7 @@ export class ManagedChannel {
   }
 
   async sendFile(chatId: string, file: ChannelSendFileInput, opts: ChannelSendOptions = {}): Promise<string | undefined> {
+    if (!chatId) throw new Error('尚未获知目标会话 ID（selfChatId）');
     if (!this.canFiles || !this.adapter.sendFile) throw new Error(`通道「${this.name}」不支持发送文件`);
     const id = await this.adapter.sendFile(chatId, file, opts);
     this.#emit('channel:outbound', {
@@ -696,9 +713,6 @@ export class ManagedChannel {
 
   #normalizeMaybeEvent(raw: unknown): InboundEvent | null {
     if (!raw || typeof raw !== 'object') return null;
-    const rec = raw as AnyRecord;
-    const recChat = rec.chat as AnyRecord | undefined;
-    if (rec.id && recChat?.id && rec.sender) return raw as InboundEvent;
     try {
       return normalizeInboundEvent(raw, {
         selfId: this.selfId,

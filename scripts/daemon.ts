@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { APP_ROOT, loadConfig } from '../src/config.ts';
+import { APP_ROOT, isPathLikeSpecifier, loadConfig } from '../src/config.ts';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.ts';
 import type { AppConfig } from '../src/types.ts';
 import {
@@ -13,6 +13,7 @@ import {
   isLoopbackUrl,
   isPidAlive,
   printManagedLogs,
+  probeHostOf,
   probeHttpJson,
   readPidFile,
   spawnManagedProcess,
@@ -38,12 +39,21 @@ function parseArgs(argv: string[]) {
     if (a === '--all') { all = true; continue; }
     if (a === '--dry' || a === '--dry-run') { dry = true; continue; }
     if (VALUE_FLAGS.has(a) && argv[i + 1] !== undefined) {
-      extraArgs.push(a, argv[++i]);
+      let val = argv[++i];
+      if (a === '--config' || (a === '--channel' && isPathLikeSpecifier(val))) {
+        val = path.resolve(process.cwd(), val);
+      }
+      extraArgs.push(a, val);
       continue;
     }
-    if (!a.startsWith('-') && !action && ACTIONS.has(a)) {
-      action = a;
-      continue;
+    if (!a.startsWith('-')) {
+      if (!action && ACTIONS.has(a)) {
+        action = a;
+        continue;
+      }
+      if (!action) {
+        throw new Error(`未知子命令「${a}」，支持：${[...ACTIONS].join(', ')}`);
+      }
     }
     extraArgs.push(a);
   }
@@ -83,7 +93,8 @@ async function startDaemon(
     }
   }
 
-  const healthUrl = `http://${cfg.web.host}:${cfg.web.port}/api/health`;
+  const probeHost = probeHostOf(cfg.web.host);
+  const healthUrl = `http://${probeHost}:${cfg.web.port}/api/health`;
   const { pid } = await spawnManagedProcess({
     name: 'co-bot',
     cmd: process.execPath,
@@ -99,7 +110,7 @@ async function startDaemon(
 
   const outTail = tailLogLines(logFile, 8);
   if (outTail) console.log(outTail);
-  const baseUrl = `http://${cfg.web.host}:${cfg.web.port}`;
+  const baseUrl = `http://${probeHost}:${cfg.web.port}`;
   const chan = resolveChannelSpec(cfg);
   const endpointHint = chan.name === 'sim'
     ? `自聊模拟 ${baseUrl}/sim（诊断台 ${baseUrl}/debug）`
@@ -117,7 +128,7 @@ interface DaemonStatusResp {
 async function statusDaemon(cfg: AppConfig, pidFile: string): Promise<void> {
   const pid = readPidFile(pidFile);
   const alive = Boolean(pid && isPidAlive(pid));
-  const baseUrl = `http://${cfg.web.host}:${cfg.web.port}`;
+  const baseUrl = `http://${probeHostOf(cfg.web.host)}:${cfg.web.port}`;
   let st: DaemonStatusResp | null = null;
   try {
     st = await probeHttpJson<DaemonStatusResp>(`${baseUrl}/api/status`, 1500);

@@ -33,12 +33,13 @@ interface SecretRule {
 const TEXT_FILE_EXTS = new Set([
   '.md', '.markdown', '.txt', '.log', '.json', '.jsonl', '.yaml', '.yml',
   '.env', '.ini', '.conf', '.cfg', '.toml', '.csv', '.tsv', '.xml',
+  '.pem', '.key', '.p8', '.crt', '.pub', '.csr',
   '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go', '.rs', '.java', '.sql',
   '.html', '.htm', '.css', '.scss', '.properties',
 ]);
 
-const PLACEHOLDER_VAL_RE = /^(?:your[_-]|example|changeme|placeholder|redacted|undefined|true|false|null|none|xxx+|0+|\*+|\[(?:已脱敏|redacted))/i;
+const PLACEHOLDER_VAL_RE = /^(?:your[_-]|example|changeme|placeholder|redacted|undefined|true|false|null|none|xxx+|0+|\*+|\[(?:已脱敏|redacted)|(?:process|import\.meta)\.env\.|env\.|\$\{)/i;
 
 const SECRET_RULES: SecretRule[] = [
   {
@@ -48,12 +49,12 @@ const SECRET_RULES: SecretRule[] = [
   },
   {
     type: 'db_url',
-    re: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps):\/\/[^\s:@"'`<>]+:[^\s@"'`<>]+@[^\s"'`<>]+/gi,
+    re: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps):\/\/[^\s:@"'`<>]*:[^\s@"'`<>]+@[^\s"'`<>]+/gi,
     replace: () => '[已脱敏:db_url]',
   },
   {
     type: 'jwt',
-    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])/g,
     replace: () => '[已脱敏:jwt]',
   },
   {
@@ -63,15 +64,16 @@ const SECRET_RULES: SecretRule[] = [
   },
   {
     type: 'api_key',
-    re: /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|omb_sess_[A-Za-z0-9_-]{8,}|ctx_[A-Za-z0-9._-]{12,})\b/g,
+    re: /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|omb_sess_[A-Za-z0-9_-]{8,}|ctx_[A-Za-z0-9._-]{12,})(?![A-Za-z0-9_-])/g,
     replace: () => '[已脱敏:api_key]',
   },
   {
     type: 'secret_kv',
-    re: /\b([A-Za-z0-9_]*(?:API_KEY|SECRET_KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN))\s*([:=])\s*(['"]?)([A-Za-z0-9._~+/=@-]{8,})\3/gi,
-    replace: (full, key = '', sep = '', quote = '', val = '') => {
-      if (PLACEHOLDER_VAL_RE.test(val)) return full;
-      return `${key}${sep}${quote}[已脱敏:secret_kv]${quote}`;
+    re: /(["']?)\b([A-Za-z0-9_]*(?:API_KEY|SECRET_KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN))\1\s*([:=])\s*(?:(["'])([^\s"'`<>\\]{8,})\4|([A-Za-z0-9._~+/=@!#$%^&*-]{8,}))/gi,
+    replace: (full, keyQuote = '', key = '', sep = '', valQuote = '', quotedVal = '', bareVal = '') => {
+      const val = quotedVal || bareVal;
+      if (!val || PLACEHOLDER_VAL_RE.test(val)) return full;
+      return `${keyQuote}${key}${keyQuote}${sep}${valQuote}[已脱敏:secret_kv]${valQuote}`;
     },
   },
 ];
@@ -116,7 +118,7 @@ export function redactTextFileBeforeSend(
   { maxBytes = 2 * 1024 * 1024 }: { maxBytes?: number } = {},
 ): RedactFileResult {
   const noHit: RedactFileResult = { sendPath: filePath, tempPath: null, redacted: false, hits: [], totalHits: 0 };
-  if (!filePath || !isTextLikeFile(fileName || filePath)) return noHit;
+  if (!filePath || (!isTextLikeFile(fileName) && !isTextLikeFile(filePath))) return noHit;
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
@@ -152,7 +154,7 @@ export function formatExternalBotPrefix(text: unknown, prefix = '🤖 '): string
 }
 
 const BOT_BADGE_RE = /^🤖\s*(?:\*\*\[[^\]\r\n]{1,80}\]\*\*|\[[^\]\r\n]{1,80}\])(?=\s|$)/;
-const MARKDOWN_BLOCK_START_RE = /^(?:#{1,6}\s|```|~~~|>\s?|[-*+]\s|\d+\.\s|\|)/;
+const MARKDOWN_BLOCK_START_RE = /^(?:#{1,6}\s|```|~~~|>\s?|[-*+]\s|\d+\.\s|\||([-*_])(?:\s*\1){2,}\s*(?:\n|$))/;
 
 /** 检测消息正文是否以样式 A 的 Bot 徽章开头（用于自发消息回声防环）。 */
 export function hasBotBadgePrefix(text: unknown): boolean {
@@ -172,7 +174,7 @@ export function attachBotBadge(
   opts: { partIndex?: number; partTotal?: number } = {},
 ): string {
   const b = String(badge ?? '').trim();
-  const raw = String(body ?? '');
+  const raw = String(body ?? '').replace(/\r\n/g, '\n');
   if (!b) return raw;
   const partTotal = Number(opts.partTotal) || 0;
   const partIndex = Number(opts.partIndex) || 0;

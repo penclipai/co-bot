@@ -168,6 +168,9 @@
       const omb = st.openmausbot;
       if (omb?.ok) {
         ombBox.appendChild(badge(`在线 v${omb.version || '?'}`, 'ok'));
+        if (omb.authError || st.bridge?.sseAuthFailed) {
+          ombBox.appendChild(badge('认证失效（npm run pair）', 'err'));
+        }
         addLine(ombBox, '地址', omb.url || '-');
         addLine(ombBox, '模式', omb.desktopManaged ? (omb.paired ? '桌面端（已配对）' : '桌面端（未配对）') : 'CLI 模式');
         const chief = (omb.bots || []).find((b) => b.chiefOfStaff) || (omb.bots || [])[0];
@@ -362,9 +365,11 @@
       }
     }
 
+    let reqSeq = 0;
     async function refresh(force = false) {
       if (refreshing && !force) return;
       refreshing = true;
+      const seq = ++reqSeq;
       try {
         const params = new URLSearchParams();
         if (el('chatFilter').value) params.set('chatId', el('chatFilter').value);
@@ -375,11 +380,12 @@
           fetch('/api/status').then((r) => r.json()),
           fetch(`/api/debug/events${qs ? `?${qs}` : ''}`).then((r) => r.json()),
         ]);
+        if (seq !== reqSeq) return;
         renderStatus(st);
         renderEvents(ev);
         el('updatedAt').textContent = `最近更新：${new Date().toLocaleTimeString()}`;
       } catch (e) {
-        el('updatedAt').textContent = `刷新失败：${e.message}`;
+        if (seq === reqSeq) el('updatedAt').textContent = `刷新失败：${e.message}`;
       } finally {
         refreshing = false;
       }
@@ -394,16 +400,17 @@
       a.click();
       a.remove();
     });
-    el('chatFilter').addEventListener('change', refresh);
-    el('sourceFilter').addEventListener('change', refresh);
-    el('typeFilter').addEventListener('change', refresh);
+    el('chatFilter').addEventListener('change', () => refresh(true));
+    el('sourceFilter').addEventListener('change', () => refresh(true));
+    el('typeFilter').addEventListener('change', () => refresh(true));
     el('toggleBtn').addEventListener('click', () => {
       paused = !paused;
       el('toggleBtn').textContent = paused ? '恢复自动刷新' : '暂停自动刷新';
     });
 
     refresh();
-    setInterval(() => { if (!paused) refresh(); }, 3000);
+    setInterval(() => { if (!paused && !document.hidden) refresh(); }, 3000);
+    document.addEventListener('visibilitychange', () => { if (!paused && !document.hidden) refresh(true); });
   </script>
 </body>
 </html>

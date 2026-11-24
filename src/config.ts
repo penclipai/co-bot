@@ -141,6 +141,14 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
   const qh = asObj(selfChat?.quietHours);
   const ch = asObj(raw.chats);
 
+  if (raw.openmausbot !== undefined && !omb) errors.push('openmausbot 必须为对象');
+  if (raw.channel !== undefined && typeof raw.channel !== 'string' && !asObj(raw.channel)) errors.push('channel 必须为字符串或对象');
+  if (raw.web !== undefined && !web) errors.push('web 必须为对象');
+  if (raw.selfChat !== undefined && !selfChat) errors.push('selfChat 必须为对象');
+  if (selfChat?.quietHours !== undefined && !qh) errors.push('selfChat.quietHours 必须为对象');
+  if (raw.chats !== undefined && !ch) errors.push('chats 必须为对象');
+  if (raw.dataDir !== undefined && (typeof raw.dataDir !== 'string' || !raw.dataDir.trim())) errors.push('dataDir 必须为非空字符串');
+
   checkUnknownKeys(raw, defaults, '', warnings);
   checkUnknownKeys(omb, defaults.openmausbot, 'openmausbot', warnings);
   checkUnknownKeys(raw.channel, defaults.channel, 'channel', warnings);
@@ -172,8 +180,7 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
 
   const webPort = web?.port;
   if (webPort !== undefined) {
-    const p = Number(webPort);
-    if (!Number.isInteger(p) || p < 0 || p > 65535) {
+    if (typeof webPort !== 'number' || !Number.isInteger(webPort) || webPort < 0 || webPort > 65535) {
       errors.push(`web.port 必须为 0～65535 的整数，当前为「${String(webPort)}」`);
     }
   }
@@ -188,9 +195,9 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
   }
 
   if (selfChat?.turnStallMs !== undefined) {
-    const ms = Number(selfChat.turnStallMs);
-    if (!Number.isFinite(ms) || ms < 0) {
-      errors.push(`selfChat.turnStallMs 必须为非负数字，当前为「${String(selfChat.turnStallMs)}」`);
+    const ms = selfChat.turnStallMs;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      errors.push(`selfChat.turnStallMs 必须为非负数字，当前为「${String(ms)}」`);
     }
   }
 
@@ -211,7 +218,9 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
         const items = Array.isArray(ch.collaborators) ? ch.collaborators : Object.values(ch.collaborators as AnyObj);
         for (const col of items) {
           const rec = asObj(col);
-          if (rec && rec.policy !== undefined && !['confirm_in_self', 'auto_readonly'].includes(String(rec.policy))) {
+          if (!rec || (Array.isArray(ch.collaborators) && (typeof rec.id !== 'string' || !rec.id.trim()))) {
+            errors.push('chats.collaborators 数组项必须为包含非空 id 的对象');
+          } else if (rec.policy !== undefined && !['confirm_in_self', 'auto_readonly'].includes(String(rec.policy))) {
             errors.push(`chats.collaborators[].policy 必须为 confirm_in_self 或 auto_readonly，当前为「${String(rec.policy)}」`);
           }
         }
@@ -221,9 +230,9 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
       errors.push(`chats.externalSanitizeMentions 必须为 all / dangerous / none，当前为「${String(ch.externalSanitizeMentions)}」`);
     }
     if (ch.autoCompactThreshold !== undefined) {
-      const th = Number(ch.autoCompactThreshold);
-      if (!Number.isFinite(th) || (th !== 0 && (th < 0.5 || th > 1))) {
-        errors.push(`chats.autoCompactThreshold 必须为 0 或 0.5～1 之间，当前为「${String(ch.autoCompactThreshold)}」`);
+      const th = ch.autoCompactThreshold;
+      if (typeof th !== 'number' || !Number.isFinite(th) || (th !== 0 && (th < 0.5 || th > 1))) {
+        errors.push(`chats.autoCompactThreshold 必须为 0 或 0.5～1 之间，当前为「${String(th)}」`);
       }
     }
   }
@@ -237,8 +246,8 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
         : Object.entries(raw.projects as AnyObj).map(([k, v]) => (typeof v === 'string' ? { name: k, path: v } : { name: k, ...(asObj(v) || {}) }));
       for (const p of list) {
         const rec = asObj(p);
-        if (!rec || typeof rec.path !== 'string' || !rec.path.trim()) {
-          errors.push('projects 中的每项都必须包含非空字符串 path');
+        if (!rec || typeof rec.path !== 'string' || !rec.path.trim() || (Array.isArray(raw.projects) && (typeof rec.name !== 'string' || !rec.name.trim()))) {
+          errors.push('projects 中的每项都必须包含非空字符串 name 和 path');
         }
       }
     }
@@ -247,9 +256,9 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
     errors.push('sharedContextDir 必须为字符串');
   }
   if (raw.sharedContextPullIntervalMs !== undefined) {
-    const ms = Number(raw.sharedContextPullIntervalMs);
-    if (!Number.isFinite(ms) || ms < 0) {
-      errors.push(`sharedContextPullIntervalMs 必须为非负数字，当前为「${String(raw.sharedContextPullIntervalMs)}」`);
+    const ms = raw.sharedContextPullIntervalMs;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      errors.push(`sharedContextPullIntervalMs 必须为非负数字，当前为「${String(ms)}」`);
     }
   }
 
@@ -266,7 +275,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
     ? 'config.json'
     : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null);
   const file = explicitFile ?? flag('--config') ?? defaultCfg;
-  const raw = (file ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}) as RawConfig;
+  const parsedRaw = file ? JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) : {};
+  if (!asObj(parsedRaw)) {
+    throw new Error(`配置文件根节点必须是 JSON 对象：${file || '(empty)'}`);
+  }
+  const raw = parsedRaw as RawConfig;
   const base = file ? path.dirname(path.resolve(file)) : process.cwd();
 
   const rawChan = typeof raw.channel === 'string'
@@ -283,6 +296,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
   const rawSelf = asObj(raw.selfChat);
   const rawQh = asObj(rawSelf?.quietHours);
   const rawChats = asObj(raw.chats);
+  const sharedDirTrimmed = typeof raw.sharedContextDir === 'string' ? raw.sharedContextDir.trim() : '';
 
   const cfg: AppConfig = {
     openmausbot: { ...defaults.openmausbot, ...(rawOmb as Partial<AppConfig['openmausbot']>) },
@@ -294,19 +308,20 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
     selfChat: {
       ...defaults.selfChat,
       ...(rawSelf as Partial<AppConfig['selfChat']>),
+      commandDevices: Array.isArray(rawSelf?.commandDevices) ? [...(rawSelf.commandDevices as string[])] : [...defaults.selfChat.commandDevices],
       quietHours: { ...defaults.selfChat.quietHours, ...(rawQh as Partial<AppConfig['selfChat']['quietHours']>) },
     },
     chats: {
       ...defaults.chats,
       ...(rawChats as Partial<AppConfig['chats']>),
       collaborators: normalizeCollaborators(rawChats?.collaborators ?? defaults.chats.collaborators),
-      enabledTypes: Array.isArray(rawChats?.enabledTypes) ? (rawChats.enabledTypes as AppConfig['chats']['enabledTypes']) : defaults.chats.enabledTypes,
-      allowChatIds: Array.isArray(rawChats?.allowChatIds) ? (rawChats.allowChatIds as string[]) : defaults.chats.allowChatIds,
-      denyChatIds: Array.isArray(rawChats?.denyChatIds) ? (rawChats.denyChatIds as string[]) : defaults.chats.denyChatIds,
-      triggerAliases: Array.isArray(rawChats?.triggerAliases) ? (rawChats.triggerAliases as string[]) : defaults.chats.triggerAliases,
+      enabledTypes: Array.isArray(rawChats?.enabledTypes) ? [...(rawChats.enabledTypes as AppConfig['chats']['enabledTypes'])] : [...defaults.chats.enabledTypes],
+      allowChatIds: Array.isArray(rawChats?.allowChatIds) ? [...(rawChats.allowChatIds as string[])] : [...defaults.chats.allowChatIds],
+      denyChatIds: Array.isArray(rawChats?.denyChatIds) ? [...(rawChats.denyChatIds as string[])] : [...defaults.chats.denyChatIds],
+      triggerAliases: Array.isArray(rawChats?.triggerAliases) ? [...(rawChats.triggerAliases as string[])] : [...defaults.chats.triggerAliases],
     },
     projects: normalizeProjectsConfig(raw.projects ?? defaults.projects, base),
-    sharedContextDir: raw.sharedContextDir ? path.resolve(base, String(raw.sharedContextDir).trim()) : defaults.sharedContextDir,
+    sharedContextDir: sharedDirTrimmed ? path.resolve(base, sharedDirTrimmed) : defaults.sharedContextDir,
     sharedContextPullIntervalMs: raw.sharedContextPullIntervalMs !== undefined
       ? Math.max(0, Number(raw.sharedContextPullIntervalMs) || 0)
       : defaults.sharedContextPullIntervalMs,
@@ -316,7 +331,13 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
   const cliOmb = flag('--omb');
   if (cliOmb) cfg.openmausbot.url = cliOmb;
   const cliPort = flag('--port');
-  if (cliPort) cfg.web.port = Number(cliPort);
+  if (cliPort !== undefined) {
+    const portNum = Number(cliPort);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      throw new Error(`--port 必须为 1～65535 的整数，当前为「${cliPort}」`);
+    }
+    cfg.web.port = portNum;
+  }
   const cliChannel = flag('--channel');
   if (cliChannel) {
     const c = String(cliChannel).trim();

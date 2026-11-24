@@ -73,6 +73,7 @@ export class WebServer {
     const srv = http.createServer((req, res) => this.#handle(req, res).catch((e) => {
       console.error('[web]', e);
       if (!res.headersSent) send(res, 500, { error: '服务器内部错误' });
+      else if (!res.writableEnded) res.destroy();
     }));
     this.server = srv;
     await new Promise<void>((resolve, reject) => {

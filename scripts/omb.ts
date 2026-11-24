@@ -25,6 +25,13 @@ export type FoundOmbServer =
   | { kind: 'node'; entry: string; version: string | null; staticDir: string | null; skillsDir: string | null }
   | { kind: 'cli'; command: string; version: string | null };
 
+export function probeHostOf(host = ''): string {
+  const h = String(host ?? '').trim();
+  if (!h || h === '0.0.0.0' || h === '::' || h === '[::]') return '127.0.0.1';
+  if (h.includes(':') && !h.startsWith('[')) return `[${h}]`;
+  return h;
+}
+
 export function isLoopbackUrl(rawUrl: unknown): boolean {
   try {
     const u = new URL(String(rawUrl || ''));
@@ -115,7 +122,11 @@ export async function stopManagedProcess({
     return false;
   }
 
-  try { process.kill(pid, 'SIGTERM'); } catch (e) { if ((e as NodeJS.ErrnoException)?.code !== 'ESRCH') throw e; }
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5000 });
+  } else {
+    try { process.kill(pid, 'SIGTERM'); } catch (e) { if ((e as NodeJS.ErrnoException)?.code !== 'ESRCH') throw e; }
+  }
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline && isPidAlive(pid)) {
     await new Promise((r) => setTimeout(r, 100));
@@ -126,6 +137,10 @@ export async function stopManagedProcess({
     while (Date.now() < killDeadline && isPidAlive(pid)) {
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+  if (isPidAlive(pid)) {
+    log(`⚠️ ${name}（PID ${pid}）仍未退出，已保留 PID 文件`);
+    return false;
   }
   fs.rmSync(pidFile, { force: true });
   log(`⏹ ${name} 已停止（PID ${pid}）`);
@@ -176,13 +191,19 @@ export async function spawnManagedProcess({
     fs.closeSync(errFd);
   }
   const pid = child.pid ?? 0;
-  fs.writeFileSync(pidFile, `${pid}\n`, 'utf8');
+  let spawnErr: Error | null = null;
+  child.on('error', (e) => { spawnErr = e; });
+  if (pid > 0) fs.writeFileSync(pidFile, `${pid}\n`, 'utf8');
   child.unref();
 
   const deadline = Date.now() + timeoutMs;
   let healthy = false;
   while (Date.now() < deadline) {
-    if (!isPidAlive(pid)) {
+    if (spawnErr) {
+      fs.rmSync(pidFile, { force: true });
+      throw spawnErr;
+    }
+    if (!pid || !isPidAlive(pid)) {
       fs.rmSync(pidFile, { force: true });
       const detail = tailLogLines(errFile, 20) || tailLogLines(logFile, 20);
       throw new Error(`${name} 启动后提前退出（PID ${pid}）${detail ? `\n${detail}` : ''}`);

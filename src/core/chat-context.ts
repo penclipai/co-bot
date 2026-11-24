@@ -37,6 +37,17 @@ export interface ChatMetaSummary {
   updatedAt: number;
 }
 
+const AUDIO_EXT_RE = /\.(mp3|wav|m4a|ogg|opus|amr|aac|flac|webm)$/i;
+
+/** 判断附件是否为语音/音频消息。 */
+export function isAudioAttachment(att: Partial<InboundAttachment> | null | undefined): boolean {
+  if (!att || typeof att !== 'object') return false;
+  if (att.kind === 'audio' || att.kind === 'voice') return true;
+  if (typeof att.mime === 'string' && att.mime.toLowerCase().startsWith('audio/')) return true;
+  if (typeof att.name === 'string' && AUDIO_EXT_RE.test(att.name)) return true;
+  return false;
+}
+
 export function redactSecrets(text: unknown): string {
   const preMasked = String(text ?? '')
     .replace(/\bomb_sess_[A-Za-z0-9_-]+/g, '[REDACTED]')
@@ -66,7 +77,7 @@ export function sanitizeExternalMentions(
   const segs = s.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
   for (let i = 0; i < segs.length; i += 2) {
     segs[i] = segs[i].replace(
-      /(^|[^A-Za-z0-9._%+-])@([^\s@\u200B!:：,，;；)）\]】」』"'”’?？*]+)/g,
+      /(^|[^A-Za-z0-9._%+-])@([^\s@\u200B!:：,，.。、;；(（)）\]】」』"'”’?？*]+)/g,
       (full: string, lead: string, name: string) => {
         if (mode === 'dangerous') {
           if (!DANGEROUS_MENTION_RE.test(name) && !botSet.has(name.toLowerCase())) {
@@ -146,9 +157,6 @@ export class ChatContextStore {
           if (head && head.ts >= cutoff) break;
           bucket.order.shift();
           if (head) bucket.byId.delete(head.id);
-        }
-        if (!bucket.order.length && bucket.updatedAt < cutoff) {
-          this.chats.delete(chatId);
         }
       }
     }
@@ -236,7 +244,14 @@ export class ChatContextStore {
       mentionsMe: Boolean(ev.mentionsMe),
       ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
       text: clipText(ev.text ?? '', this.maxTextChars),
-      ...(ev.linkCard ? { linkCard: { ...ev.linkCard } } : {}),
+      ...(ev.linkCard ? {
+        linkCard: {
+          ...(ev.linkCard.title ? { title: clipText(ev.linkCard.title, 200) } : {}),
+          ...(ev.linkCard.description ? { description: clipText(ev.linkCard.description, 400) } : {}),
+          ...(ev.linkCard.url ? { url: redactSecrets(ev.linkCard.url).trim() } : {}),
+          ...(ev.linkCard.source ? { source: clipText(ev.linkCard.source, 120) } : {}),
+        },
+      } : {}),
       attachments: cloneAttachments(ev.attachments, ev.id),
     };
     return this.#upsertEntry(bucket, entry);
@@ -561,7 +576,7 @@ function formatMsgLine(entry: ChatContextMessage, maxChars = 280): string {
   }
   if (entry.attachments?.length) {
     const names = entry.attachments.map((a) => {
-      if (a.kind === 'audio' || a.kind === 'voice' || (typeof a.mime === 'string' && a.mime.startsWith('audio/'))) {
+      if (isAudioAttachment(a)) {
         const dur = a.durationSec ? ` ${a.durationSec}s` : '';
         return a.transcript ? `语音${dur}: ${clipText(a.transcript, 120)}` : `语音${dur}: ${a.name}`;
       }
