@@ -175,27 +175,46 @@ export async function spawnManagedProcess({
   return { pid: child.pid, healthy };
 }
 
-export function findOpenMausBotServer() {
-  const pkgDir = path.join(APP_ROOT, 'node_modules', 'openmausbot');
-  const localEntry = path.join(pkgDir, 'dist-server', 'index.js');
-  if (fs.existsSync(localEntry)) {
-    let pkgVersion = null;
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-      pkgVersion = pkg?.version ?? null;
-    } catch { /* ignore */ }
-    const staticDir = fs.existsSync(path.join(pkgDir, 'dist', 'index.html')) ? path.join(pkgDir, 'dist') : null;
-    const skillsDir = fs.existsSync(path.join(pkgDir, 'skills')) ? path.join(pkgDir, 'skills') : null;
-    return { kind: 'node', entry: localEntry, pkgVersion, staticDir, skillsDir };
+function resolveGlobalOmbDir({ run, platform, exists, realpath }) {
+  if (platform === 'win32') {
+    const whereRes = run('where.exe', ['openmausbot.cmd'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
+    if (whereRes?.status !== 0) return null;
+    const cmdPath = String(whereRes.stdout || '').trim().split(/\r?\n/).find(Boolean);
+    return cmdPath ? path.join(path.dirname(cmdPath), 'node_modules', 'openmausbot') : null;
   }
+  const whichRes = run('which', ['openmausbot'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
+  if (whichRes?.status !== 0) return null;
+  const binPath = String(whichRes.stdout || '').trim().split(/\r?\n/).find(Boolean);
+  if (!binPath || !exists(binPath)) return null;
+  try {
+    return path.dirname(realpath(binPath));
+  } catch {
+    return path.dirname(binPath);
+  }
+}
 
-  const ver = process.platform === 'win32'
-    ? spawnSync('cmd.exe', ['/d', '/s', '/c', 'openmausbot --version'], { timeout: 3000, encoding: 'utf8' })
-    : spawnSync('openmausbot', ['--version'], { timeout: 3000, encoding: 'utf8' });
-  if (ver.status === 0) {
-    return { kind: 'cli', command: 'openmausbot' };
+export function findOpenMausBotServer({
+  run = spawnSync,
+  platform = process.platform,
+  exists = fs.existsSync,
+  realpath = fs.realpathSync,
+} = {}) {
+  const ver = platform === 'win32'
+    ? run('cmd.exe', ['/d', '/s', '/c', 'openmausbot --version'], { timeout: 5000, encoding: 'utf8', windowsHide: true })
+    : run('openmausbot', ['--version'], { timeout: 5000, encoding: 'utf8', windowsHide: true });
+  if (ver?.status !== 0) return null;
+
+  const version = String(ver.stdout || '').trim().split(/\r?\n/)[0] || null;
+  const pkgDir = resolveGlobalOmbDir({ run, platform, exists, realpath });
+  if (pkgDir) {
+    const serverEntry = path.join(pkgDir, 'dist-server', 'index.js');
+    if (exists(serverEntry)) {
+      const staticDir = exists(path.join(pkgDir, 'dist', 'index.html')) ? path.join(pkgDir, 'dist') : null;
+      const skillsDir = exists(path.join(pkgDir, 'skills')) ? path.join(pkgDir, 'skills') : null;
+      return { kind: 'node', entry: serverEntry, version, staticDir, skillsDir };
+    }
   }
-  return null;
+  return { kind: 'cli', command: 'openmausbot', version };
 }
 
 async function alignCliComputerOff(cfg, { log = console.log } = {}) {
@@ -248,15 +267,16 @@ export async function ensureOpenMausBot(cfg, { log = console.log } = {}) {
     }
     const found = findOpenMausBotServer();
     if (!found) {
-      throw new Error('未检测到 OpenMausBot，请先运行 npm install 自动安装');
+      throw new Error('未检测到全局 openmausbot CLI，请先安装：npm install -g openmausbot（或先启动 OpenMausBot 桌面端）');
     }
     const portNum = Number(new URL(cfg.openmausbot.url).port || 8799);
+    const serveArgs = ['serve', '--port', String(portNum), '--no-open', '--no-pair', '--local'];
     const cmd = found.kind === 'node'
       ? process.execPath
-      : (process.platform === 'win32' ? 'cmd.exe' : 'openmausbot');
+      : (process.platform === 'win32' ? 'cmd.exe' : (found.command || 'openmausbot'));
     const args = found.kind === 'node'
       ? ['--no-deprecation', found.entry]
-      : (process.platform === 'win32' ? ['/d', '/s', '/c', 'openmausbot'] : []);
+      : (process.platform === 'win32' ? ['/d', '/s', '/c', 'openmausbot', ...serveArgs] : serveArgs);
     const env = {
       ...process.env,
       OMB_PORT: String(portNum),
@@ -320,7 +340,7 @@ function parseCliArgs(argv) {
 function usage() {
   console.log([
     '用法：npm run omb -- <ensure|start|stop|restart|status|logs> [--config <path>] [--omb <url>]',
-    '  ensure / start  检查本机 OpenMausBot，未运行则按本机依赖自动拉起并对齐 CLI computer=off',
+    '  ensure / start  检查本机 OpenMausBot，未运行则按全局 openmausbot CLI 自动拉起并对齐 CLI computer=off',
     '  stop            停止由 co-bot 托管拉起的 OpenMausBot CLI（data/openmausbot.pid）',
     '  restart         重启 OpenMausBot CLI',
     '  status          查看 OpenMausBot 连通、运行模式与主 Bot 状态',

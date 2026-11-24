@@ -1,7 +1,7 @@
 # 运行数据与日志
 data/
 node_modules/
-# 跨平台保留：不同操作系统在 npm install 时按目标平台解析 openmausbot 的原生可选依赖（@duckdb/node-api、@resvg/resvg-js）
+# 锁文件不入库（仅含开发期 ESLint 依赖，运行时零依赖）
 package-lock.json
 # 本机配置与自备通道插件（不入库）
 config.json

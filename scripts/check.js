@@ -13,6 +13,7 @@ import { OpenMausBotClient } from '../src/openmausbot/client.js';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.js';
 import { probeOpenMausBot } from '../src/plugins/openmausbot.js';
 import { runChannelContractTest } from './channel-test.js';
+import { findOpenMausBotServer } from './omb.js';
 
 const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
@@ -44,21 +45,16 @@ if (maj >= 24) {
   fails++;
 }
 
-const ombPkgPath = path.join(APP_ROOT, 'node_modules', 'openmausbot', 'package.json');
-if (fs.existsSync(ombPkgPath)) {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(ombPkgPath, 'utf8'));
-    console.log(`✓ 本地依赖 openmausbot v${pkg.version ?? '?'} 已安装`);
-  } catch {
-    console.log('✓ 本地依赖 openmausbot 已安装');
-  }
+const ombCli = findOpenMausBotServer();
+if (ombCli) {
+  console.log(`✓ 全局 openmausbot CLI${ombCli.version ? ` v${ombCli.version}` : ''} 已安装`);
 } else {
-  console.log('⚠ 本地未安装 openmausbot，可运行 npm install 自动安装');
+  console.log('ℹ 未在 PATH 检测到全局 openmausbot CLI（如使用桌面端或远端服务可忽略；需要自动拉起可运行 npm install -g openmausbot）');
 }
 
 const oc = process.platform === 'win32'
-  ? spawnSync('cmd.exe', ['/d', '/s', '/c', 'opencode --version'], { timeout: 3000, encoding: 'utf8' })
-  : spawnSync('opencode', ['--version'], { timeout: 3000, encoding: 'utf8' });
+  ? spawnSync('cmd.exe', ['/d', '/s', '/c', 'opencode --version'], { timeout: 3000, encoding: 'utf8', windowsHide: true })
+  : spawnSync('opencode', ['--version'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
 if (oc.status === 0 && String(oc.stdout || '').trim()) {
   console.log(`✓ opencode CLI: ${String(oc.stdout).trim().split(/\r?\n/)[0]}`);
 } else {

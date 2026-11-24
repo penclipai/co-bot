@@ -12,7 +12,7 @@
 | `npm start` / `npm run sim` | 前台启动（`sim` 强制使用 Web 模拟器，访问 `http://127.0.0.1:8787/sim`） |
 | `npm run status` / `restart` / `stop` | 查看状态 / 平滑重启 / 停止 `co-bot`（`npm run stop -- --all` 连带停止托管的 OpenMausBot CLI） |
 | `npm run omb -- status` | 单独管理托管的 OpenMausBot CLI（支持 `ensure\|start\|stop\|restart\|status\|logs`） |
-| `npm run check` | 校验 `config.json` 与 Node / `openmausbot` / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`） |
+| `npm run check` | 校验 `config.json` 与 Node / 全局 `openmausbot` CLI / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`） |
 | `npm run pair` | OpenMausBot 桌面端一次性配对（弹窗点 Allow，或传 `-- <12位配对码>`） |
 | `npm run daemon -- install-service` | 安装开机自启（先加 `--dry` 预览 `systemd --user` / `LaunchAgents` / Windows 启动项；`uninstall-service` 卸载） |
 | `npm run lint` / `lint:fix` | 运行 ESLint 规范与单文件 1000 行上限校验 / 自动修复格式 |

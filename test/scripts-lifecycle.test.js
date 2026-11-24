@@ -24,7 +24,7 @@ test('cross-platform: patchBot, downloadMessageFile path basename on Windows/POS
   const client = new OpenMausBotClient({ baseUrl: omb.baseUrl });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-check-cli-'));
   const tmpCfg = path.join(tmpDir, 'config.json');
-  fs.writeFileSync(tmpCfg, JSON.stringify({ transport: 'sim', openmausbot: { url: omb.baseUrl }, dataDir: path.join(tmpDir, 'data') }));
+  fs.writeFileSync(tmpCfg, JSON.stringify({ channel: { use: 'sim' }, openmausbot: { url: omb.baseUrl }, dataDir: path.join(tmpDir, 'data') }));
 
   try {
     const winRes = await client.downloadMessageFile('t1', 'm1', 'C:\\out\\report.csv');
@@ -59,7 +59,7 @@ test('scripts/daemon.js: cross-platform start, status, and stop lifecycle', asyn
   const dataDir = path.join(tmpDir, 'data');
   fs.writeFileSync(tmpCfg, JSON.stringify({
     openmausbot: { url: omb.baseUrl },
-    transport: 'sim',
+    channel: { use: 'sim' },
     web: { host: '127.0.0.1', port },
     dataDir,
   }));
@@ -81,16 +81,56 @@ test('scripts/daemon.js: cross-platform start, status, and stop lifecycle', asyn
   }
 });
 
-test('scripts/omb.js: isLoopbackUrl, bundled node_modules discovery, and ensureOpenMausBot CLI computer=off alignment', async () => {
+test('scripts/omb.js: isLoopbackUrl, global CLI discovery, and ensureOpenMausBot CLI computer=off alignment', async () => {
   assert.equal(isLoopbackUrl('http://127.0.0.1:8799'), true);
   assert.equal(isLoopbackUrl('http://localhost:8799'), true);
   assert.equal(isLoopbackUrl('http://10.0.0.5:8799'), false);
 
-  const found = findOpenMausBotServer();
-  assert.equal(found?.kind, 'node');
-  assert.ok(fs.existsSync(found.entry));
-  assert.ok(found.staticDir && fs.existsSync(path.join(found.staticDir, 'index.html')));
-  assert.ok(found.skillsDir && fs.existsSync(found.skillsDir));
+  assert.equal(findOpenMausBotServer({ run: () => ({ status: 1, stdout: '' }), platform: 'linux' }), null);
+  assert.deepEqual(
+    findOpenMausBotServer({
+      run: (cmd) => (cmd === 'openmausbot' ? { status: 0, stdout: '0.1.177\n' } : { status: 1, stdout: '' }),
+      platform: 'linux',
+    }),
+    { kind: 'cli', command: 'openmausbot', version: '0.1.177' },
+  );
+
+  const posixPkg = path.join('/usr/local/lib/node_modules/openmausbot');
+  const posixBin = '/usr/local/bin/openmausbot';
+  const posixCli = path.join(posixPkg, 'cli.js');
+  const posixEntry = path.join(posixPkg, 'dist-server', 'index.js');
+  const posixStatic = path.join(posixPkg, 'dist');
+  const posixSkills = path.join(posixPkg, 'skills');
+  assert.deepEqual(
+    findOpenMausBotServer({
+      platform: 'linux',
+      run: (cmd) => (cmd === 'openmausbot'
+        ? { status: 0, stdout: '0.1.177\n' }
+        : { status: 0, stdout: `${posixBin}\n` }),
+      exists: (p) => new Set([posixBin, posixEntry, path.join(posixStatic, 'index.html'), posixSkills]).has(p),
+      realpath: () => posixCli,
+    }),
+    { kind: 'node', entry: posixEntry, version: '0.1.177', staticDir: posixStatic, skillsDir: posixSkills },
+  );
+
+  const fakeNpmDir = path.join(os.tmpdir(), 'fake-npm-global');
+  const winPkg = path.join(fakeNpmDir, 'node_modules', 'openmausbot');
+  const winEntry = path.join(winPkg, 'dist-server', 'index.js');
+  const winStatic = path.join(winPkg, 'dist');
+  const winSkills = path.join(winPkg, 'skills');
+  assert.deepEqual(
+    findOpenMausBotServer({
+      platform: 'win32',
+      run: (cmd) => (cmd === 'cmd.exe'
+        ? { status: 0, stdout: '0.1.177\r\n' }
+        : { status: 0, stdout: `${path.join(fakeNpmDir, 'openmausbot.cmd')}\r\n` }),
+      exists: (p) => new Set([winEntry, path.join(winStatic, 'index.html'), winSkills]).has(p),
+    }),
+    { kind: 'node', entry: winEntry, version: '0.1.177', staticDir: winStatic, skillsDir: winSkills },
+  );
+
+  const realFound = findOpenMausBotServer();
+  assert.ok(realFound === null || realFound.kind === 'cli' || realFound.kind === 'node');
 
   const omb = await startMockOmb(
     [{ id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true, computer: 'local' }],

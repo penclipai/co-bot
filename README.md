@@ -14,16 +14,18 @@
 
 ## 运行要求
 
-- **Node.js >= 24**（运行内置 `openmausbot` CLI 依赖所需）
+- **Node.js >= 24**
+- **OpenMausBot**：通过 `npm install -g openmausbot` 全局安装 CLI，或直接启动 OpenMausBot 桌面端
 - 已配置可用的底层 Agent CLI（推荐本机预先安装 `opencode`）
 
 ## 快速开始
 
 ```bash
-npm install            # 安装依赖及内置 OpenMausBot CLI
-npm run daemon         # 后台启动 OpenMausBot CLI 与 co-bot（桌面端首次需先运行 npm run pair）
-npm start              # 仅前台运行 co-bot（Web 模拟器 http://127.0.0.1:8787/sim）
-npm run verify         # 一键全量校验：ESLint（含 1000 行上限）+ 单元测试 + 通道契约检测
+npm install -g openmausbot  # 全局安装 OpenMausBot CLI（使用桌面端可跳过）
+npm install                 # 可选：安装开发期 ESLint 校验依赖（co-bot 本身零运行依赖）
+npm run daemon              # 后台启动 OpenMausBot CLI 与 co-bot（桌面端首次需先运行 npm run pair）
+npm start                   # 仅前台运行 co-bot（Web 模拟器 http://127.0.0.1:8787/sim）
+npm run verify              # 一键全量校验：ESLint（含 1000 行上限）+ 单元测试 + 通道契约检测
 ```
 
 > 完整运维命令（`status` / `restart` / `stop` / `check` / `install-service`）、`@bot` 全量指令及 `config.json` 配置见 [使用指南](./docs/usage.md)。
