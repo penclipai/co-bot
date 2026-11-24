@@ -25,7 +25,7 @@
 
 ## 二、自聊与多 Bot 交互
 
-- **唤醒与接力**：自聊中用 `@bot <问题>`（默认对齐后端主协调 Bot `co-bot`，且 `hideChiefPrefix: true` 时 1v1 省略名字前缀）或 `@<Bot名>` / `@<群名>` 指定协作对象；引用任意历史回复即可跨线程续聊。状态与路由防抖持久化在 `data/bridge-state.json`，重启后自动恢复在途轮次。
+- **唤醒与接力**：自聊中用 `@bot <问题>`（默认对齐后端主协调 Bot `co-bot`，回复统一带 `🤖 **[co-bot]**` 徽章以便与本人人工消息区分；如需隐藏主 Bot 徽章可设 `selfChat.hideChiefPrefix: true`）或 `@<Bot名>` / `@<群名>` 指定协作对象；引用任意历史回复即可跨线程续聊。状态与路由防抖持久化在 `data/bridge-state.json`，重启后自动恢复在途轮次。
 - **连续对话窗口（默认 120s）**：Bot 回复后在 `followUpWindowMs` 内可免 `@` 直接发文字，或连续发送图片/文件（`imageBatchMs` 默认 1.5s 防抖合批）；以 `#`、`备忘`、`记一下`、`笔记`、`todo` 开头的消息视为个人笔记自动忽略；发 `@bot bye` / `退下` 随时退出。
 - **气泡控制与多媒体**：中间思考口语短窗合并上屏（单轮最多 2 条）；正文在 `resultChars`～`softSplitChars`（1500～2800 字）间智能拆为 2 段，超长自动截断并附 `.md` 原文；支持入站音频转写（`transcript` / `transcribeAudio`）、`linkCard` 及 Bot 生成图片/文件的自动回传。
 - **卡片交互与免打扰**：

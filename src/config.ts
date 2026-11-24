@@ -38,7 +38,7 @@ export const defaults: AppConfig = {
     resultChars: 1500,
     softSplitChars: 2800,
     followUpWindowMs: 120_000,
-    hideChiefPrefix: true,
+    hideChiefPrefix: false,
     imageBatchMs: 1500,
     fileRetentionDays: 7,
     sendRetries: 2,

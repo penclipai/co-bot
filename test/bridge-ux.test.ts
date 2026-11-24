@@ -65,7 +65,7 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
     const progMsgs = sent.filter((m) => m.text.includes('正在执行命令'));
     assert.equal(progMsgs.length, 1, '相同工具活动进度不得重复刷屏');
     assert.equal(progMsgs[0].text.includes('running a command'), false, '通用英文 spoken 应被静默抑制');
-    assert.match(sent.at(-1)!.text, /^\*\*\[co-bot\]\*\*/, 'hideChiefPrefix=false 时应保留主 Bot 前缀');
+    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/, 'hideChiefPrefix=false 时应保留样式 A Bot 徽章');
 
     const beforeSoft = sent.length;
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
@@ -82,6 +82,8 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
 
     await transport.emitUser('@bot 发中等长回答');
     await until(() => sent.length === beforeSoft + 2);
+    assert.match(sent[beforeSoft].text, /^🤖 \*\*\[co-bot\]\*\* \(1\/2\)/, '软拆分首条应携带 (1/2) Bot 徽章');
+    assert.match(sent[beforeSoft + 1].text, /^🤖 \*\*\[co-bot\]\*\* \(2\/2\)/, '软拆分次条应携带 (2/2) Bot 徽章');
     assert.equal(filesSent.length, 0, '软拆分区间内不应生成 .md 附件');
 
     await transport.emitUser('@bot 发超长回答');

@@ -150,3 +150,38 @@ export function formatExternalBotPrefix(text: unknown, prefix = '🤖 '): string
   if (trimmed.startsWith('🤖') || (p.trim() && trimmed.startsWith(p.trim()))) return s;
   return `${p}${s}`;
 }
+
+const BOT_BADGE_RE = /^🤖\s*(?:\*\*\[[^\]\r\n]{1,80}\]\*\*|\[[^\]\r\n]{1,80}\])(?=\s|$)/;
+const MARKDOWN_BLOCK_START_RE = /^(?:#{1,6}\s|```|~~~|>\s?|[-*+]\s|\d+\.\s|\|)/;
+
+/** 检测消息正文是否以样式 A 的 Bot 徽章开头（用于自发消息回声防环）。 */
+export function hasBotBadgePrefix(text: unknown): boolean {
+  const trimmed = String(text ?? '').trimStart();
+  return Boolean(trimmed) && BOT_BADGE_RE.test(trimmed);
+}
+
+/**
+ * 为机器人回复前置样式 A 徽章（如 `🤖 **[co-bot]**`）：
+ * - 单行纯文本徽章与正文同行；
+ * - 多行或以 Markdown 块语法（标题/列表/代码块/引用/表格）开头时徽章独立成行；
+ * - 拆分气泡传入 `partIndex`/`partTotal`（>1）时附加 `(i/n)` 标识。
+ */
+export function attachBotBadge(
+  badge: string,
+  body: unknown,
+  opts: { partIndex?: number; partTotal?: number } = {},
+): string {
+  const b = String(badge ?? '').trim();
+  const raw = String(body ?? '');
+  if (!b) return raw;
+  const partTotal = Number(opts.partTotal) || 0;
+  const partIndex = Number(opts.partIndex) || 0;
+  const partTag = partTotal > 1 && partIndex >= 1 ? ` (${partIndex}/${partTotal})` : '';
+  const head = `${b}${partTag}`;
+  if (!raw.trim()) return head;
+  const trimmedStart = raw.trimStart();
+  if (!partTag && (trimmedStart.startsWith(b) || hasBotBadgePrefix(trimmedStart))) return raw;
+  const cleanBody = raw.startsWith('\n') ? raw.replace(/^\n+/, '') : raw;
+  const sep = (raw.includes('\n') || MARKDOWN_BLOCK_START_RE.test(cleanBody.trimStart())) ? '\n' : ' ';
+  return `${head}${sep}${cleanBody}`;
+}

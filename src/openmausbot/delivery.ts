@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isAudioAttachment } from '../core/channel-contract.ts';
 import { sanitizeExternalMentions } from '../core/chat-context.ts';
-import { formatExternalBotPrefix, redactTextFileBeforeSend } from '../core/security.ts';
-import { clip, fileSafe, mdClip, mdSplit, safeAttachmentName } from '../format.ts';
+import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend } from '../core/security.ts';
+import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
@@ -387,27 +387,49 @@ export async function deliverBotReply(
   }
   const originNote = proactive && isExternal ? `（来自「${originName}」）` : '';
   const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
-  const head = proactive
-    ? `🔔 **${proLabel} 通知**${originNote}\n`
-    : (who ? `${who}\n` : '');
+  const proHead = proactive ? `🔔 **${proLabel} 通知**${originNote}\n` : '';
   const safeBody = isExternal && targetChatId && targetChatId !== bridge.selfChat
     ? sanitizeExternalMentions(text, { mode: bridge.chats.externalSanitizeMentions ?? 'all', botNames: bridge.getKnownBotNames() })
     : text;
   const isDirectExternalReply = Boolean(isExternal && !chatCtx?.privateReply && !proactive && targetChatId && targetChatId !== bridge.selfChat);
   const isDirectDelegationRes = Boolean(isDirectExternalReply && chatCtx?.delegationReq?.id);
-  let formattedBody = head + safeBody;
+  const customExtPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
+  const useDefaultExtBadge = Boolean(
+    isDirectExternalReply && !isDirectDelegationRes && customExtPrefix && customExtPrefix.trim() === '🤖',
+  );
+  const badge = proactive ? '' : (who || (useDefaultExtBadge ? `🤖 **[${shownName}]**` : ''));
+
+  let bodyCore = safeBody;
   let delegationTagSuffix = '';
   if (isDirectDelegationRes && chatCtx?.delegationReq?.id) {
-    formattedBody = formatDelegationResponse({ re: chatCtx.delegationReq.id, text: formattedBody });
-    const tagIdx = formattedBody.lastIndexOf('\n[cobot:res ');
+    const tagged = formatDelegationResponse({ re: chatCtx.delegationReq.id, text: safeBody });
+    const tagIdx = tagged.lastIndexOf('\n[cobot:res ');
     if (tagIdx >= 0) {
-      delegationTagSuffix = formattedBody.slice(tagIdx);
+      bodyCore = tagged.slice(0, tagIdx);
+      delegationTagSuffix = tagged.slice(tagIdx);
+    } else {
+      bodyCore = tagged;
     }
-  } else if (isDirectExternalReply) {
-    formattedBody = formatExternalBotPrefix(formattedBody, bridge.chats.externalBotPrefix ?? '🤖 ');
+  } else if (isDirectExternalReply && !useDefaultExtBadge && customExtPrefix) {
+    bodyCore = formatExternalBotPrefix(bodyCore, customExtPrefix);
   }
-  const full = privHead + formattedBody;
-  const coreWithoutTag = delegationTagSuffix ? full.slice(0, full.length - delegationTagSuffix.length) : full;
+
+  const fixedPrefix = privHead + proHead;
+  const composeMessage = (
+    partBody: string,
+    { partIndex, partTotal, includeFixed = true, includeTag = true }: {
+      partIndex?: number;
+      partTotal?: number;
+      includeFixed?: boolean;
+      includeTag?: boolean;
+    } = {},
+  ): string => {
+    const badged = badge ? attachBotBadge(badge, partBody, { partIndex, partTotal }) : partBody;
+    return `${includeFixed ? fixedPrefix : ''}${badged}${includeTag ? delegationTagSuffix : ''}`;
+  };
+
+  const full = composeMessage(bodyCore);
+  const coreWithoutTag = `${fixedPrefix}${badge ? attachBotBadge(badge, bodyCore) : bodyCore}`;
   const compactCtx = compactChatCtx(chatCtx);
   const route: MsgRoute = {
     botId,
@@ -425,6 +447,9 @@ export async function deliverBotReply(
   };
   const effResult = bridge.effectiveResultChars();
   const effSoftSplit = bridge.effectiveSoftSplitChars();
+  const caps = bridge.channelCaps();
+  const useMarkdown = Boolean(bridge.markdown && caps?.markdown !== false);
+  const badgeEffLen = badge ? (useMarkdown ? badge.length : plain(badge).length) : 0;
 
   const draftActions: ChannelAction[] | null = draftKey && draftMeta
     ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${bridge.trigger} sendback ${draftKey}` }]
@@ -434,9 +459,22 @@ export async function deliverBotReply(
   if (full.length <= effResult) {
     firstSentId = await bridge.say(full, route, quoteReplyId, draftActions);
   } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
-    const splitCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
-    const chunks = mdSplit(coreWithoutTag, splitCap);
-    if (delegationTagSuffix && chunks.length) chunks[chunks.length - 1] += delegationTagSuffix;
+    let chunks: string[];
+    if (badge) {
+      const splitOverhead = fixedPrefix.length + badgeEffLen + 8 + delegationTagSuffix.length;
+      const splitCap = Math.max(20, effResult - splitOverhead);
+      const rawChunks = mdSplit(bodyCore, splitCap);
+      chunks = rawChunks.map((part, idx) => composeMessage(part, {
+        partIndex: idx + 1,
+        partTotal: rawChunks.length,
+        includeFixed: idx === 0,
+        includeTag: idx === rawChunks.length - 1,
+      }));
+    } else {
+      const splitCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
+      chunks = mdSplit(coreWithoutTag, splitCap);
+      if (delegationTagSuffix && chunks.length) chunks[chunks.length - 1] += delegationTagSuffix;
+    }
     for (let i = 0; i < chunks.length; i++) {
       const sid = await bridge.say(
         chunks[i],
@@ -452,12 +490,24 @@ export async function deliverBotReply(
   } else {
     const canAttach = bridge.supportsFiles();
     const note = canAttach ? '\n\n📎 完整回复见下一条附件' : '';
-    const clipCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
-    const clipped = mdClip(coreWithoutTag, clipCap);
-    const out = `${clipped.text}${clipped.cut ? note : ''}${delegationTagSuffix}`;
+    let out: string;
+    let wasCut: boolean;
+    if (badge) {
+      const clipOverhead = fixedPrefix.length + badgeEffLen + 1 + delegationTagSuffix.length;
+      const clipCap = Math.max(16, effResult - clipOverhead);
+      const clipped = mdClip(bodyCore, clipCap);
+      wasCut = clipped.cut;
+      const badgedClip = attachBotBadge(badge, clipped.text);
+      out = `${fixedPrefix}${badgedClip}${clipped.cut ? note : ''}${delegationTagSuffix}`;
+    } else {
+      const clipCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
+      const clipped = mdClip(coreWithoutTag, clipCap);
+      wasCut = clipped.cut;
+      out = `${clipped.text}${clipped.cut ? note : ''}${delegationTagSuffix}`;
+    }
     firstSentId = await bridge.say(out, route, quoteReplyId, draftActions);
 
-    if (clipped.cut && canAttach) {
+    if (wasCut && canAttach) {
       try {
         fs.mkdirSync(bridge.inDir, { recursive: true });
         const mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);

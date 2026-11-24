@@ -143,7 +143,7 @@ export function formatCardPrompt(_botName: string, msg: OmbMessage, whoPrefix: s
   if (msg.card) {
     const info = extractCardInfo(msg)!;
     if (info.isQuestion) {
-      const lines = [`❓ ${head}${info.title}`];
+      const lines = [`${head}❓ ${info.title}`];
       if (info.questionText && info.questionText !== info.title) lines.push(clip(info.questionText, 300));
       if (info.options.length) {
         lines.push('');
@@ -163,7 +163,7 @@ export function formatCardPrompt(_botName: string, msg: OmbMessage, whoPrefix: s
     }
     const sub = msg.card.subtitle ? `\n${clip(msg.card.subtitle, 240)}` : '';
     return {
-      text: `⏸️ ${head}${info.title}${sub}\n\n回复 \`ok\` 允许，\`always\` 总是允许，\`no\` 拒绝`,
+      text: `${head}⏸️ ${info.title}${sub}\n\n回复 \`ok\` 允许，\`always\` 总是允许，\`no\` 拒绝`,
       actions: [
         { label: '允许', text: 'ok', kind: 'primary' },
         { label: '总是允许', text: 'always' },
@@ -174,24 +174,24 @@ export function formatCardPrompt(_botName: string, msg: OmbMessage, whoPrefix: s
   }
   if (msg.secret) {
     return {
-      text: `🔐 ${head}需要补充凭据「${msg.secret.label || msg.secret.target || '密钥'}」，请到管理后台输入；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `${head}🔐 需要补充凭据「${msg.secret.label || msg.secret.target || '密钥'}」，请到管理后台输入；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
       info: { cardKind: 'secret' },
     };
   }
   if (msg.connector) {
     return {
-      text: `🔌 ${head}需要授权连接器「${msg.connector.label || msg.connector.slug || ''}」，请到管理后台完成；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `${head}🔌 需要授权连接器「${msg.connector.label || msg.connector.slug || ''}」，请到管理后台完成；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
       info: { cardKind: 'connector' },
     };
   }
   if (msg.signIn) {
     return {
-      text: `🔑 ${head}需要完成登录验证，请到管理后台操作；或回复 \`skip\` / \`跳过\` 先跳过。`,
+      text: `${head}🔑 需要完成登录验证，请到管理后台操作；或回复 \`skip\` / \`跳过\` 先跳过。`,
       actions: [{ label: '跳过', text: 'skip' }] as unknown as ChannelAction[],
       info: { cardKind: 'signIn' },
     };
   }
-  return { text: `⏸️ ${head}需要你在管理后台确认下一步操作。`, actions: [], info: null };
+  return { text: `${head}⏸️ 需要你在管理后台确认下一步操作。`, actions: [], info: null };
 }

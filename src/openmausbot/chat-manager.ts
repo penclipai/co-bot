@@ -2,7 +2,7 @@
  * 跨群策略、外部 Thread 治理与自聊草稿确认回发管理器。
  */
 import { formatImContextBlock, sanitizeExternalMentions } from '../core/chat-context.ts';
-import { formatExternalBotPrefix } from '../core/security.ts';
+import { attachBotBadge, formatExternalBotPrefix } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { ChatType, ChatsMode } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
@@ -240,7 +240,12 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
   if (draft.delegationRe) {
     safeBody = formatDelegationResponse({ re: draft.delegationRe, text: safeBody });
   } else if (draft.addBotPrefix) {
-    safeBody = formatExternalBotPrefix(safeBody, bridge.chats.externalBotPrefix ?? '🤖 ');
+    const extPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
+    if (extPrefix) {
+      safeBody = extPrefix.trim() === '🤖'
+        ? attachBotBadge(`🤖 **[${bridge.botName}]**`, safeBody)
+        : formatExternalBotPrefix(safeBody, extPrefix);
+    }
   }
   const sentId = await bridge.say(safeBody, { targetChatId: draft.originChatId }, draft.replyToImMsgId);
   if (!sentId) {

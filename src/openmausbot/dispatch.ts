@@ -582,7 +582,7 @@ export async function dispatchToBot(
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
     const cmdTarget = botCommandTarget(bridge, bot.id, bot.name, { isGroup });
     await bridge.say(
-      `${ctrlBanner}📥 ${who ? `${who} ` : ''}已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
+      `${ctrlBanner}${who ? `${who} ` : ''}📥 已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
       { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
       null,
       [

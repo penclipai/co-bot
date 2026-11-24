@@ -9,8 +9,9 @@ import http from 'node:http';
 import { promisify } from 'node:util';
 import { clip, plain, hardBreaks, mdClip, mdSplit, fileSafe, pruneExpiredFiles, safeAttachmentName, writeJsonAtomic } from '../src/format.ts';
 import { loadConfig, APP_ROOT } from '../src/config.ts';
-import { inQuietHours } from '../src/openmausbot/bridge.ts';
-import { parseChoiceIndex } from '../src/openmausbot/cards.ts';
+import { inQuietHours, OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
+import { formatCardPrompt, parseChoiceIndex } from '../src/openmausbot/cards.ts';
+import { attachBotBadge, hasBotBadgePrefix } from '../src/core/security.ts';
 import { WebServer } from '../src/web/server.ts';
 import { ChatContextStore, collectContextAttachments, formatImContextBlock, sanitizeExternalMentions } from '../src/core/chat-context.ts';
 import { clipSummary } from '../src/core/channel-contract.ts';
@@ -101,7 +102,7 @@ test('loadConfig: loads defaults, resolves relative paths, supports web->sim cha
   assert.equal(cfg.selfChat.proactive, true);
   assert.equal(cfg.selfChat.softSplitChars, 2800);
   assert.equal(cfg.selfChat.followUpWindowMs, 120_000);
-  assert.equal(cfg.selfChat.hideChiefPrefix, true);
+  assert.equal(cfg.selfChat.hideChiefPrefix, false);
   assert.equal(cfg.selfChat.imageBatchMs, 1500);
   assert.equal(cfg.selfChat.fileRetentionDays, 7);
   assert.equal(cfg.selfChat.sendRetries, 2);
@@ -397,4 +398,55 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
     recentMsgs: recentA,
   });
   assert.equal(unrelated.attachments.length, 0);
+});
+
+test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix order, hideChiefPrefix opt-out, and isEcho loop guard', () => {
+  const badge = '🤖 **[co-bot]**';
+  // 单行纯文本徽章同行
+  assert.equal(attachBotBadge(badge, '一切正常'), '🤖 **[co-bot]** 一切正常');
+  // 多行或 Markdown 块语法开头时徽章独立成行
+  assert.equal(attachBotBadge(badge, '第一行\n第二行'), '🤖 **[co-bot]**\n第一行\n第二行');
+  assert.equal(attachBotBadge(badge, '# 标题\n正文'), '🤖 **[co-bot]**\n# 标题\n正文');
+  assert.equal(attachBotBadge(badge, '```ts\nconst x = 1;\n```'), '🤖 **[co-bot]**\n```ts\nconst x = 1;\n```');
+  assert.equal(attachBotBadge(badge, '- 条目A\n- 条目B'), '🤖 **[co-bot]**\n- 条目A\n- 条目B');
+  assert.equal(attachBotBadge(badge, '1. 第一步'), '🤖 **[co-bot]**\n1. 第一步');
+  assert.equal(attachBotBadge(badge, '> 引用'), '🤖 **[co-bot]**\n> 引用');
+  assert.equal(attachBotBadge(badge, '| col1 | col2 |'), '🤖 **[co-bot]**\n| col1 | col2 |');
+  // 软拆分编号与幂等防重复
+  assert.equal(attachBotBadge(badge, '第一段', { partIndex: 1, partTotal: 2 }), '🤖 **[co-bot]** (1/2) 第一段');
+  assert.equal(attachBotBadge(badge, '第二段A\n第二段B', { partIndex: 2, partTotal: 2 }), '🤖 **[co-bot]** (2/2)\n第二段A\n第二段B');
+  assert.equal(attachBotBadge(badge, '🤖 **[co-bot]** 已有徽章'), '🤖 **[co-bot]** 已有徽章');
+  // 普通 🤖 开头人工文本仍应加徽章，不被误判
+  assert.equal(attachBotBadge(badge, '🤖 hello'), '🤖 **[co-bot]** 🤖 hello');
+
+  assert.equal(hasBotBadgePrefix('🤖 **[co-bot]** 一切正常'), true);
+  assert.equal(hasBotBadgePrefix('🤖 **[项目组 · Dev]** (1/2)\n内容'), true);
+  assert.equal(hasBotBadgePrefix('🤖 [co-bot] 降级纯文本'), true);
+  assert.equal(hasBotBadgePrefix('🤖 hello'), false);
+  assert.equal(hasBotBadgePrefix('普通文本'), false);
+
+  const cardRes = formatCardPrompt('co-bot', {
+    id: 'm_card',
+    role: 'bot',
+    kind: 'card',
+    threadId: 't1',
+    card: { title: '允许执行 rm -rf /tmp/test 吗？' },
+  }, badge);
+  assert.match(cardRes.text, /^🤖 \*\*\[co-bot\]\*\* ⏸️ /);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-badge-optout-'));
+  try {
+    const bDefault = new OpenMausBotBridge({ client: {} as never, transport: {} as never, dataDir: tmpDir });
+    assert.equal(bDefault.hideChiefPrefix, false);
+    assert.equal(bDefault.botPrefix('b1', 'MausBot'), '🤖 **[co-bot]**');
+    assert.equal(bDefault.isEcho('🤖 **[co-bot]** 任意文本'), true);
+    assert.equal(bDefault.isEcho('🤖 [co-bot] 纯文本降级'), true);
+    assert.equal(bDefault.isEcho('🤖 我自己发的机器人表情'), false);
+
+    const bHidden = new OpenMausBotBridge({ client: {} as never, transport: {} as never, dataDir: tmpDir, hideChiefPrefix: true });
+    assert.equal(bHidden.botPrefix('b1', 'MausBot'), '');
+    assert.equal(bHidden.botPrefix('b1', 'MausBot', { proactive: true }), '🤖 **[co-bot]**');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

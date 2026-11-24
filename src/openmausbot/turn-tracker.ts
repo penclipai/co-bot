@@ -473,7 +473,7 @@ export function createTurnTracker(
             speakerName: isGroup ? (failed.from?.name || '') : '',
             speakerBotId: isGroup ? (failed.from?.botId || null) : null,
           });
-          await bridge.say(`${ctrlBanner}❌ ${who ? `${who} ` : ''}${failed.error || '本轮执行失败'}`, {
+          await bridge.say(`${ctrlBanner}${who ? `${who} ` : ''}❌ ${failed.error || '本轮执行失败'}`, {
             botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
           });
         } else {

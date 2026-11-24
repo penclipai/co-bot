@@ -3,6 +3,7 @@ import { defaults } from '../config.ts';
 import { ChatContextStore } from '../core/chat-context.ts';
 import { normalizeCollaborators } from '../core/inbound-policy.ts';
 import { normalizeProjectsConfig } from '../core/projects.ts';
+import { hasBotBadgePrefix } from '../core/security.ts';
 import { SharedContextManager } from '../core/shared-context.ts';
 import { clip, pruneExpiredFiles, safeAttachmentName } from '../format.ts';
 import type {
@@ -193,7 +194,7 @@ export class OpenMausBotBridge {
     resultChars = 1500,
     softSplitChars,
     followUpWindowMs = 120_000,
-    hideChiefPrefix = true,
+    hideChiefPrefix = false,
     imageBatchMs = 1500,
     fileRetentionDays = 7,
     sendRetries = 2,
@@ -363,12 +364,11 @@ export class OpenMausBotBridge {
     const shown = this.displayBotName(botId, botName, { isGroup });
     const shownSpeaker = speakerName ? this.displayBotName(speakerBotId, speakerName) : '';
     if (isGroup) {
-      return shownSpeaker ? `**[${shown} · ${shownSpeaker}]**` : `**[${shown}]**`;
+      return shownSpeaker ? `🤖 **[${shown} · ${shownSpeaker}]**` : `🤖 **[${shown}]**`;
     }
-    if (!this.multiBotCache) return '';
-    if (proactive) return `**[${shown}]**`;
-    if (this.hideChiefPrefix && botId && botId === this.chiefBotId) return '';
-    return `**[${shown}]**`;
+    const isChief = !this.multiBotCache || (Boolean(botId) && botId === this.chiefBotId);
+    if (this.hideChiefPrefix && !proactive && isChief) return '';
+    return `🤖 **[${shown}]**`;
   }
 
   status() {
@@ -592,6 +592,7 @@ export class OpenMausBotBridge {
 
   isEcho(text: string): boolean {
     if (this.outPrefix && text.startsWith(this.outPrefix.trim())) return true;
+    if (hasBotBadgePrefix(text)) return true;
     const now = this.now();
     for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
     return this.recent.has(norm(text));
