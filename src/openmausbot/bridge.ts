@@ -30,7 +30,12 @@ import {
   drainOutboundQueue, flushOutboundBuffer as flushOutboundQueueBuffer,
   isTransportDisconnected, sendBridgeText, type SendTextExtra,
 } from './outbound-queue.ts';
-import { COBOT_COORDINATOR_PROFILE, COBOT_COORDINATOR_TITLE, LEGACY_GROK_SOUL_RE } from './persona.ts';
+import {
+  COBOT_COORDINATOR_PROFILE,
+  COBOT_COORDINATOR_SOUL,
+  COBOT_COORDINATOR_TITLE,
+  isManagedCobotSoul,
+} from './persona.ts';
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
 import { createTurnTracker } from './turn-tracker.ts';
 import type {
@@ -509,7 +514,7 @@ export class OpenMausBotBridge {
           patch.title = COBOT_COORDINATOR_TITLE;
         }
         const curSoul = String(chief.soul ?? '').trim();
-        if (!curSoul || LEGACY_GROK_SOUL_RE.test(curSoul)) {
+        if (isManagedCobotSoul(curSoul) && curSoul !== COBOT_COORDINATOR_SOUL) {
           Object.assign(patch, COBOT_COORDINATOR_PROFILE);
         }
         if (Object.keys(patch).length > 0) {

@@ -7,7 +7,11 @@ import { validateConfig } from '../src/config.ts';
 import { WebSimTransport } from '../src/im/sim.ts';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import { OpenMausBotClient } from '../src/openmausbot/client.ts';
-import { COBOT_COORDINATOR_SOUL, COBOT_COORDINATOR_TITLE } from '../src/openmausbot/persona.ts';
+import {
+  COBOT_COORDINATOR_SOUL,
+  COBOT_COORDINATOR_TITLE,
+  COBOT_MANAGED_SOUL_PREFIX,
+} from '../src/openmausbot/persona.ts';
 import type { BridgeTransport, OmbBot, OmbGroup, OmbMessage, OmbSseEvent } from '../src/openmausbot/types.ts';
 import type { ChannelSendOptions, InboundEvent } from '../src/types.ts';
 import { WebServer } from '../src/web/server.ts';
@@ -312,12 +316,39 @@ test('syncChiefIdentity patches MausBot->co-bot & legacy soul idempotently, pres
     assert.equal(m1.patches[0].patch.title, COBOT_COORDINATOR_TITLE);
     assert.equal(m1.patches[0].patch.soul, COBOT_COORDINATOR_SOUL);
     assert.equal(m1.patches[0].patch.replyStyle, 'conversational');
+    assert.match(COBOT_COORDINATOR_SOUL, /Bot 账号.*Boat 账号.*Composio/);
 
     await b1.refreshMultiBot();
     assert.equal(m1.patches.length, 1);
   } finally {
     await b1.stop();
     fs.rmSync(tmpDir1, { recursive: true, force: true });
+  }
+
+  // 旧版托管 default soul（含 COBOT_MANAGED_SOUL_PREFIX 前缀但未带最新第 7 条规则）自动升级，最新则不重复 PATCH
+  const tmpDirUpgrade = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-sync-up-'));
+  const trUpgrade = makeTransport();
+  const oldManagedSoul = `${COBOT_MANAGED_SOUL_PREFIX}\n回复原则：\n1. 身份统一：对外始终以 co-bot 身份沟通。`;
+  const mUpgrade = makeRichMockClient({
+    bots: [{ id: 'b1', name: 'co-bot', title: COBOT_COORDINATOR_TITLE, soul: oldManagedSoul, replyStyle: 'conversational', chiefOfStaff: true, threadId: 't1' }],
+  });
+  const bUpgrade = new OpenMausBotBridge({
+    client: mUpgrade.client,
+    transport: trUpgrade.transport,
+    dataDir: tmpDirUpgrade,
+    syncChiefIdentity: true,
+    turnStallMs: 0,
+  });
+  try {
+    await bUpgrade.start();
+    assert.equal(mUpgrade.patches.length, 1);
+    assert.equal(mUpgrade.patches[0].patch.soul, COBOT_COORDINATOR_SOUL);
+    bUpgrade.chiefIdentitySynced = false;
+    await bUpgrade.syncChiefBotIdentity();
+    assert.equal(mUpgrade.patches.length, 1, '已同步最新版 soul 后不再重复 PATCH');
+  } finally {
+    await bUpgrade.stop();
+    fs.rmSync(tmpDirUpgrade, { recursive: true, force: true });
   }
 
   const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-sync2-'));
