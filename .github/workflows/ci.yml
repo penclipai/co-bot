@@ -38,4 +38,4 @@ jobs:
         run: npm run verify
 
       - name: Preview autostart service spec
-        run: node scripts/daemon.js install-service --dry
+        run: node scripts/daemon.ts install-service --dry

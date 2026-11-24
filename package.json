@@ -8,25 +8,29 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "sim": "node src/index.js --channel sim",
-    "daemon": "node scripts/daemon.js",
-    "restart": "node scripts/daemon.js restart",
-    "stop": "node scripts/daemon.js stop",
-    "status": "node scripts/daemon.js status",
-    "omb": "node scripts/omb.js",
-    "pair": "node scripts/pair.js",
-    "check": "node scripts/check.js",
-    "channel:test": "node scripts/channel-test.js",
+    "start": "node src/index.ts",
+    "sim": "node src/index.ts --channel sim",
+    "daemon": "node scripts/daemon.ts",
+    "restart": "node scripts/daemon.ts restart",
+    "stop": "node scripts/daemon.ts stop",
+    "status": "node scripts/daemon.ts status",
+    "omb": "node scripts/omb.ts",
+    "pair": "node scripts/pair.ts",
+    "check": "node scripts/check.ts",
+    "channel:test": "node scripts/channel-test.ts",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "verify": "npm run lint && npm test && npm run channel:test -- --dry",
-    "test": "node --test \"test/*.test.js\""
+    "verify": "npm run typecheck && npm run lint && npm test && npm run channel:test -- --dry",
+    "test": "node --test \"test/*.test.ts\""
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@stylistic/eslint-plugin": "^6.0.1",
+    "@types/node": "^24.19.2",
     "eslint": "^10.15.0",
-    "globals": "^17.14.0"
+    "globals": "^17.14.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.74.0"
   }
 }

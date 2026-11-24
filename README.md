@@ -14,7 +14,7 @@
 
 ## 运行要求
 
-- **Node.js >= 24**
+- **Node.js >= 24**（原生 TypeScript 执行，零编译构建步骤）
 - **OpenMausBot**：通过 `npm install -g openmausbot` 全局安装 CLI，或直接启动 OpenMausBot 桌面端
 - 已配置可用的底层 Agent CLI（推荐本机预先安装 `opencode`）
 
@@ -22,18 +22,18 @@
 
 ```bash
 npm install -g openmausbot  # 全局安装 OpenMausBot CLI（使用桌面端可跳过）
-npm install                 # 可选：安装开发期 ESLint 校验依赖（co-bot 本身零运行依赖）
+npm install                 # 可选：安装 TypeScript / ESLint 开发校验依赖（co-bot 零运行依赖）
 npm run daemon              # 后台启动 OpenMausBot CLI 与 co-bot（桌面端首次需先运行 npm run pair）
 npm start                   # 仅前台运行 co-bot（Web 模拟器 http://127.0.0.1:8787/sim）
-npm run verify              # 一键全量校验：ESLint（含 1000 行上限）+ 单元测试 + 通道契约检测
+npm run verify              # 一键全量校验：tsc 类型检查 + ESLint + 单元测试 + 通道契约检测
 ```
 
 > 完整运维命令（`status` / `restart` / `stop` / `check` / `install-service`）、`@bot` 全量指令及 `config.json` 配置见 [使用指南](./docs/usage.md)。
 
 ## 接入真实 IM
 
-1. 复制 [im-plugin.example.js](./im-plugin.example.js) 为根目录 `im-plugin.js`（已忽略提交），实现 `start`、`send` 及可选媒体/历史/通知钩子。
-2. 在 `config.json` 配置 `"channel": { "use": "./im-plugin.js", "options": { "selfId": "<用户ID>", "selfChatId": "" } }`。
+1. 复制 [im-plugin.example.ts](./im-plugin.example.ts) 为根目录 `im-plugin.ts`（已忽略提交；亦可使用 `.js`/`.mjs`），实现 `start`、`send` 及可选媒体/历史/通知钩子。
+2. 在 `config.json` 配置 `"channel": { "use": "./im-plugin.ts", "options": { "selfId": "<用户ID>", "selfChatId": "" } }`。
 3. 运行契约与收发验证：`npm run channel:test -- --dry`。
 
 ## 项目结构
@@ -48,7 +48,7 @@ public/              /sim 模拟器、/debug 诊断台与 Markdown 预览静态�
 docs/                使用指南（usage.md）、接入排障（TROUBLESHOOTING.md）与演进路线（ROADMAP.md）
 test/                Node 内置测试套件与共享 Mock 辅助模块
 config.example.json  最小化示例配置
-im-plugin.example.js 通用 IM 通道插件模板
+im-plugin.example.ts 通用 IM 通道插件模板（TypeScript）
 ```
 
 ## 相关文档

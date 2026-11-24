@@ -1,15 +1,10 @@
 import js from '@eslint/js';
 import stylistic from '@stylistic/eslint-plugin';
 import globals from 'globals';
+import tseslint from 'typescript-eslint';
 
-const baseRules = {
-  ...js.configs.recommended.rules,
+const commonRules = {
   'max-lines': ['error', { max: 1000, skipBlankLines: false, skipComments: false }],
-  'no-unused-vars': ['error', {
-    argsIgnorePattern: '^_',
-    varsIgnorePattern: '^_',
-    caughtErrorsIgnorePattern: '^_',
-  }],
   'no-empty': ['error', { allowEmptyCatch: true }],
   'eqeqeq': ['error', 'always', { null: 'ignore' }],
   'no-var': 'error',
@@ -29,6 +24,28 @@ const baseRules = {
   '@stylistic/comma-dangle': ['error', 'always-multiline'],
 };
 
+const baseRules = {
+  ...js.configs.recommended.rules,
+  ...commonRules,
+  'no-unused-vars': ['error', {
+    argsIgnorePattern: '^_',
+    varsIgnorePattern: '^_',
+    caughtErrorsIgnorePattern: '^_',
+  }],
+};
+
+const tsRules = {
+  ...js.configs.recommended.rules,
+  ...commonRules,
+  'no-undef': 'off',
+  'no-unused-vars': 'off',
+  '@typescript-eslint/no-unused-vars': ['error', {
+    argsIgnorePattern: '^_',
+    varsIgnorePattern: '^_',
+    caughtErrorsIgnorePattern: '^_',
+  }],
+};
+
 export default [
   {
     ignores: [
@@ -36,7 +53,22 @@ export default [
       'data/**',
       'config.json',
       'im-plugin.js',
+      'im-plugin.ts',
     ],
+  },
+  {
+    files: ['**/*.ts'],
+    languageOptions: {
+      parser: tseslint.parser,
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.node,
+    },
+    plugins: {
+      '@typescript-eslint': tseslint.plugin,
+      '@stylistic': stylistic,
+    },
+    rules: tsRules,
   },
   {
     files: ['**/*.js'],

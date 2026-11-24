@@ -15,8 +15,9 @@
 | `npm run check` | 校验 `config.json` 与 Node / 全局 `openmausbot` CLI / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`） |
 | `npm run pair` | OpenMausBot 桌面端一次性配对（弹窗点 Allow，或传 `-- <12位配对码>`） |
 | `npm run daemon -- install-service` | 安装开机自启（先加 `--dry` 预览 `systemd --user` / `LaunchAgents` / Windows 启动项；`uninstall-service` 卸载） |
+| `npm run typecheck` | 运行 `tsc --noEmit` 静态严格类型检查 |
 | `npm run lint` / `lint:fix` | 运行 ESLint 规范与单文件 1000 行上限校验 / 自动修复格式 |
-| `npm run verify` | 一键串联 `npm run lint && npm test && npm run channel:test -- --dry` |
+| `npm run verify` | 一键串联 `npm run typecheck && npm run lint && npm test && npm run channel:test -- --dry` |
 
 > 启动时支持 `--config <path>`、`--port <n>`、`--omb <url>`、`--omb-token <token>`（或 `OMB_TOKEN` 环境变量）、`--channel <plugin>`；托管日志每 6 小时按 10 MB 自动轮转。
 

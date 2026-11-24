@@ -6,7 +6,7 @@
 
 ## 一、真机通道上线验收要点
 
-实现 [im-plugin.example.js](../im-plugin.example.js) 并接入真实 IM 后，建议重点核对以下 4 项：
+实现 [im-plugin.example.ts](../im-plugin.example.ts) 并接入真实 IM 后，建议重点核对以下 4 项：
 
 1. **回执 ID 同步返回**：`send()` 与 `sendFile()` 必须同步返回通道实际消息 ID，以便桥接层写入 `ownIds` 精确去重，防止本人账号发送后回环重触。
 2. **契约与实时收发验收**：执行 `npm run channel:test -- --wait 15 --send "hello" --check-file`，确认收发文本、回复引用与附件上传/下载均正常。
@@ -34,6 +34,6 @@
 
 在同一台开发机为多位同事并行运行实例，或迁移至 7×24 Linux 开发机时，做以下 3 项物理隔离即可（`sharedContextDir`、`projects` 与 `collaborators` 配法见 [使用指南](./usage.md)）：
 
-1. **独立配置、端口与数据目录**：每人使用独立配置文件通过 `node --no-deprecation src/index.js --config <path>` 启动，并各自隔离 `web.port` 与 `dataDir`（防止状态与临时附件混用）。
+1. **独立配置、端口与数据目录**：每人使用独立配置文件通过 `node --no-deprecation src/index.ts --config <path>` 启动，并各自隔离 `web.port` 与 `dataDir`（防止状态与临时附件混用）。
 2. **独立 OpenMausBot 实例与鉴权隔离**：各自绑定不同的 `openmausbot.url`（如 `:8799` 与 `:8809`）和认证 `OMB_TOKEN`，确保个人 Memory 与会话历史彻底物理隔离。
 3. **未来独立 Bot 账号切换**：若目标 IM 开放独立机器人号，只需更新通道插件凭据并将 `chats.externalBotPrefix` 设为 `""`，安全门禁、白名单与 C2C 委托协议无需改动。

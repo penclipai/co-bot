@@ -25,7 +25,7 @@
 
 ## 三、精简目标架构
 
-基于 [kernel.js](../src/core/kernel.js) 插件微内核与 [bridge.js](../src/openmausbot/bridge.js) 网关骨架：
+基于 [kernel.ts](../src/core/kernel.ts) 插件微内核与 [bridge.ts](../src/openmausbot/bridge.ts) 网关骨架：
 
 ```mermaid
 flowchart TB
@@ -52,7 +52,7 @@ flowchart TB
 
 ### 下一阶段方向（`v0.8+`，按真机与团队实测反馈驱动）
 
-- **真实 IM 真机闭环**：完成目标 IM 的 `im-plugin.js` 接入与移动端自发消息提醒（`notify`）验收，基于真实群聊噪音校准默认降噪策略。
+- **真实 IM 真机闭环**：完成目标 IM 的 `im-plugin.ts` 接入与移动端自发消息提醒（`notify`）验收，基于真实群聊噪音校准默认降噪策略。
 - **团队试点微调**：先在 2 人范围试运行 `sharedContextDir`、`collaborators` 与 `@bot delegate`，按需补充内网专用脱敏规则或适配特定 IM 字数上限。
 - **独立机器人号切换（可选）**：待目标 IM 开放独立 Bot 身份后，通过通道插件配置切换并置空 `externalBotPrefix`。
 

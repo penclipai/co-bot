@@ -6,4 +6,5 @@ package-lock.json
 # 本机配置与自备通道插件（不入库）
 config.json
 im-plugin.js
+im-plugin.ts
 *.log
