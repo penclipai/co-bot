@@ -81,11 +81,11 @@ export async function replyContextUsage(
     : '';
   if (!summary) {
     const extHint = isExternal && compactCmd ? `（可回复 \`${compactCmd}\` 压缩）` : '';
-    await sensSink.say(`📊 **${title}** ${emptyHint}${extHint}`);
+    await sensSink.say(`**📊 ${title}** ${emptyHint}${extHint}`);
     return;
   }
   await sensSink.say(
-    `📊 **${title}** 上下文：${summary.line}${compactNote}`,
+    `**📊 ${title}** 上下文：${summary.line}${compactNote}`,
     { botId: bot.id, botName: bot.name, threadId },
   );
 }
@@ -103,7 +103,7 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
   const t = bridge.trigger;
   const brand = bridge.botName || 'co-bot';
   const lines = [
-    `🤖 **${brand} 常用指南**`,
+    `**🤖 ${brand} 常用指南**`,
     `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
     `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
     `- \`${t} chats [self|all|reset]\` / \`mute|unmute [群]\` / \`summary <群> [条数]\`：管群策略、静音与跨群纪要`,
@@ -138,7 +138,7 @@ export function makeCommandSink(
     : bridge.selfChat;
   const targetId = sensitive ? ctrlId : chatCtx.replyChatId;
   const label = chatCtx.chatName || chatCtx.originChatId;
-  const originBanner = sensitive && ctrlId && ctrlId === bridge.selfChat ? `📍 **来自「${label}」的指令结果**\n` : '';
+  const originBanner = sensitive && ctrlId && ctrlId === bridge.selfChat ? `**📍 来自「${label}」的指令结果**\n` : '';
   let bannerSent = false;
   return {
     chatId: targetId,

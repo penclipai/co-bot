@@ -285,7 +285,7 @@ export async function emitCard(
   const multiCard = bridge.pendingCards.size >= 1;
   const prompt = formatCardPrompt(shownName, msg, who, { multiCard });
   const originBanner = isExternal && ctrlChat === bridge.selfChat
-    ? `📍 **来自「${chatCtx?.chatName || chatCtx?.originChatId || ''}」的审批 / 确认**\n`
+    ? `**📍 来自「${chatCtx?.chatName || chatCtx?.originChatId || ''}」的审批 / 确认**\n`
     : '';
   const sentId = await bridge.say(`${originBanner}${prompt.text}`, route, null, null, { noBuffer: true });
   if (!sentId) {

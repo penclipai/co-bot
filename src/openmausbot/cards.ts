@@ -202,13 +202,13 @@ export function formatQuestionStepPrompt(
   if (total > 1) metaParts.push(`${stepIndex + 1}/${total}${q.header ? ` · ${q.header}` : ''}`);
   if (q.multiSelect) metaParts.push('可多选');
   const metaSuffix = metaParts.length ? `（${metaParts.join(' · ')}）` : '';
-  const lines = [`${head}❓ **${title}${metaSuffix}**`];
+  const lines = [whoPrefix ? `${head}❓ **${title}${metaSuffix}**` : `**❓ ${title}${metaSuffix}**`];
   if (q.question && q.question !== title) {
     const quoted = formatQuoteBlock(q.question, 300);
     if (quoted) lines.push(quoted);
   }
   if (q.options.length) {
-    lines.push('');
+    if (lines.length > 1) lines.push('');
     q.options.forEach((opt, i) => {
       lines.push(`${i + 1}. **${opt.label}**${opt.description ? ` — ${clip(opt.description, 80)}` : ''}`);
     });

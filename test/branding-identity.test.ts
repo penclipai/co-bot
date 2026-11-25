@@ -283,7 +283,7 @@ test('Custom botName & client.resolveBot support co-bot/cobot/custom aliases sea
     assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[协调官\]\*\*/);
 
     await tr.emitUser('@bot status');
-    await until(() => tr.sent.some((m) => m.text.includes('**协调官 在线**')));
+    await until(() => tr.sent.some((m) => m.text.includes('**🟢 协调官 在线**')));
 
     const c = new OpenMausBotClient({ baseUrl: 'http://127.0.0.1:8799' });
     c.listBots = mock.rawListBots;

@@ -59,7 +59,7 @@ export async function advanceQuestionCard(bridge: OpenMausBotBridge, card: Pendi
     const multiCard = bridge.pendingCards.size > 1;
     const step = formatQuestionStepPrompt(who, card.title || '需要你做个决定', questions, nextIndex, { multiCard });
     const originBanner = card.chatCtx?.isExternal && ctrlChatId === bridge.selfChat
-      ? `📍 **来自「${card.chatCtx.chatName || card.chatCtx.originChatId || ''}」的审批 / 确认**\n`
+      ? `**📍 来自「${card.chatCtx.chatName || card.chatCtx.originChatId || ''}」的审批 / 确认**\n`
       : '';
     const nextSentId = await bridge.say(`${originBanner}${step.text}`, route, null, null);
     if (!nextSentId) {

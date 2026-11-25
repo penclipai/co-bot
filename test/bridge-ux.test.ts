@@ -542,11 +542,25 @@ test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/
     await until(() => sent.some((m) => m.text.includes('协作团队')));
     const statusText = sent.findLast((m) => m.text.includes('协作团队'))!.text;
 
-    assert.match(statusText, /^🟢 \*\*co-bot 在线\*\*/);
-    assert.match(statusText, /📊 \*\*co-bot 当前会话\*\* 上下文：20%（20K \/ 100K · 3 轮） `[█░]+`/);
+    assert.match(statusText, /^\*\*🟢 co-bot 在线\*\*/);
+    assert.match(statusText, /- \*\*co-bot 当前会话\*\* 上下文：20%（20K \/ 100K · 3 轮） `[█░]+`/);
     assert.match(statusText, /\*\*Dev\*\* · 运行中 · `deepseek\/deepseek-flash` · 审批:auto/);
     for (const noise of ['隔离模式', '本地免配对', 'Doctor', '引擎 v', '协作 Bot：', '活跃轮次：0', '审批:ask', '运行中 · busy', '@bot compact']) {
       assert.equal(statusText.includes(noise), false, `精简后的 status 不应包含冗余文案「${noise}」`);
+    }
+
+    const assertFirstTwoLinesMarkdown = (msgText: string, label: string) => {
+      const [line1 = '', line2 = ''] = msgText.split('\n');
+      assert.match(line1, /^\*\*/, `${label} 第 1 行应以 ** 开头`);
+      assert.match(line2, /^(?:- |> |\d+\.\s|\*\*)/, `${label} 第 2 行应紧接 Markdown 标记（无空行）`);
+    };
+    assertFirstTwoLinesMarkdown(statusText, '@bot status');
+
+    for (const cmd of ['@bot help', '@bot chats', '@bot bind']) {
+      const beforeLen = sent.length;
+      await transport.emitUser(cmd);
+      await until(() => sent.length > beforeLen);
+      assertFirstTwoLinesMarkdown(sent.at(-1)!.text, cmd);
     }
   } finally {
     await bridge.stop();

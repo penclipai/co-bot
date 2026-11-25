@@ -87,8 +87,8 @@ async function handleStatusCommand(
   const brand = bridge.botName || 'co-bot';
   const deadBots = visible.filter((b) => b.activity === 'dead');
   const headState = chief?.activity === 'dead'
-    ? `🔴 **${brand} 异常（主协调 dead）**`
-    : (deadBots.length ? `🟡 **${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `🟢 **${brand} 在线**`);
+    ? `**🔴 ${brand} 异常（主协调 dead）**`
+    : (deadBots.length ? `**🟡 ${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `**🟢 ${brand} 在线**`);
 
   const headerParts = [headState];
   if (desktopManaged && sess?.kind !== 'session') headerParts.push('⚠️ 桌面端未配对');
@@ -127,12 +127,12 @@ async function handleStatusCommand(
       : (ctxSummary.pct >= 50 ? `\n可回复 \`${compactCmd}\` 压缩上下文` : ''))
     : '';
   const ctxLine = missingExt && extCtx
-    ? `📊 **${extCtx.chatName || extCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
+    ? `- **${extCtx.chatName || extCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
     : (ctxSummary
-      ? `📊 **${ctxTitle}** 上下文：${ctxSummary.line}${compactHint}`
-      : `📊 **${ctxTitle}** 暂无上下文统计（对话后记录）`);
+      ? `- **${ctxTitle}** 上下文：${ctxSummary.line}${compactHint}`
+      : `- **${ctxTitle}** 暂无上下文统计（对话后记录）`);
 
-  const sections = [headerLine, ctxLine];
+  const sections = [`${headerLine}\n${ctxLine}`];
   if (visible.length) {
     const botLines = visible.map((b) => {
       const role = b.chiefOfStaff ? '（主协调）' : '';
@@ -147,14 +147,14 @@ async function handleStatusCommand(
       const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
       return `- **${showBotName(bridge, b.id, b.name)}**${role} · ${st}${mod}${apv}${waitTm}`;
     });
-    sections.push(`🤖 **协作团队（${visible.length}）**\n${botLines.join('\n')}`);
+    sections.push(`**🤖 协作团队（${visible.length}）**\n${botLines.join('\n')}`);
   }
   if (visibleGroups.length) {
     const gLines = visibleGroups.map((g) => {
       const count = Array.isArray(g.memberIds) ? `${g.memberIds.length} 成员` : '协作群';
       return `- **${g.name}**（${count} · ${g.busy ? '讨论中' : '空闲'}）`;
     });
-    sections.push(`👥 **协作群组（${visibleGroups.length}，用 \`@群名\` 发起协作）**\n${gLines.join('\n')}`);
+    sections.push(`**👥 协作群组（${visibleGroups.length}，用 \`@群名\` 发起协作）**\n${gLines.join('\n')}`);
   }
 
   const route = ctxSummary && ctxBot
@@ -277,7 +277,7 @@ async function handleDefaultCommand(
       const modeLabel = pol.mode === 'self_only' ? '仅自聊（self_only）' : '本人任意群/私聊（owner_everywhere）';
       if (!known.length) {
         await sensSink.say(
-          `💬 **多会话触发策略**：${modeLabel}\n当前暂无外部群/私聊记录；在群聊发消息后即可在此查看或 \`${bridge.trigger} mute/unmute <群名|chatId>\`。`,
+          `**💬 多会话触发策略**：${modeLabel}\n- 当前暂无外部群/私聊记录；在群聊发消息后即可在此查看或 \`${bridge.trigger} mute/unmute <群名|chatId>\`。`,
         );
         return true;
       }
@@ -288,7 +288,7 @@ async function handleDefaultCommand(
         return `- **${c.name}**（\`${c.id}\` · ${kind}）· ${flag} · 缓存 ${c.cachedMessages} 条${thr}`;
       });
       await sensSink.say(
-        `💬 **多会话管理**（当前模式：${modeLabel}）\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} mute|unmute <群名|id>\`、\`${bridge.trigger} chats self|all|reset\``,
+        `**💬 多会话管理**（当前模式：${modeLabel}）\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} mute|unmute <群名|id>\`、\`${bridge.trigger} chats self|all|reset\``,
       );
       return true;
     }
@@ -461,9 +461,10 @@ async function handleDefaultCommand(
         ? bindings.map((b) => `- \`${b.chatId}\` → **${b.name}**（\`${b.path}\`）`).join('\n')
         : '暂无会话绑定记录';
       await sensSink.say(
-        `📂 **当前会话（${curChatName}）项目绑定**：${cur ? `**${cur.name}**（\`${cur.path}\`）` : '未绑定'}\n\n` +
-        `**已绑定会话（${bindings.length}）**：\n${bindLines}\n\n` +
-        `**可选项目列表**：\n${cfgText}\n\n` +
+        `**📂 项目绑定（${curChatName}）**\n` +
+        `- 当前会话：${cur ? `**${cur.name}**（\`${cur.path}\`）` : '未绑定'}\n\n` +
+        `**已绑定会话（${bindings.length}）**\n${bindLines}\n\n` +
+        `**可选项目列表**\n${cfgText}\n\n` +
         `用法：\`${bridge.trigger} bind <项目|路径>\`、\`bind <会话> <项目|路径>\` 或 \`bind unbind\``,
       );
       return true;
@@ -693,7 +694,7 @@ export async function handleCommand(
           return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
         });
         const sentId = await sensSink.say(
-          `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
+          `**🗂 ${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
           route,
         );
         bridge.clearPickers();

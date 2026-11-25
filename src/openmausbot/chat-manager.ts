@@ -220,7 +220,7 @@ export async function requestSendBack(
     ? '协作结果回传，带 🤖 协议标识'
     : (useBotPrefix ? `以 🤖 **[${bridge.botName}]** 名义` : '以本人名义直接发出');
   return bridge.say(
-    `📤 **确认发回到「${draft.originChatName || draft.originChatId}」**（${attrLabel}${quoteHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
+    `**📤 确认发回到「${draft.originChatName || draft.originChatId}」**（${attrLabel}${quoteHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
   );
 }
 
