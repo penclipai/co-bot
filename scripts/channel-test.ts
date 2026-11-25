@@ -185,7 +185,8 @@ export async function runChannelContractTest(
       } else {
         inboundValidated = true;
       }
-      log(`← 入站事件 id=${ev?.id} chat=${ev?.chat?.type}:${ev?.chat?.id} self=${ev?.sender?.isSelf} dev=${ev?.device?.type || '-'}`);
+      const fwdTag = ev?.forwarded ? `bundle(${ev.forwarded.messages.length})` : (ev?.isForwarded ? 'single' : '-');
+      log(`← 入站事件 id=${ev?.id} chat=${ev?.chat?.type}:${ev?.chat?.id} self=${ev?.sender?.isSelf} dev=${ev?.device?.type || '-'} fwd=${fwdTag} mentions=${ev?.mentions?.length ?? 0}`);
       if (ev?.chat?.type !== 'self') {
         log('  ⚠ 提示：该事件 chat.type !== "self"，请确认自聊会话映射规则');
       }

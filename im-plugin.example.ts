@@ -76,6 +76,8 @@ export default defineChannelPlugin<CustomImOptions>({
         //     },
         //     text: raw.content,
         //     quoteMsgId: raw.quoteId,
+        //     isForwarded: Boolean(raw.isForwarded),
+        //     forwarded: raw.mergedForward ? { title: raw.mergedForward.title, messages: raw.mergedForward.items } : undefined,
         //     time: raw.timestamp,
         //     files: raw.attachments?.map((a) => ({
         //       fileId: a.id, name: a.name, size: a.size, mime: a.mime,
@@ -89,12 +91,13 @@ export default defineChannelPlugin<CustomImOptions>({
         throw new Error('im-plugin 尚未填写 TODO（参考 im-plugin.example.ts）');
       },
 
-      async send(chatId: string, text: string, { replyTo }: ChannelSendOptions = {}) {
-        // const res = await ipc.send({ conversationId: chatId, content: text, quoteId: replyTo });
+      async send(chatId: string, text: string, { replyTo, mentions }: ChannelSendOptions = {}) {
+        // const res = await ipc.send({ conversationId: chatId, content: text, quoteId: replyTo, atUsers: mentions });
         // return String(res.id);
         void chatId;
         void text;
         void replyTo;
+        void mentions;
         void ipc;
         throw new Error('send not implemented');
       },

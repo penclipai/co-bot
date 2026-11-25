@@ -3,7 +3,7 @@
  */
 import { scanAndRedactOutbound } from '../core/security.ts';
 import { hardBreaks, plain } from '../format.ts';
-import type { ChannelAction, ChannelSendOptions } from '../types.ts';
+import type { ChannelAction, ChannelSendOptions, OutboundMention } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { rememberBounded, trimMapCap } from './mentions.ts';
 import type { MsgRoute, OutboundBufferItem } from './types.ts';
@@ -13,6 +13,7 @@ export interface SendTextExtra {
   noBuffer?: boolean;
   bufferOnFail?: boolean;
   skipSecurityScan?: boolean;
+  mentions?: OutboundMention[];
 }
 
 export function isTransportDisconnected(bridge: OpenMausBotBridge): boolean {
@@ -110,6 +111,7 @@ export async function sendBridgeText(
   const opts: ChannelSendOptions = {
     ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
     ...(Array.isArray(actions) && actions.length && caps?.actions !== false ? { actions } : {}),
+    ...(Array.isArray(extra?.mentions) && extra.mentions.length ? { mentions: extra.mentions } : {}),
     ...(senderName ? { senderName } : {}),
   };
 

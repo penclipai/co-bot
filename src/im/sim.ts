@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import type http from 'node:http';
 import path from 'node:path';
+import { normalizeForwarded } from '../core/context-pull.ts';
 import { pruneExpiredFiles, safeAttachmentName, writeJsonAtomic } from '../format.ts';
 import type {
   ChannelAction,
@@ -8,6 +9,7 @@ import type {
   ChannelSendFileInput,
   ChannelSendOptions,
   ChatType,
+  ForwardedBundle,
   InboundAttachment,
   InboundDevice,
   InboundEvent,
@@ -52,6 +54,8 @@ interface SimHistoryItem {
   ts: number;
   replyTo: string | null;
   device: string;
+  isForwarded?: boolean;
+  forwarded?: ForwardedBundle;
   mentions?: InboundMention[];
   actions?: ChannelAction[];
 }
@@ -223,7 +227,10 @@ export class WebSimTransport {
 
     web.route('POST', '/send', ({ body }) => {
       const text = String(body.text ?? '').trim();
-      if (!text) throw new Error('空消息');
+      const id = `${this.boot}u${++this.n}`;
+      const forwarded = normalizeForwarded(body.forwarded, id);
+      if (!text && !forwarded) throw new Error('空消息');
+      const isForwarded = Boolean(body.isForwarded || forwarded);
       const chat = resolveSimChat(body.chatId);
       const sender = resolveSimSender(body.sender, chat);
       const devKey = typeof body.device === 'string' && Object.hasOwn(DEVICES, body.device) ? body.device : 'mobile';
@@ -231,7 +238,7 @@ export class WebSimTransport {
       const mentions = Array.isArray(body.mentions) ? (body.mentions.filter(Boolean) as InboundMention[]) : [];
       const replyTo = body.replyTo != null ? String(body.replyTo) : null;
       const msg: SimHistoryItem = {
-        id: `${this.boot}u${++this.n}`,
+        id,
         chatId: chat.id,
         chatType: chat.type,
         chatName: chat.name,
@@ -243,6 +250,8 @@ export class WebSimTransport {
         ts: Date.now(),
         replyTo,
         device: sender.isSelf ? (device.name ?? device.id) : (sender.name ?? sender.id),
+        ...(isForwarded ? { isForwarded: true } : {}),
+        ...(forwarded ? { forwarded } : {}),
         ...(mentions.length ? { mentions } : {}),
       };
       this.#push(msg);
@@ -254,6 +263,8 @@ export class WebSimTransport {
         device: sender.isSelf ? device : undefined,
         text,
         replyTo: msg.replyTo ?? undefined,
+        ...(isForwarded ? { isForwarded: true } : {}),
+        ...(forwarded ? { forwarded } : {}),
         ...(mentions.length ? { mentions } : {}),
       });
       return { ok: true, id: msg.id, chatId: chat.id };
@@ -376,8 +387,11 @@ export class WebSimTransport {
     });
   }
 
-  async send(chatId: string, text: string, { replyTo, actions, senderName }: ChannelSendOptions = {}): Promise<string> {
+  async send(chatId: string, text: string, { replyTo, actions, senderName, mentions }: ChannelSendOptions = {}): Promise<string> {
     const chat = chatMetaOf(chatId);
+    const outMentions = Array.isArray(mentions) && mentions.length
+      ? mentions.filter((m) => m && m.id != null).map((m) => ({ id: String(m.id), ...(m.name ? { name: String(m.name) } : {}) }))
+      : [];
     const msg: SimHistoryItem = {
       id: `${this.boot}b${++this.n}`,
       chatId: chat.id,
@@ -391,6 +405,7 @@ export class WebSimTransport {
       ts: Date.now(),
       replyTo: replyTo ?? null,
       device: DEVICES.desktop.name ?? '办公电脑',
+      ...(outMentions.length ? { mentions: outMentions } : {}),
       ...(Array.isArray(actions) && actions.length ? { actions } : {}),
     };
     this.#push(msg);
@@ -451,6 +466,9 @@ export class WebSimTransport {
       },
       text: String(m.text ?? ''),
       replyTo: m.replyTo != null ? String(m.replyTo) : undefined,
+      ...(m.isForwarded ? { isForwarded: true } : {}),
+      ...(m.forwarded ? { forwarded: m.forwarded } : {}),
+      ...(m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.file ? {
         attachments: [{
           id: String(m.file.id),

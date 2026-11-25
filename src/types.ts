@@ -190,6 +190,21 @@ export interface LinkCard {
   source?: string;
 }
 
+export interface ForwardedMessageItem {
+  id?: string;
+  senderName?: string;
+  senderId?: string;
+  ts?: number;
+  text?: string;
+  linkCard?: LinkCard;
+  attachments?: InboundAttachment[];
+}
+
+export interface ForwardedBundle {
+  title?: string;
+  messages: ForwardedMessageItem[];
+}
+
 export interface InboundEvent {
   id: string;
   kind?: 'message' | 'recall';
@@ -199,6 +214,8 @@ export interface InboundEvent {
   device?: InboundDevice;
   text: string;
   linkCard?: LinkCard;
+  isForwarded?: boolean;
+  forwarded?: ForwardedBundle;
   mentionsMe?: boolean;
   mentions?: InboundMention[];
   replyTo?: string;
@@ -215,9 +232,15 @@ export interface ChannelAction {
   style?: string;
 }
 
+export interface OutboundMention {
+  id: string;
+  name?: string;
+}
+
 export interface ChannelSendOptions {
   replyTo?: string;
   actions?: ChannelAction[];
+  mentions?: OutboundMention[];
   senderName?: string;
   [key: string]: unknown;
 }
@@ -398,6 +421,8 @@ export interface ChatContextMessage {
   mentions?: InboundMention[];
   text: string;
   linkCard?: LinkCard;
+  isForwarded?: boolean;
+  forwarded?: ForwardedBundle;
   attachments: InboundAttachment[];
 }
 

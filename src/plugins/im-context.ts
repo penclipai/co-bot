@@ -1,10 +1,13 @@
 /**
- * IM 会话上下文插件：提供进程内 ChatContextStore 与通道历史补全能力。
+ * IM 会话上下文插件：提供进程内 ChatContextStore、通道历史合并去重、以及本机只读 `/api/context/history` 探索接口。
  */
+import { isLoopbackUrl } from '../../scripts/omb.ts';
 import { assemblePromptContext, ChatContextStore, redactSecrets } from '../core/chat-context.ts';
+import { ContextPullManager } from '../core/context-pull.ts';
 import type { ManagedChannel } from '../core/channel-contract.ts';
 import type { ImContextService } from '../openmausbot/types.ts';
 import type { ChatContextMessage, ChatsConfig, InboundEvent, KernelPlugin } from '../types.ts';
+import type { WebServer } from '../web/server.ts';
 
 function normalizeChannelEntry(ev: Partial<InboundEvent> | null | undefined, fallbackChatId: string): ChatContextMessage | null {
   if (!ev || !ev.id) return null;
@@ -24,19 +27,38 @@ function normalizeChannelEntry(ev: Partial<InboundEvent> | null | undefined, fal
     mentionsMe: Boolean(ev.mentionsMe),
     ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
     text: redactSecrets(ev.text ?? ''),
+    ...(ev.isForwarded || ev.forwarded ? { isForwarded: true } : {}),
+    ...(ev.forwarded ? { forwarded: ev.forwarded } : {}),
     attachments: Array.isArray(ev.attachments) ? ev.attachments : [],
   };
+}
+
+function mergeDedupedMessages(
+  local: ChatContextMessage[],
+  remote: ChatContextMessage[],
+  isRecalled: (id: string) => boolean,
+  max: number,
+): ChatContextMessage[] {
+  const byId = new Map<string, ChatContextMessage>();
+  for (const m of remote) {
+    if (m?.id && !isRecalled(m.id)) byId.set(m.id, m);
+  }
+  for (const m of local) {
+    if (m?.id && !isRecalled(m.id)) byId.set(m.id, m);
+  }
+  return [...byId.values()].sort((a, b) => a.ts - b.ts).slice(-max);
 }
 
 export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
   name: 'im-context',
   version: '1.0.0',
-  inject: ['channel'],
+  inject: { required: ['channel'], optional: ['web'] },
   provides: ['imContext'],
   apply(ctx, opts = {}) {
     const cfg = ctx.config;
     const chatsCfg = { ...(cfg?.chats || {}), ...(opts.chats || {}) };
     const channel = ctx.get<ManagedChannel>('channel');
+    const web = ctx.has('web') ? ctx.get<WebServer>('web') : null;
 
     const store = new ChatContextStore({
       maxPerChat: chatsCfg.contextMaxMessagesPerChat ?? 120,
@@ -46,6 +68,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
     const resolveMessage = async (chatId: string, msgId: string): Promise<ChatContextMessage | null> => {
       if (!chatId || !msgId) return null;
+      if (store.isRecalled(chatId, msgId)) return null;
       const cached = store.getMessage(chatId, msgId);
       if (cached) return cached;
 
@@ -100,17 +123,51 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
               store.recordHistoryBatch(chatId, scoped);
               local = store.getRecent(chatId, { limit: max, beforeMsgId: before, excludeMsgId });
             } else {
-              const merged = scoped
+              const normalizedRemote = scoped
                 .map((m) => normalizeChannelEntry(m, chatId))
-                .filter((m): m is ChatContextMessage => Boolean(m && (!excludeMsgId || m.id !== String(excludeMsgId)) && m.id !== String(before)))
-                .sort((a, b) => a.ts - b.ts);
-              if (merged.length) return merged.slice(-max);
+                .filter((m): m is ChatContextMessage => Boolean(m && (!excludeMsgId || m.id !== String(excludeMsgId)) && m.id !== String(before)));
+              return mergeDedupedMessages(local, normalizedRemote, (id) => store.isRecalled(chatId, id), max);
             }
           }
         } catch { /* fallback to local cache */ }
       }
       return local;
     };
+
+    const pullManager = new ContextPullManager({
+      resolveMessage,
+      getHistory: (cid, o) => getHistory(cid, { limit: o.limit, before: o.before }),
+      isSelfMessageReadable: (cid, msg) => store.isSelfMessageReadableByBot(cid, msg),
+      isRecalled: (cid, mid) => store.isRecalled(cid, mid),
+      searchCached: (cid, query, lim) => store.searchMessages(cid, query, lim),
+      getChatType: (cid) => store.getChatMeta(cid)?.type ?? 'direct',
+      onTelemetry: (data) => ctx.emit('bridge:event', { type: 'context_pull', ts: Date.now(), ...data }),
+    });
+
+    if (web) {
+      web.route('GET', '/api/context/history', ({ req, url }) => pullManager.handleRequest(url, req.socket?.remoteAddress));
+    }
+
+    const resolveLoopbackWebUrl = (): string | null => {
+      if (!web?.server) return null;
+      const ombUrl = cfg?.openmausbot?.url;
+      if (ombUrl && !isLoopbackUrl(ombUrl)) return null;
+      const addr = web.server.address();
+      if (!addr || typeof addr !== 'object') return null;
+      const host = !addr.address || addr.address === '::' || addr.address === '0.0.0.0' ? '127.0.0.1' : addr.address;
+      return `http://${host.includes(':') ? `[${host}]` : host}:${addr.port}`;
+    };
+
+    const getContextPullHint: NonNullable<ImContextService['getContextPullHint']> = (chatId, info) => (
+      pullManager.formatPullHint(chatId, {
+        baseUrl: resolveLoopbackWebUrl(),
+        oldestMsgId: info.oldestMsgId,
+        hasTruncated: info.hasTruncated,
+        hasOlder: info.hasOlder,
+        channelHasHistory: Boolean(channel?.capabilities?.history || typeof channel?.getHistory === 'function'),
+        readonly: Boolean(info.readonly),
+      })
+    );
 
     const buildPromptContext: ImContextService['buildPromptContext'] = (opts2) => assemblePromptContext({
       ...opts2,
@@ -121,14 +178,17 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
     const service: ImContextService & {
       resolveMessage: typeof resolveMessage;
+      pullManager: ContextPullManager;
     } = {
       store,
+      pullManager,
       recordInbound: (ev) => store.recordInbound(ev),
       recordOutbound: (chatId, info) => store.recordOutbound(chatId, info),
       recallMessage: (chatId, msgId) => store.recallMessage(chatId, msgId),
       resolveMessage,
       getHistory,
       listChats: () => store.listChats(),
+      getContextPullHint,
       buildPromptContext,
       stats: () => ({
         ...store.stats(),

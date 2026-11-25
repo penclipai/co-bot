@@ -32,19 +32,17 @@ import {
   drainOutboundQueue, flushOutboundBuffer as flushOutboundQueueBuffer,
   isTransportDisconnected, sendBridgeText, type SendTextExtra,
 } from './outbound-queue.ts';
-import {
-  COBOT_COORDINATOR_PROFILE,
-  COBOT_COORDINATOR_SOUL,
-  COBOT_COORDINATOR_TITLE,
-  isManagedCobotSoul,
-} from './persona.ts';
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
+import {
+  ensureChatThread, getChatThread, isExternalThread, refreshMultiBot,
+  resolveOwnerByThread, resolveSelfBotThread, setChatThread, setSelfThread, syncChiefBotIdentity,
+} from './thread-manager.ts';
 import { createTurnTracker } from './turn-tracker.ts';
 import type {
   ActiveBurstWatch, BridgeChatContext, BridgeFocus, BridgeOptions, BridgeTransport, ChatThreadEntry,
   CompactChatContext, FileMsgEntry, ImContextService, InFlightTurnMeta, KnownChatSummary,
   MsgRoute, OmbBot, OmbGroup, OmbHttpError, OmbTargetBot, OmbTaskSummary, OutboundBufferItem,
-  PendingCard, PendingSendBack, PendingTaskPick, PrivateDraft, QueuedTurnEntry,
+  PendingCard, PendingFollowUp, PendingSendBack, PendingTaskPick, PrivateDraft, QueuedTurnEntry,
   QuietQueueItem, TurnTrackerHandle,
 } from './types.ts';
 
@@ -137,6 +135,7 @@ export class OpenMausBotBridge {
   privateDrafts = new Map<string, PrivateDraft>();
   lastPrivateDraftId: string | null = null;
   pendingSendBack: PendingSendBack | null = null;
+  pendingFollowUps = new Map<string, PendingFollowUp>();
   inFlightTurns = new Map<string, InFlightTurnMeta>();
   pendingChatThreads = new Map<string, Promise<OmbTargetBot>>();
   outboundQueue = new Map<string, Promise<unknown>>();
@@ -508,93 +507,9 @@ export class OpenMausBotBridge {
     await this.transport.stop?.();
   }
 
-  async syncChiefBotIdentity(bots: OmbBot[] | null = null): Promise<boolean> {
-    if (!this.syncChiefIdentity || this.chiefIdentitySynced || typeof this.client?.patchBot !== 'function') return false;
-    if (this.syncingChiefPromise) return this.syncingChiefPromise;
-    this.syncingChiefPromise = (async () => {
-      try {
-        const list = Array.isArray(bots) ? bots : ((await this.client.listBots())?.bots ?? []);
-        const visible = list.filter((b) => b && !b.hidden);
-        const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
-        if (!chief?.id) return false;
-        this.chiefBotId = chief.id;
-
-        const rawName = String(chief.name ?? '').trim();
-        const patch: Record<string, string> = {};
-        if ((!rawName || /^(open)?mausbot$/i.test(rawName)) && rawName !== this.botName) {
-          patch.name = this.botName;
-        }
-        if (!String(chief.title ?? '').trim()) {
-          patch.title = COBOT_COORDINATOR_TITLE;
-        }
-        const curSoul = String(chief.soul ?? '').trim();
-        if (isManagedCobotSoul(curSoul) && curSoul !== COBOT_COORDINATOR_SOUL) {
-          Object.assign(patch, COBOT_COORDINATOR_PROFILE);
-        }
-        if (Object.keys(patch).length > 0) {
-          await this.withCliLoopbackFallback((c) => c.patchBot(chief.id, patch));
-          const updated = { ...chief, ...patch };
-          this.botById.set(chief.id, updated);
-          for (const [tid, entry] of this.botByThread) {
-            if (entry?.id === chief.id) this.botByThread.set(tid, { ...entry, ...patch });
-          }
-          console.log(`[co-bot] 已同步主 Bot 身份为 ${updated.name || this.botName}（${updated.title || COBOT_COORDINATOR_TITLE}）`);
-        }
-        this.chiefIdentitySynced = true;
-        return true;
-      } catch (e) {
-        const err = e as OmbHttpError;
-        if (err?.status === 400 || err?.status === 404) this.chiefIdentitySynced = true;
-        return false;
-      } finally {
-        this.syncingChiefPromise = null;
-      }
-    })();
-    return this.syncingChiefPromise;
-  }
-
-  async refreshMultiBot(): Promise<OmbBot[]> {
-    try {
-      const { bots = [], groups = [] } = await this.client.listBots();
-      const visible = bots.filter((b) => !b.hidden);
-      const visibleGroups = groups.filter((g) => !g.hidden && !g.dm);
-      this.multiBotCache = visible.length > 1 || visibleGroups.length > 0;
-      const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0] ?? null;
-      this.chiefBotId = chief?.id ?? null;
-      const indexEntities = <T extends { id: string; name: string; threadId: string; mainThreadId?: string; tasks?: OmbTaskSummary[] }>(
-        list: T[],
-        byId: Map<string, T>,
-        byThread: Map<string, OmbTargetBot>,
-        isGroup: boolean,
-      ): void => {
-        for (const item of list) {
-          const entry = isGroup ? { ...item, isGroup: true } : item;
-          byId.set(item.id, entry);
-          if (item.threadId) byThread.set(item.threadId, entry);
-          if (item.mainThreadId) byThread.set(item.mainThreadId, entry);
-          for (const t of item.tasks ?? []) {
-            if (t?.threadId) byThread.set(t.threadId, { ...entry, threadId: t.threadId });
-          }
-        }
-        trimMapCap(byThread, 500);
-      };
-      indexEntities(bots, this.botById, this.botByThread, false);
-      indexEntities(groups, this.groupById, this.groupByThread, true);
-      if (this.syncChiefIdentity && !this.chiefIdentitySynced && bots.length > 0) {
-        await this.syncChiefBotIdentity(bots);
-      }
-      return bots;
-    } catch {
-      return [];
-    }
-  }
-
-  async resolveOwnerByThread(threadId: string): Promise<OmbTargetBot | null> {
-    if (this.botByThread.has(threadId)) return this.botByThread.get(threadId) ?? null;
-    if (this.groupByThread.has(threadId)) return this.groupByThread.get(threadId) ?? null;
-    await this.refreshMultiBot();
-    return this.botByThread.get(threadId) ?? this.groupByThread.get(threadId) ?? null;
-  }
+  async syncChiefBotIdentity(bots: OmbBot[] | null = null): Promise<boolean> { return syncChiefBotIdentity(this, bots); }
+  async refreshMultiBot(): Promise<OmbBot[]> { return refreshMultiBot(this); }
+  async resolveOwnerByThread(threadId: string): Promise<OmbTargetBot | null> { return resolveOwnerByThread(this, threadId); }
 
   rememberEcho(text: string): void {
     const key = norm(text);
@@ -782,121 +697,13 @@ export class OpenMausBotBridge {
     return buildExternalSummaryPrompt(this, targetChat, opts);
   }
 
-  getChatThread(chatId: string, targetBot: OmbTargetBot): OmbTargetBot {
-    if (!chatId || !targetBot || this.chats.isolateThreadsByChat === false) return targetBot;
-    const cached = this.chatThreads.get(`${chatId}:${targetBot.id}`);
-    return cached?.threadId ? { ...targetBot, threadId: cached.threadId } : targetBot;
-  }
-
-  setSelfThread(targetBot: OmbTargetBot): void {
-    if (!targetBot?.id || !targetBot?.threadId || this.isExternalThread(targetBot.threadId)) return;
-    this.selfThreads.set(String(targetBot.id), {
-      botId: targetBot.id,
-      botName: targetBot.name,
-      threadId: targetBot.threadId,
-      ...(targetBot.isGroup ? { isGroup: true } : {}),
-    });
-    trimMapCap(this.selfThreads, 100);
-    this.saveState();
-  }
-
-  isExternalThread(threadId?: string | null): boolean {
-    if (!threadId) return false;
-    const tid = String(threadId);
-    if (this.externalThreadIds.has(tid)) return true;
-    for (const entry of this.chatThreads.values()) {
-      if (entry?.threadId === tid) return true;
-    }
-    return false;
-  }
-
-  async resolveSelfBotThread(targetBot: OmbTargetBot): Promise<OmbTargetBot> {
-    if (!targetBot) return targetBot;
-    if (!this.isExternalThread(targetBot.threadId)) {
-      this.setSelfThread(targetBot);
-      return targetBot;
-    }
-    const saved = this.selfThreads.get(String(targetBot.id));
-    if (saved?.threadId && !this.isExternalThread(saved.threadId)) {
-      return { ...targetBot, threadId: saved.threadId };
-    }
-    if (this.focus?.botId === targetBot.id && this.focus?.threadId && !this.isExternalThread(this.focus.threadId)) {
-      const next = { ...targetBot, threadId: this.focus.threadId };
-      this.setSelfThread(next);
-      return next;
-    }
-    try {
-      const created = targetBot.isGroup && typeof this.client.createGroupTask === 'function'
-        ? await this.client.createGroupTask(targetBot.id, { title: '自聊主线' })
-        : (typeof this.client.createTask === 'function'
-          ? await this.client.createTask(targetBot.id, { title: '自聊主线', select: true })
-          : null);
-      const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
-      if (newTid && !this.isExternalThread(newTid)) {
-        const next = { ...targetBot, threadId: newTid };
-        this.setSelfThread(next);
-        return next;
-      }
-    } catch { /* ignore */ }
-    return targetBot;
-  }
-
-  setChatThread(chatId: string, targetBot: OmbTargetBot): void {
-    if (!chatId || !targetBot?.id || !targetBot?.threadId) return;
-    const cid = String(chatId);
-    const meta = this.externalChatMeta.get(cid);
-    const key = `${cid}:${targetBot.id}`;
-    this.chatThreads.set(key, {
-      threadId: targetBot.threadId,
-      botId: targetBot.id,
-      botName: targetBot.name,
-      isGroup: Boolean(targetBot.isGroup),
-      chatId: cid,
-      chatName: meta?.name || '',
-      chatType: meta?.type || 'direct',
-    });
-    rememberBounded(this.externalThreadIds, targetBot.threadId, 500);
-    trimMapCap(this.chatThreads, 200);
-    this.saveState();
-  }
-
+  getChatThread(chatId: string, targetBot: OmbTargetBot): OmbTargetBot { return getChatThread(this, chatId, targetBot); }
+  setSelfThread(targetBot: OmbTargetBot): void { setSelfThread(this, targetBot); }
+  isExternalThread(threadId?: string | null): boolean { return isExternalThread(this, threadId); }
+  async resolveSelfBotThread(targetBot: OmbTargetBot): Promise<OmbTargetBot> { return resolveSelfBotThread(this, targetBot); }
+  setChatThread(chatId: string, targetBot: OmbTargetBot): void { setChatThread(this, chatId, targetBot); }
   async ensureChatThread(chatId: string, chatType: ChatType, chatName: string, targetBot: OmbTargetBot): Promise<OmbTargetBot> {
-    if (!chatId || chatType === 'self' || !targetBot || this.chats.isolateThreadsByChat === false) {
-      return targetBot;
-    }
-    const key = `${chatId}:${targetBot.id}`;
-    const existing = this.chatThreads.get(key);
-    if (existing?.threadId) return { ...targetBot, threadId: existing.threadId };
-    const inflight = this.pendingChatThreads.get(key);
-    if (inflight) return inflight;
-
-    const task = (async (): Promise<OmbTargetBot> => {
-      const title = clip(`${chatType === 'group' ? '群聊' : '私聊'} · ${chatName || chatId}`, 40);
-      let created;
-      try {
-        created = targetBot.isGroup && typeof this.client.createGroupTask === 'function'
-          ? await this.client.createGroupTask(targetBot.id, { title })
-          : (typeof this.client.createTask === 'function'
-            ? await this.client.createTask(targetBot.id, { title, select: false })
-            : null);
-      } catch {
-        return targetBot;
-      }
-      const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
-      if (!newTid) return targetBot;
-      if (targetBot.isGroup) {
-        this.groupByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid, isGroup: true });
-      } else {
-        this.botByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid });
-      }
-      const nextTarget = { ...targetBot, threadId: newTid };
-      this.setChatThread(chatId, nextTarget);
-      return nextTarget;
-    })().finally(() => {
-      this.pendingChatThreads.delete(key);
-    });
-    this.pendingChatThreads.set(key, task);
-    return task;
+    return ensureChatThread(this, chatId, chatType, chatName, targetBot);
   }
 
   getKnownBotNames(): string[] {

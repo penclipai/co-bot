@@ -22,6 +22,7 @@ import type {
   LoggerLike,
 } from '../types.ts';
 import { isAudioAttachment, redactSecrets } from './chat-context.ts';
+import { normalizeForwarded } from './context-pull.ts';
 
 export { isAudioAttachment };
 
@@ -375,6 +376,8 @@ export function normalizeInboundEvent(
     const mentions = normalizeMentions(r.mentions, { selfId });
     const derivedMentionMe = mentions.some((m) => m.isSelf || (selfStr && m.id === selfStr) || (m.isAll && atAllCountsAsMention));
     const linkCard = normalizeLinkCard(r.linkCard ?? r.card);
+    const forwarded = normalizeForwarded(r.forwarded ?? r.mergedForward ?? r.forwardMessages, String(r.id), normalizeLinkCard);
+    const isForwarded = Boolean(r.isForwarded || r.forwardedFrom || forwarded);
     const ev: InboundEvent = {
       id: String(r.id),
       ts: Number(r.ts) || Date.now(),
@@ -397,6 +400,8 @@ export function normalizeInboundEvent(
       } : {}),
       text: String(r.text ?? ''),
       ...(linkCard ? { linkCard } : {}),
+      ...(isForwarded ? { isForwarded: true } : {}),
+      ...(forwarded ? { forwarded } : {}),
       ...(r.mentionsMe !== undefined ? { mentionsMe: Boolean(r.mentionsMe) } : (derivedMentionMe ? { mentionsMe: true } : {})),
       ...(mentions.length ? { mentions } : {}),
       ...(r.replyTo != null ? { replyTo: String(r.replyTo) } : {}),
@@ -431,6 +436,8 @@ export function normalizeInboundEvent(
   const senderId = String(r.fromId ?? '');
   const mentions = normalizeMentions(r.mentions, { atUserIds: at, atAll: Boolean(r.atAll), selfId });
   const linkCard = normalizeLinkCard(r.linkCard ?? r.card);
+  const forwarded = normalizeForwarded(r.forwarded ?? r.mergedForward ?? r.forwardMessages, String(r.msgId), normalizeLinkCard);
+  const isForwarded = Boolean(r.isForwarded || r.forwardedFrom || forwarded);
   const ev: InboundEvent = {
     id: String(r.msgId),
     ts: Number(r.time) || Date.now(),
@@ -449,6 +456,8 @@ export function normalizeInboundEvent(
       : undefined,
     text: String(r.text ?? ''),
     ...(linkCard ? { linkCard } : {}),
+    ...(isForwarded ? { isForwarded: true } : {}),
+    ...(forwarded ? { forwarded } : {}),
     mentionsMe: Boolean((r.mentionsMe !== undefined ? r.mentionsMe : false) || (selfStr && at.includes(selfStr)) || (r.atAll && atAllCountsAsMention) || mentions.some((m) => m.isSelf)),
     ...(mentions.length ? { mentions } : {}),
     replyTo: r.quoteMsgId != null ? String(r.quoteMsgId) : undefined,

@@ -78,6 +78,25 @@
   .dev button { border: 0; background: none; color: var(--accent); font-size: 11.5px; padding: 0 0 0 6px; cursor: pointer; }
   .quote { margin-top: 4px; max-width: 100%; font-size: 12.5px; color: var(--muted); background: rgba(0,0,0,.05); border-radius: 4px; padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dev { font-size: 11.5px; color: var(--muted); margin-top: 3px; padding-right: 2px; }
+  .fwd-tag { display: inline-block; font-size: 11px; padding: 0 5px; margin-right: 5px; border-radius: 4px; background: rgba(43,108,176,.12); color: var(--accent); font-weight: 600; vertical-align: baseline; }
+  .fwd-card, .fwd-long { margin-top: 2px; border: 1px solid var(--bubble-line); border-radius: 6px; padding: 6px 8px; background: rgba(127,127,127,.06); font-size: 13px; }
+  .fwd-card summary, .fwd-long summary { cursor: pointer; list-style: none; user-select: none; }
+  .fwd-card .fwd-title { font-weight: 600; margin-bottom: 3px; }
+  .fwd-card .fwd-preview { color: var(--muted); font-size: 12px; white-space: pre-line; line-height: 1.4; }
+  .fwd-card .fwd-list { margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--bubble-line); max-height: 260px; overflow-y: auto; font-size: 12.5px; line-height: 1.45; }
+  .fwd-card .fwd-item + .fwd-item { margin-top: 4px; }
+  .fwd-long pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow-y: auto; font: 12px/1.4 var(--mono); border-top: 1px dashed var(--bubble-line); padding-top: 6px; }
+  .mention-pill { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: rgba(39,174,96,.12); color: #1f7a44; font-size: 11px; }
+  .sel-badge { display: none; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--muted); flex: none; align-self: center; font-size: 11px; line-height: 15px; text-align: center; color: #fff; }
+  body.select-mode .sel-badge { display: inline-block; }
+  body.select-mode .bubble { cursor: pointer; }
+  .row.selected .sel-badge { background: var(--accent); border-color: var(--accent); }
+  .row.selected .bubble { box-shadow: inset 0 0 0 2px var(--accent); }
+  #selectBar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; background: var(--bar); border-top: 1px solid var(--line); font-size: 12.5px; }
+  #selectBar span { margin-right: auto; color: var(--muted); }
+  #selectBar button { border: 1px solid var(--line); background: var(--bubble); color: var(--ink); border-radius: 6px; padding: 4px 9px; font-size: 12px; cursor: pointer; }
+  #selectBar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #selectBar button:disabled { opacity: .45; cursor: default; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .act { border: 1px solid var(--line); background: var(--bar); color: var(--ink); border-radius: 999px; padding: 4px 11px; font-size: 12.5px; cursor: pointer; transition: opacity .15s; }
   .act.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
@@ -103,7 +122,7 @@
   <header>
     <a class="back" id="ombLink" href="http://127.0.0.1:8799/" target="_blank" rel="noopener" title="打开后台控制台"><b>‹</b>后台</a>
     <h1><span id="chatTitle">自聊</span><small id="sub">co-bot 协调助手</small></h1>
-    <span class="more"><button class="dev" id="devBtn" type="button" title="切换发送设备标识">手机发</button><i class="dot" id="dot" title="连接状态"></i></span>
+    <span class="more"><button class="dev" id="selectBtn" type="button" title="多选消息转发">多选</button><button class="dev" id="devBtn" type="button" title="切换发送设备标识">手机发</button><i class="dot" id="dot" title="连接状态"></i></span>
   </header>
   <div class="chat-tabs" id="chatTabs">
     <button type="button" class="ctab active" data-chat="self">自聊<span class="ubadge">0</span></button>
@@ -112,6 +131,13 @@
   </div>
   <div id="list"></div>
   <div id="reply"><span id="replyText"></span><button type="button" id="replyX" aria-label="取消引用">×</button></div>
+  <div id="selectBar" hidden>
+    <span id="selectCount">已选 0 条</span>
+    <button type="button" id="fwdSingleSelfBtn" disabled>逐条→自聊</button>
+    <button type="button" class="primary" id="fwdMergeSelfBtn" disabled>合并→自聊</button>
+    <button type="button" id="fwdMergeHereBtn" disabled hidden>合并→当前群</button>
+    <button type="button" id="selectCancelBtn">取消</button>
+  </div>
   <form class="bar" id="form">
     <input type="file" id="fileIn" hidden>
     <button class="sbtn" id="senderBtn" type="button" title="切换发送成员身份（模拟同事发言构造上下文）" hidden>我</button>
@@ -138,6 +164,8 @@
   const seen = new Map();
   const unread = { self: 0, grp_dev: 0, dm_alice: 0 };
   let activeChat = 'self', sender = 'me', replyTo = null, lastTs = 0, device = 'mobile', brandName = 'co-bot';
+  let selectMode = false;
+  const selectedIds = new Set();
   const DEV = { mobile: '手机发', desktop: '电脑发' };
 
   const pad = (n) => String(n).padStart(2, '0');
@@ -152,7 +180,7 @@
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
   };
   const snip = (t) => String(t || '').replace(/\s+/g, ' ').slice(0, 50);
-  const label = (m) => (m.file ? `[文件] ${m.file.name}` : snip(m.text));
+  const label = (m) => (m.file ? `[文件] ${m.file.name}` : (m.forwarded ? `[合并转发] ${m.forwarded.title || '聊天记录'}（${(m.forwarded.messages || []).length} 条）` : snip(m.text)));
   const size = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
   const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
@@ -250,11 +278,48 @@
         a.append(fn, fi);
         b.append(a);
       }
+    } else if (msg.forwarded) {
+      const det = document.createElement('details');
+      det.className = 'fwd-card';
+      const sum = document.createElement('summary');
+      const items = Array.isArray(msg.forwarded.messages) ? msg.forwarded.messages : [];
+      const ft = Object.assign(document.createElement('div'), {
+        className: 'fwd-title',
+        textContent: `[合并转发] ${msg.forwarded.title || '聊天记录'}（共 ${items.length} 条）`,
+      });
+      const fp = Object.assign(document.createElement('div'), {
+        className: 'fwd-preview',
+        textContent: items.slice(0, 3).map((it) => `${it.senderName || '成员'}: ${snip(it.text || (it.attachments?.length ? '[附件]' : '[消息]'))}`).join('\n') || '点击展开查看记录',
+      });
+      sum.append(ft, fp);
+      const fl = document.createElement('div');
+      fl.className = 'fwd-list';
+      items.forEach((it, idx) => {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'fwd-item';
+        rowEl.textContent = `${idx + 1}. ${it.senderName || '成员'}: ${it.text || (it.attachments?.length ? `[附件: ${it.attachments.map((x) => x.name).join(', ')}]` : '[消息]')}`;
+        fl.append(rowEl);
+      });
+      det.append(sum, fl);
+      b.append(det);
+    } else if (msg.isForwarded && String(msg.text || '').length > 700) {
+      const tag = Object.assign(document.createElement('span'), { className: 'fwd-tag', textContent: '转发' });
+      const det = document.createElement('details');
+      det.className = 'fwd-long';
+      const sum = document.createElement('summary');
+      sum.append(tag, document.createTextNode(`${String(msg.text).slice(0, 180)}… （共 ${String(msg.text).length} 字，点击展开原文）`));
+      const fullPre = Object.assign(document.createElement('pre'), { textContent: msg.text });
+      det.append(sum, fullPre);
+      b.append(det);
     } else {
       const m = rowKind === 'me' && msg.text.match(/^(@\S+)\s*([\s\S]*)$/);
       const md = document.createElement('div');
       md.className = 'md';
       md.innerHTML = renderMarkdown(m ? m[2] : msg.text);
+      if (msg.isForwarded) {
+        const tag = Object.assign(document.createElement('span'), { className: 'fwd-tag', textContent: '转发' });
+        (md.firstElementChild?.tagName === 'P' ? md.firstElementChild : md).prepend(tag);
+      }
       if (m) {
         const at = document.createElement('span');
         at.className = 'at';
@@ -294,6 +359,13 @@
     const dv = document.createElement('div');
     dv.className = 'dev';
     dv.textContent = msg.from === 'bot' ? `${msg.device} · ${brandName}` : (msg.senderName && rowKind === 'other' ? msg.senderName : msg.device);
+    if (msg.from === 'bot' && Array.isArray(msg.mentions) && msg.mentions.length) {
+      const mp = Object.assign(document.createElement('span'), {
+        className: 'mention-pill',
+        textContent: `真@ ${msg.mentions.map((x) => `${x.name || x.id} (${x.id})`).join(', ')}`,
+      });
+      dv.append(mp);
+    }
     col.append(dv);
 
     const r = document.createElement('button');
@@ -301,6 +373,24 @@
     r.textContent = '引用';
     r.onclick = (e) => { e.stopPropagation(); setReply(msg); };
     dv.append(r);
+    if ((msg.chatId || 'self') !== 'self' && (msg.text || msg.forwarded)) {
+      const fw = document.createElement('button');
+      fw.type = 'button';
+      fw.textContent = '转发到自聊';
+      fw.onclick = async (e) => {
+        e.stopPropagation();
+        const res = await post('/send', {
+          chatId: 'self',
+          sender: 'me',
+          text: msg.text ? `${msg.senderName ? `${msg.senderName}: ` : ''}${msg.text}` : '',
+          isForwarded: true,
+          ...(msg.forwarded ? { forwarded: msg.forwarded } : {}),
+          device,
+        });
+        if (!res.ok) alert((await res.json().catch(() => ({}))).error || '转发失败');
+      };
+      dv.append(fw);
+    }
     if (msg.from !== 'bot' && msg.id) {
       const rc = document.createElement('button');
       rc.type = 'button';
@@ -315,14 +405,25 @@
     b.title = '点一下引用这条消息';
     b.addEventListener('click', (e) => {
       if (window.getSelection()?.toString()) return;
-      if (!e.target.closest('a, button, img')) setReply(msg);
+      if (e.target.closest('a, button, img, details, summary')) return;
+      if (selectMode && msg.id) {
+        toggleSelect(msg.id, row);
+        return;
+      }
+      setReply(msg);
     });
+
+    const sb = document.createElement('span');
+    sb.className = 'sel-badge';
+    sb.textContent = msg.id && selectedIds.has(msg.id) ? '✓' : '';
+    if (msg.id && selectedIds.has(msg.id)) row.classList.add('selected');
+    sb.onclick = (e) => { e.stopPropagation(); if (msg.id) toggleSelect(msg.id, row); };
 
     const av = document.createElement('div');
     av.className = 'avatar';
     av.textContent = rowKind === 'other' ? (msg.senderName || '?').slice(0, 2) : '我';
-    if (rowKind === 'other') row.append(av, col);
-    else row.append(col, av);
+    if (rowKind === 'other') row.append(sb, av, col);
+    else row.append(sb, col, av);
     list.append(row);
     if (nearBottom) list.scrollTop = list.scrollHeight;
   }
@@ -367,8 +468,45 @@
     }
   }
 
+  function updateSelectBar() {
+    document.body.classList.toggle('select-mode', selectMode);
+    $('#selectBtn').textContent = selectMode ? '完成' : '多选';
+    $('#selectBar').hidden = !selectMode;
+    const count = selectedIds.size;
+    $('#selectCount').textContent = `已选 ${count} 条`;
+    $('#fwdSingleSelfBtn').disabled = count === 0;
+    $('#fwdMergeSelfBtn').disabled = count === 0;
+    const hereBtn = $('#fwdMergeHereBtn');
+    hereBtn.hidden = activeChat === 'self';
+    hereBtn.disabled = count === 0;
+  }
+
+  function toggleSelect(id, rowEl) {
+    if (!id) return;
+    if (selectedIds.has(id)) selectedIds.delete(id);
+    else selectedIds.add(id);
+    if (rowEl) {
+      rowEl.classList.toggle('selected', selectedIds.has(id));
+      const badge = rowEl.querySelector('.sel-badge');
+      if (badge) badge.textContent = selectedIds.has(id) ? '✓' : '';
+    }
+    updateSelectBar();
+  }
+
+  function exitSelectMode() {
+    selectMode = false;
+    selectedIds.clear();
+    for (const r of list.querySelectorAll('.row.selected')) {
+      r.classList.remove('selected');
+      const b = r.querySelector('.sel-badge');
+      if (b) b.textContent = '';
+    }
+    updateSelectBar();
+  }
+
   function switchChat(cid) {
     if (!CHATS[cid] || cid === activeChat) return;
+    exitSelectMode();
     activeChat = cid;
     unread[cid] = 0;
     replyTo = null;
@@ -381,6 +519,52 @@
   for (const tab of document.querySelectorAll('#chatTabs .ctab')) {
     tab.addEventListener('click', () => switchChat(tab.dataset.chat));
   }
+  $('#selectBtn').onclick = () => {
+    if (selectMode) exitSelectMode();
+    else { selectMode = true; updateSelectBar(); }
+  };
+  $('#selectCancelBtn').onclick = exitSelectMode;
+  async function sendSelectedForward(mode, targetChat) {
+    const picked = allMsgs.filter((m) => m.id && selectedIds.has(m.id));
+    if (!picked.length) return;
+    if (mode === 'single') {
+      for (const m of picked) {
+        const prefix = m.senderName && !m.forwarded ? `${m.senderName}: ` : '';
+        const text = m.text ? `${prefix}${m.text}` : (m.file ? `[附件: ${m.file.name}]` : '');
+        const res = await post('/send', {
+          chatId: targetChat,
+          sender: 'me',
+          text,
+          isForwarded: true,
+          ...(m.forwarded ? { forwarded: m.forwarded } : {}),
+          device,
+        });
+        if (!res.ok) { alert((await res.json().catch(() => ({}))).error || '转发失败'); return; }
+      }
+    } else {
+      const items = picked.map((m) => ({
+        id: m.id,
+        senderName: m.senderName || (m.isSelf ? '我' : '成员'),
+        senderId: m.senderId,
+        ts: m.ts,
+        text: m.text || (m.forwarded ? `[合并转发: ${m.forwarded.title || '聊天记录'}]` : (m.file ? `[附件: ${m.file.name}]` : '[消息]')),
+      }));
+      const res = await post('/send', {
+        chatId: targetChat,
+        sender: 'me',
+        text: '',
+        isForwarded: true,
+        forwarded: { title: `${CHATS[activeChat]?.name || activeChat}的聊天记录`, messages: items },
+        device,
+      });
+      if (!res.ok) { alert((await res.json().catch(() => ({}))).error || '合并转发失败'); return; }
+    }
+    exitSelectMode();
+    setTimeout(refreshStatus, 180);
+  }
+  $('#fwdSingleSelfBtn').onclick = () => sendSelectedForward('single', 'self');
+  $('#fwdMergeSelfBtn').onclick = () => sendSelectedForward('merged', 'self');
+  $('#fwdMergeHereBtn').onclick = () => sendSelectedForward('merged', activeChat);
   $('#senderBtn').onclick = () => {
     const idx = SENDER_CYCLE.indexOf(sender);
     sender = SENDER_CYCLE[(idx + 1) % SENDER_CYCLE.length];

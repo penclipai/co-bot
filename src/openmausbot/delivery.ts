@@ -9,6 +9,7 @@ import type { OpenMausBotBridge } from './bridge.ts';
 import { fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
 import { botCommandTarget } from './commands.ts';
 import { formatDelegationResponse } from './delegation.ts';
+import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
 import type { BridgeChatContext, CompactChatContext, MsgRoute, OmbMessage, PrivateDraft } from './types.ts';
 
@@ -356,6 +357,8 @@ export async function deliverBotReply(
   },
 ): Promise<void> {
   if (finalMsg?.id) rememberBounded(bridge.deliveredOmbIds, finalMsg.id);
+  const askParsed = (!proactive && !chatCtx?.readonly) ? parseAskProposal(text) : { cleanText: text, proposal: null };
+  const effectiveText = askParsed.cleanText;
   const isExternal = Boolean(chatCtx?.isExternal);
   const targetChatId = chatCtx?.replyChatId || bridge.selfChat;
   const quoteReplyId = (!isExternal || chatCtx?.privateReply) ? null : (chatCtx?.replyToImMsgId ?? null);
@@ -403,8 +406,8 @@ export async function deliverBotReply(
   const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
   const proHead = proactive ? `🔔 **${proLabel} 通知**${originNote}\n` : '';
   const safeBody = isExternal && targetChatId && targetChatId !== bridge.selfChat
-    ? sanitizeExternalMentions(text, { mode: bridge.chats.externalSanitizeMentions ?? 'all', botNames: bridge.getKnownBotNames() })
-    : text;
+    ? sanitizeExternalMentions(effectiveText, { mode: bridge.chats.externalSanitizeMentions ?? 'all', botNames: bridge.getKnownBotNames() })
+    : effectiveText;
   const isDirectExternalReply = Boolean(isExternal && !chatCtx?.privateReply && !proactive && targetChatId && targetChatId !== bridge.selfChat);
   const isDirectDelegationRes = Boolean(isDirectExternalReply && chatCtx?.delegationReq?.id);
   const customExtPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
@@ -548,7 +551,7 @@ export async function deliverBotReply(
     });
   }
 
-  const safeTextSummary = scanAndRedactOutbound(text).text;
+  const safeTextSummary = scanAndRedactOutbound(effectiveText).text;
   if (draftMeta && draftKey) {
     const draftObj: PrivateDraft = {
       id: draftKey,
@@ -557,7 +560,7 @@ export async function deliverBotReply(
       originChatName: draftMeta.originName,
       originChatType: draftMeta.originChatType,
       replyToImMsgId: draftMeta.replyToImMsgId,
-      rawText: text,
+      rawText: effectiveText,
       addBotPrefix: draftMeta.addBotPrefix,
       ...('forceBotPrefix' in draftMeta && draftMeta.forceBotPrefix ? { forceBotPrefix: true } : {}),
       ...(draftMeta.delegationRe ? { delegationRe: draftMeta.delegationRe } : {}),
@@ -591,6 +594,17 @@ export async function deliverBotReply(
     bridge.focus = { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}) };
   }
   bridge.saveState();
+
+  if (askParsed.proposal) {
+    await createAskDraftAndConfirm(bridge, {
+      proposal: askParsed.proposal,
+      botId,
+      botName,
+      threadId,
+      isGroup,
+      chatCtx,
+    });
+  }
 
   const media = mediaMessages.length ? mediaMessages : (finalMsg ? [finalMsg] : []);
   await forwardBotMedia(bridge, threadId, media, {

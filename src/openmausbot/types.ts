@@ -16,6 +16,7 @@ import type {
   CollaboratorPolicy,
   InboundAttachment,
   InboundEvent,
+  OutboundMention,
   ProjectConfig,
   ProjectRef,
   QuietHoursConfig,
@@ -352,7 +353,34 @@ export interface PrivateDraft {
   addBotPrefix: boolean;
   forceBotPrefix?: boolean;
   delegationRe?: string;
+  mentions?: OutboundMention[];
+  allowMentionNames?: string[];
+  followUp?: {
+    botId: string;
+    botName: string;
+    threadId: string;
+    isGroup: boolean;
+    targetUserId: string | null;
+    targetName: string;
+    question: string;
+  };
   createdAt: number;
+}
+
+export interface PendingFollowUp {
+  id: string;
+  chatId: string;
+  chatName: string;
+  chatType: ChatType;
+  askMsgId: string;
+  targetUserId: string | null;
+  targetName: string;
+  botId: string;
+  botName: string;
+  threadId: string;
+  isGroup: boolean;
+  question: string;
+  expiresAt: number;
 }
 
 export interface PendingSendBack {
@@ -509,6 +537,10 @@ export interface ImContextService {
   getHistory: (chatId: string, opts?: { limit?: number; excludeMsgId?: string }) => Promise<ChatContextMessage[]>;
   listChats?: () => Array<{ id: string; type: ChatType; name: string; count: number; updatedAt: number }>;
   stats?: () => { chatCount: number; totalMessages: number };
+  getContextPullHint?: (
+    chatId: string,
+    info: { oldestMsgId?: string | null; hasTruncated?: boolean; hasOlder?: boolean; readonly?: boolean },
+  ) => string;
   buildPromptContext: (opts: {
     ev: InboundEvent;
     privateReply?: boolean;
@@ -519,12 +551,17 @@ export interface ImContextService {
     skipSelfQuote?: boolean;
     recentAttachmentWindowMs?: number;
     maxAutoAttachments?: number;
+    resolvePullHint?: (info: { oldestMsgId: string | null; hasTruncated: boolean; hasOlder: boolean }) => string;
+    allowAskColleagueHint?: boolean;
   }) => Promise<{
     header: string;
     quotedMsg: ChatContextMessage | null;
     recentMsgs: ChatContextMessage[];
     quotedAttachments: InboundAttachment[];
     contextAttachments: InboundAttachment[];
+    consumedSelfMsgIds?: string[];
+    hasTruncated?: boolean;
+    oldestMsgId?: string | null;
   }>;
 }
 

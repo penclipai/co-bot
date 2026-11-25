@@ -16,6 +16,7 @@ import { parseChoiceIndex, parseMultiChoiceAnswer } from './cards.ts';
 import { isExternalChatAllowed } from './chat-manager.ts';
 import { buildHelpText, handleCommand } from './commands.ts';
 import { formatDelegationRequest, generateDelegationId, parseDelegationTag } from './delegation.ts';
+import { handleFollowUpReply } from './follow-up.ts';
 import {
   buildMentionMatcher,
   hasNonBotMention,
@@ -419,8 +420,9 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
   // 将非 C2C 协议的入站消息写入内存环形上下文，供引用与多轮对话理解使用
   if (!delegation) bridge.recordInboundToContext(ev);
 
-  // 安全门槛：非本人账号的消息先经 2 档白名单/C2C 协议评估（非白名单静默忽略）
+  // 优先检查是否为同事对 @追问 的回复（一次性回流给原分析线程，结果仅回自聊）；否则走 2 档白名单/C2C 协议评估
   if (!isSelfSender) {
+    if (await handleFollowUpReply(bridge, ev)) return;
     return handleCollaboratorEvent(bridge, ev, rawText, delegation);
   }
 
@@ -460,8 +462,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
   const quotedRoute = quotedId ? (bridge.msgRoute.get(quotedId) ?? null) : null;
 
   if (!rawText) {
-    if (!atts.length && !ev.linkCard) return;
-    const bareMsg = ev.linkCard && !atts.length ? '请查看并总结我转发的这张卡片。' : '请查看我发送的附件。';
+    if (!atts.length && !ev.linkCard && !ev.forwarded) return;
+    const bareMsg = ev.forwarded && !atts.length
+      ? '请查看并总结我转发的这组聊天记录。'
+      : (ev.linkCard && !atts.length ? '请查看并总结我转发的这张卡片。' : '请查看我发送的附件。');
     if (quotedRoute) {
       bridge.clearPendingMedia();
       const chatCtx = buildExternalChatCtx(bridge, {
@@ -487,6 +491,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
         chatCtx,
       );
     } else if (isSelfChat && bridge.isStickyActive() && bridge.focus) {
+      if (ev.isForwarded || ev.forwarded) return;
       if (ev.linkCard && !atts.length) {
         await bridge.dispatchToBot(
           {
@@ -769,7 +774,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     return bridge.dispatchToBot(targetBot, bodyText || '请查看附件', mid, quotedId, replyToOmbId, chatCtx);
   }
 
-  if (isSelfChat && bridge.isStickyActive() && bridge.focus && !NOTE_PREFIX_RE.test(rawText)) {
+  if (isSelfChat && bridge.isStickyActive() && bridge.focus && !NOTE_PREFIX_RE.test(rawText) && !ev.isForwarded && !ev.forwarded) {
     if (BYE_RE.test(rawText)) {
       bridge.clearSticky();
       return bridge.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');

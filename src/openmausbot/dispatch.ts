@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { formatLinkCardSnippet } from '../core/channel-contract.ts';
 import { assemblePromptContext } from '../core/chat-context.ts';
+import { formatForwardedFull, formatForwardedSummary } from '../core/context-pull.ts';
 import { formatReadonlyGuardBlock } from '../core/inbound-policy.ts';
 import { formatProjectContextBlock, resolveProjectBinding } from '../core/projects.ts';
 import { clip } from '../format.ts';
@@ -164,7 +165,16 @@ async function buildPromptContext(
   chatCtx: BridgeChatContext,
   { skipSelfQuote = false, injectRecent = bridge.chats.injectRecentContext !== false }: { skipSelfQuote?: boolean; injectRecent?: boolean } = {},
 ) {
-  if (!ev?.chat?.id) return { header: '', quotedMsg: null, recentMsgs: [] as ChatContextMessage[], quotedAttachments: [], contextAttachments: [] };
+  if (!ev?.chat?.id) {
+    return {
+      header: '',
+      quotedMsg: null,
+      recentMsgs: [] as ChatContextMessage[],
+      quotedAttachments: [],
+      contextAttachments: [],
+      consumedSelfMsgIds: [] as string[],
+    };
+  }
   const common = {
     ev,
     privateReply: Boolean(chatCtx?.privateReply),
@@ -175,6 +185,12 @@ async function buildPromptContext(
     skipSelfQuote,
     recentAttachmentWindowMs: bridge.chats.recentAttachmentWindowMs,
     maxAutoAttachments: bridge.chats.maxAutoAttachments,
+    allowAskColleagueHint: !chatCtx?.readonly,
+    resolvePullHint: bridge.imContext?.getContextPullHint
+      ? (info: { oldestMsgId: string | null; hasTruncated: boolean; hasOlder: boolean }) => (
+          bridge.imContext?.getContextPullHint?.(String(ev.chat.id), { ...info, readonly: Boolean(chatCtx?.readonly) }) ?? ''
+        )
+      : undefined,
   };
   if (bridge.imContext) return bridge.imContext.buildPromptContext(common);
   return assemblePromptContext({
@@ -610,6 +626,15 @@ export async function dispatchToBot(
   const extras: string[] = [];
   const linkSnippet = formatLinkCardSnippet(ctxInfo.ev?.linkCard);
   if (linkSnippet) extras.push(linkSnippet);
+  if (ctxInfo.ev?.forwarded) {
+    const fwd = ctxInfo.ev.forwarded;
+    const fullFwd = formatForwardedFull(fwd);
+    if (fwd.messages.length <= 4 && fullFwd.length <= 360) {
+      extras.push(fullFwd);
+    } else {
+      extras.push(`${formatForwardedSummary(fwd)}（查完整记录请用 msgId=${ctxInfo.ev.id}）`);
+    }
+  }
   if (transcripts.length) {
     for (const tr of transcripts) {
       const dur = tr.durationSec ? `（${tr.durationSec}秒）` : '';
@@ -709,6 +734,9 @@ export async function dispatchToBot(
   } finally {
     bridge.pendingThreads.delete(threadId);
   }
+
+  const ctxStore = bridge.imContext?.store ?? bridge.localContextStore;
+  ctxStore.markDispatched(ctxInfo.originChatId, [imMsgId, ...(promptCtx.consumedSelfMsgIds ?? [])]);
 
   const alreadyTracking = [...bridge.activeTurns.values()].some((t) => t.threadId === threadId);
   const compactCtx = compactChatCtx(ctxInfo);

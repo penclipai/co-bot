@@ -214,13 +214,22 @@ export async function requestSendBack(
   const safePreview = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
+    allowNames: draft.allowMentionNames,
   });
   const quoteHint = draft.replyToImMsgId ? `，将引用原消息 \`${draft.replyToImMsgId}\`` : '';
+  const askHint = draft.followUp
+    ? (draft.mentions?.length
+      ? `，将真 @${draft.followUp.targetName}（\`${draft.mentions[0].id}\`）提醒并在对方回复后自动续分析`
+      : `，未匹配到「${draft.followUp.targetName}」的用户 ID，将按纯文本提及发出`)
+    : '';
   const attrLabel = draft.delegationRe
     ? '协作结果回传，带 🤖 协议标识'
     : (useBotPrefix ? `以 🤖 **[${bridge.botName}]** 名义` : '以本人名义直接发出');
+  const titleText = draft.followUp
+    ? `**📤 确认向「${draft.originChatName || draft.originChatId}」追问 @${draft.followUp.targetName}**`
+    : `**📤 确认发回到「${draft.originChatName || draft.originChatId}」**`;
   return bridge.say(
-    `**📤 确认发回到「${draft.originChatName || draft.originChatId}」**（${attrLabel}${quoteHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
+    `${titleText}（${attrLabel}${quoteHint}${askHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
   );
 }
 
@@ -237,6 +246,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
   let safeBody = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
+    allowNames: draft.allowMentionNames,
   });
   if (draft.delegationRe) {
     safeBody = formatDelegationResponse({ re: draft.delegationRe, text: safeBody });
@@ -248,10 +258,40 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
         : formatExternalBotPrefix(safeBody, extPrefix);
     }
   }
-  const sentId = await bridge.say(safeBody, { targetChatId: draft.originChatId }, draft.replyToImMsgId);
+  let pendingFpId: string | null = null;
+  if (draft.followUp) {
+    pendingFpId = `fp_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    bridge.pendingFollowUps.set(pendingFpId, {
+      id: pendingFpId,
+      chatId: draft.originChatId,
+      chatName: draft.originChatName || draft.originChatId,
+      chatType: draft.originChatType,
+      askMsgId: '',
+      targetUserId: draft.followUp.targetUserId,
+      targetName: draft.followUp.targetName,
+      botId: draft.followUp.botId,
+      botName: draft.followUp.botName,
+      threadId: draft.followUp.threadId,
+      isGroup: draft.followUp.isGroup,
+      question: text,
+      expiresAt: bridge.now() + 30 * 60_000,
+    });
+  }
+  const sentId = await bridge.say(
+    safeBody,
+    { targetChatId: draft.originChatId },
+    draft.replyToImMsgId,
+    null,
+    draft.mentions?.length ? { mentions: draft.mentions } : {},
+  );
   if (!sentId) {
+    if (pendingFpId) bridge.pendingFollowUps.delete(pendingFpId);
     await bridge.say(`❌ 发回「${draft.originChatName || draft.originChatId}」失败，请检查通道连接。`);
     return null;
+  }
+  if (pendingFpId) {
+    const fp = bridge.pendingFollowUps.get(pendingFpId);
+    if (fp) fp.askMsgId = sentId;
   }
   bridge.recordOutboundToContext(draft.originChatId, {
     id: sentId,
@@ -282,6 +322,11 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     bridge.lastPrivateDraftId = null;
   }
   bridge.saveState();
-  await bridge.say(`✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特与安全脱敏处理）。`);
+  const awaitingFollowUp = Boolean(pendingFpId && bridge.pendingFollowUps.has(pendingFpId));
+  await bridge.say(
+    draft.followUp
+      ? `✅ 已向「${draft.originChatName || draft.originChatId}」发送追问${awaitingFollowUp ? `（将等待 **${draft.followUp.targetName}** 回复后自动继续分析）` : '。'}`
+      : `✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特与安全脱敏处理）。`,
+  );
   return sentId;
 }
