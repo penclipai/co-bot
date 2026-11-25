@@ -1,36 +1,19 @@
 {
   "openmausbot": {
     "url": "http://127.0.0.1:8799",
-    "token": "",
-    "autoStart": true,
-    "syncChiefIdentity": true
+    "token": ""
   },
   "channel": {
     "use": "sim",
     "options": {}
   },
-  "web": {
-    "host": "127.0.0.1",
-    "port": 8787
-  },
   "selfChat": {
-    "trigger": "@bot",
-    "botName": "co-bot",
-    "quietHours": {
-      "enabled": false,
-      "start": "22:00",
-      "end": "08:30"
-    }
+    "trigger": "@bot"
   },
   "chats": {
     "mode": "owner_everywhere",
-    "externalReplyMode": "inline",
-    "externalBotPrefix": "🤖 ",
-    "allowChatIds": [],
-    "denyChatIds": [],
     "collaborators": []
   },
   "projects": [],
-  "sharedContextDir": "",
-  "dataDir": "./data"
+  "sharedContextDir": ""
 }
