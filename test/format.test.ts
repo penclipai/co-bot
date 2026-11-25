@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
 import { promisify } from 'node:util';
-import { clip, plain, hardBreaks, mdClip, mdSplit, fileSafe, pruneExpiredFiles, safeAttachmentName, writeJsonAtomic } from '../src/format.ts';
+import { clip, plain, hardBreaks, mdClip, mdSplit, fileSafe, pruneExpiredFiles, safeAttachmentName, stripSingleLineLeadingBold, writeJsonAtomic } from '../src/format.ts';
 import { loadConfig, APP_ROOT } from '../src/config.ts';
 import { inQuietHours, OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import { formatCardPrompt, parseChoiceIndex } from '../src/openmausbot/cards.ts';
@@ -449,4 +449,11 @@ test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix 
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('stripSingleLineLeadingBold strips leading ** only on single-line messages', () => {
+  assert.equal(stripSingleLineLeadingBold('**📊 标题** 内容'), '📊 标题 内容');
+  assert.equal(stripSingleLineLeadingBold('**结论**：OK'), '结论：OK');
+  assert.equal(stripSingleLineLeadingBold('**🟢 co-bot 在线**\n- 列表项'), '**🟢 co-bot 在线**\n- 列表项');
+  assert.equal(stripSingleLineLeadingBold('🤖 **[co-bot]** 收到'), '🤖 **[co-bot]** 收到');
 });

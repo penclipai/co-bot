@@ -63,6 +63,14 @@ export function plain(text: unknown): string {
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/** 单行消息若以 `**...**` 开头，脱去行首加粗包裹（单行在 IM 中不会按多行 Markdown 块触发渲染）。 */
+export function stripSingleLineLeadingBold(text: unknown): string {
+  const s = String(text ?? '').replace(/\r\n/g, '\n');
+  const trimmed = s.trim();
+  if (!trimmed || trimmed.includes('\n')) return s;
+  return s.replace(/^(\s*)\*\*([^*\n]+?)\*\*([\s\S]*)$/, '$1$2$3');
+}
+
 /** 渲染 Markdown 的 IM：在连续正文的换行前补两个空格，防止不同客户端把单换行吞成空格。 */
 export function hardBreaks(md: unknown): string {
   const lines = String(md ?? '').replace(/\r\n/g, '\n').split('\n');

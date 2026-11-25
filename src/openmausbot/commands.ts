@@ -683,7 +683,7 @@ export async function handleCommand(
         const { fresh, top } = await bridge.collectBotTasks(activeTarget);
         const freshName = showBotName(bridge, fresh.id, fresh.name, isGroup);
         if (!top.length) {
-          await sensSink.say(`**${freshName}** 暂无可切换的历史会话，可发 \`${cmdTarget} new\` 创建新会话。`);
+          await sensSink.say(`${freshName} 暂无可切换的历史会话，可发 \`${cmdTarget} new\` 创建新会话。`);
           return true;
         }
         const activeTid = activeTarget.threadId || fresh.threadId;

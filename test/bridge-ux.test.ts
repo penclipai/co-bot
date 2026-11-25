@@ -562,6 +562,21 @@ test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/
       await until(() => sent.length > beforeLen);
       assertFirstTwoLinesMarkdown(sent.at(-1)!.text, cmd);
     }
+
+    await bridge.say('**单行标题** 已完成');
+    assert.equal(sent.at(-1)!.text, '单行标题 已完成', '单行出站消息不得以 ** 开头');
+
+    await transport.emitUser('@Dev task');
+    await until(() => sent.at(-1)!.text.includes('暂无可切换的历史会话'));
+    assert.equal(sent.at(-1)!.text.startsWith('**'), false, '单行 @Dev task 不得以 ** 开头');
+
+    bridge.externalChatMeta.set('grp_ops', { id: 'grp_ops', type: 'group', name: '架构群' });
+    bridge.setChatThread('grp_ops', { id: 'b1', name: 'MausBot', threadId: 't1' });
+    await transport.emitUser('@bot status 架构群');
+    await until(() => sent.at(-1)!.text.includes('📊 架构群'));
+    const singleStatus = sent.at(-1)!.text;
+    assert.equal(singleStatus.includes('\n'), false);
+    assert.equal(singleStatus.startsWith('**'), false, '单行 @bot status <群> 不得以 ** 开头');
   } finally {
     await bridge.stop();
     await omb.close();

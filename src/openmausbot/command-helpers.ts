@@ -76,16 +76,20 @@ export async function replyContextUsage(
   const summary = formatContextSummary(task);
   const compactNote = compactCmd && summary
     ? (summary.pct >= 80
-      ? `\n建议回复 \`${compactCmd}\` 压缩上下文`
-      : (summary.pct >= 50 ? `\n可回复 \`${compactCmd}\` 压缩上下文` : ''))
+      ? `\n- 建议回复 \`${compactCmd}\` 压缩上下文`
+      : (summary.pct >= 50 ? `\n- 可回复 \`${compactCmd}\` 压缩上下文` : ''))
     : '';
+  const hasBanner = Boolean(sensSink.banner);
   if (!summary) {
     const extHint = isExternal && compactCmd ? `（可回复 \`${compactCmd}\` 压缩）` : '';
-    await sensSink.say(`**📊 ${title}** ${emptyHint}${extHint}`);
+    await sensSink.say(hasBanner ? `- **📊 ${title}** ${emptyHint}${extHint}` : `📊 ${title} ${emptyHint}${extHint}`);
     return;
   }
+  const usageLine = compactNote || hasBanner
+    ? `${!compactNote && hasBanner ? '- ' : ''}**📊 ${title}** 上下文：${summary.line}${compactNote}`
+    : `📊 ${title} 上下文：${summary.line}`;
   await sensSink.say(
-    `**📊 ${title}** 上下文：${summary.line}${compactNote}`,
+    usageLine,
     { botId: bot.id, botName: bot.name, threadId },
   );
 }

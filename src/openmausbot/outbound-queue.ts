@@ -2,7 +2,7 @@
  * OpenMausBotBridge 按会话串行出站队列、断线消息缓冲重放与失败重试发送器。
  */
 import { scanAndRedactOutbound } from '../core/security.ts';
-import { hardBreaks, plain } from '../format.ts';
+import { hardBreaks, plain, stripSingleLineLeadingBold } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, OutboundMention } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { rememberBounded, trimMapCap } from './mentions.ts';
@@ -98,7 +98,7 @@ export async function sendBridgeText(
   }
   const caps = bridge.channelCaps();
   const useMarkdown = Boolean(bridge.markdown && caps?.markdown !== false);
-  const formatted = bridge.outPrefix + (useMarkdown ? hardBreaks(text) : plain(text));
+  const formatted = bridge.outPrefix + (useMarkdown ? hardBreaks(stripSingleLineLeadingBold(text)) : plain(text));
   const scan = extra?.skipSecurityScan
     ? { text: formatted, redacted: false, hits: [], totalHits: 0 }
     : scanAndRedactOutbound(formatted);
