@@ -42,13 +42,13 @@ flowchart TB
 
 ## 四、演进现状与下一步方向
 
-### 已交付里程碑（`v0.5` ~ `v0.7`，详见 [使用指南](./usage.md)）
+### 已交付里程碑（`v0.5` ~ `v0.7+`，详见 [使用指南](./usage.md)）
 
 | 版本 | 核心定位 | 关键能力 |
 | --- | --- | --- |
 | `v0.5` | 安全底线与工作区边界 | 出站正文与文本/`.md` 附件凭证脱敏、`🤖 ` 外部标识、`<im-context>` 防注入围栏、`draft_first`、`@bot bind` 目录隔离、`notify` 能力 |
 | `v0.6` | 共享上下文与外部协作者 | `sharedContextDir` 非阻塞 `git pull --ff-only` 目录指针；2 档外部白名单只读护栏（`confirm_in_self` / `auto_readonly`） |
-| `v0.7` | 极简 C2C 互通与工程护栏 | `[cobot:req]` / `[cobot:res]` 2 态防回环委托（对端离线自然转人工）；ESLint（含 1000 行上限）+ 超大模块拆分 + CI 校验 |
+| `v0.7` | C2C 互通、动态上下文与插件扩展 | `[cobot:req]`/`[cobot:res]` 2 态委托；`plugins/` 热插拔扩展；统一转发摘要+`/api/context/history` 按需翻页、`@同事` 追问确认与一次性私密回流；完整 [IM 接入协议规范](./IM_PROTOCOL.md) 与 ESLint 千行护栏 |
 
 ### 下一阶段方向（`v0.8+`，按真机与团队实测反馈驱动）
 

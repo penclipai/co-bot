@@ -32,9 +32,9 @@ npm run verify              # 一键全量校验：tsc 类型检查 + ESLint + �
 
 ## 接入真实 IM
 
-1. 复制 [im-plugin.example.ts](./im-plugin.example.ts) 为根目录 `im-plugin.ts`（已忽略提交；亦可使用 `.js`/`.mjs`），实现 `start`、`send` 及可选媒体/历史/通知钩子。
+1. 阅读 [内网 IM 通道接入协议规范](./docs/IM_PROTOCOL.md)，复制 [im-plugin.example.ts](./im-plugin.example.ts) 为根目录 `im-plugin.ts`（已忽略提交；亦可使用 `.js`/`.mjs` 或放到 `plugins/`），实现 `start`、`send`（含 `mentions`）及可选媒体/`getMessage`/`getHistory`/`notify` 钩子。
 2. 在 `config.json` 配置 `"channel": { "use": "./im-plugin.ts", "options": { "selfId": "<用户ID>", "selfChatId": "" } }`。
-3. 运行契约与收发验证：`npm run channel:test -- --dry`。
+3. 运行契约与收发验证：`npm run channel:test -- --dry` 与 `--wait 15 --send "hello" --check-file`。
 
 ## 项目结构
 
@@ -45,7 +45,7 @@ src/plugins/         内置插件装配层（web、sim、channel-loader、im-con
 src/im/ & src/web/   Web 模拟器传输层与本地 HTTP 服务（127.0.0.1）
 scripts/             CLI 工具链（daemon、service、omb、check、pair、channel-test）
 public/              /sim 模拟器、/debug 诊断台与 Markdown 预览静态页
-docs/                使用指南（usage.md）、接入排障（TROUBLESHOOTING.md）与演进路线（ROADMAP.md）
+docs/                使用指南（usage.md）、IM 协议规范（IM_PROTOCOL.md）、排障（TROUBLESHOOTING.md）与路线（ROADMAP.md）
 test/                Node 内置测试套件与共享 Mock 辅助模块
 config.example.json  最小化示例配置
 im-plugin.example.ts 通用 IM 通道插件模板（TypeScript）
@@ -54,5 +54,6 @@ im-plugin.example.ts 通用 IM 通道插件模板（TypeScript）
 ## 相关文档
 
 - [使用指南（运维命令、交互用法、指令速查、配置与诊断台）](./docs/usage.md)
+- [内网 / 第三方 IM 通道接入协议规范（转发、`@` 提醒、历史穿透与安全基线）](./docs/IM_PROTOCOL.md)
 - [真实 IM 接入验收、常见排障与多用户隔离部署](./docs/TROUBLESHOOTING.md)
 - [架构演进路线图与克制红线（`v0.5` ~ `v0.7`）](./docs/ROADMAP.md)
