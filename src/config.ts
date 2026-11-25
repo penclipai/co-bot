@@ -81,6 +81,9 @@ export const defaults: AppConfig = {
   projects: [],
   sharedContextDir: '',
   sharedContextPullIntervalMs: 300_000,
+  pluginsDir: './plugins',
+  pluginsStrict: false,
+  plugins: {},
   dataDir: './data',
 };
 
@@ -261,6 +264,27 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
       errors.push(`sharedContextPullIntervalMs 必须为非负数字，当前为「${String(ms)}」`);
     }
   }
+  if (raw.pluginsDir !== undefined && typeof raw.pluginsDir !== 'string') {
+    errors.push('pluginsDir 必须为字符串');
+  }
+  if (raw.pluginsStrict !== undefined && typeof raw.pluginsStrict !== 'boolean') {
+    errors.push('pluginsStrict 必须为布尔值');
+  }
+  if (raw.plugins !== undefined) {
+    const pluginsObj = asObj(raw.plugins);
+    if (!pluginsObj) {
+      errors.push('plugins 必须为对象（以插件名为键）');
+    } else {
+      for (const [pName, pVal] of Object.entries(pluginsObj)) {
+        const rec = asObj(pVal);
+        if (typeof pVal !== 'boolean' && !rec) {
+          errors.push(`plugins.${pName} 必须为布尔值或配置对象`);
+        } else if (rec && rec.enabled !== undefined && typeof rec.enabled !== 'boolean') {
+          errors.push(`plugins.${pName}.enabled 必须为布尔值`);
+        }
+      }
+    }
+  }
 
   return { ok: errors.length === 0, errors, warnings };
 }
@@ -325,6 +349,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
     sharedContextPullIntervalMs: raw.sharedContextPullIntervalMs !== undefined
       ? Math.max(0, Number(raw.sharedContextPullIntervalMs) || 0)
       : defaults.sharedContextPullIntervalMs,
+    pluginsDir: raw.pluginsDir !== undefined
+      ? (String(raw.pluginsDir).trim() ? path.resolve(base, String(raw.pluginsDir).trim()) : '')
+      : path.resolve(base, defaults.pluginsDir),
+    pluginsStrict: raw.pluginsStrict !== undefined ? Boolean(raw.pluginsStrict) : defaults.pluginsStrict,
+    plugins: (asObj(raw.plugins) ?? { ...defaults.plugins }) as AppConfig['plugins'],
     dataDir: typeof raw.dataDir === 'string' ? raw.dataDir : defaults.dataDir,
   };
 

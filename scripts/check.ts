@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { APP_ROOT, loadConfig, validateConfig } from '../src/config.ts';
+import { discoverPlugins } from '../src/core/plugin-loader.ts';
 import { OpenMausBotClient } from '../src/openmausbot/client.ts';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.ts';
 import { probeOpenMausBot, type ProbeOpenMausBotResult } from '../src/plugins/openmausbot.ts';
@@ -136,9 +137,20 @@ if (probe) {
   }
 }
 
+if (cfg.pluginsDir) {
+  const disc = await discoverPlugins(cfg.pluginsDir, { logger: { warn: () => {} } });
+  if (disc.plugins.length || disc.errors.length) {
+    console.log(`✓ plugins 目录（${disc.dir}）：发现 ${disc.plugins.length} 个插件（通道 ${disc.channels.size} / 扩展 ${disc.extensions.length}）`);
+  }
+  for (const err of disc.errors) {
+    console.error(`✗ plugins 加载异常（${err.source}）：${err.error}`);
+    if (cfg.pluginsStrict) fails++;
+  }
+}
+
 const chanSpec = resolveChannelSpec(cfg);
 const webBase = `http://${probeHostOf(cfg.web.host)}:${cfg.web.port}`;
-if (chanSpec.kind === 'external') {
+if (chanSpec.kind === 'external' || chanSpec.kind === 'auto') {
   const res = await runChannelContractTest(cfg, { dry: true, log: () => {} });
   if (res.ok) {
     console.log(`✓ 通道插件「${res.channelName}」契约检查通过（诊断台 ${webBase}/debug）`);

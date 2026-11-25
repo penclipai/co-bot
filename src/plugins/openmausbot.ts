@@ -1,9 +1,10 @@
 import { ensureOpenMausBot, isLoopbackUrl } from '../../scripts/omb.ts';
 import { clipSummary } from '../core/channel-contract.ts';
+import type { CommandRegistry } from '../core/extensions.ts';
 import { OpenMausBotBridge } from '../openmausbot/bridge.ts';
 import { OpenMausBotClient } from '../openmausbot/client.ts';
 import type { BridgeTransport, ImContextService, OmbAuthSession, OmbBot, OmbGroup, OmbHealth, OmbHttpError } from '../openmausbot/types.ts';
-import type { KernelPlugin } from '../types.ts';
+import type { HooksExtensionService, KernelPlugin } from '../types.ts';
 
 export interface ProbeOpenMausBotResult {
   health: OmbHealth;
@@ -65,7 +66,7 @@ export const openmausbotPlugin: KernelPlugin<OpenMausBotPluginOptions> = {
   name: 'openmausbot',
   kind: 'agent',
   version: '1.0.0',
-  inject: ['channel'],
+  inject: { required: ['channel'], optional: ['imContext', 'commands', 'hooks'] },
   provides: ['openmausbot', 'bridge'],
   async apply(ctx, opts = {}) {
     const cfg = ctx.config;
@@ -95,12 +96,16 @@ export const openmausbotPlugin: KernelPlugin<OpenMausBotPluginOptions> = {
     }
 
     const imContext = ctx.has('imContext') ? ctx.get<ImContextService>('imContext') : null;
+    const commandRegistry = ctx.has('commands') ? ctx.get<CommandRegistry>('commands') : null;
+    const hooksSvc = ctx.has('hooks') ? ctx.get<HooksExtensionService>('hooks') : null;
     const brandName = String(cfg.selfChat?.botName || 'co-bot').trim() || 'co-bot';
     const bridge = new OpenMausBotBridge({
       client,
       transport: channel,
       dataDir: cfg.dataDir,
       imContext,
+      commandRegistry,
+      ...(hooksSvc ? { transcribeAudio: hooksSvc.transcribeAudio } : {}),
       chats: cfg.chats,
       projects: cfg.projects,
       sharedContextDir: cfg.sharedContextDir,

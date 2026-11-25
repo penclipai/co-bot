@@ -102,7 +102,7 @@ export function botCommandTarget(bridge: OpenMausBotBridge, botId?: string, botN
 export function buildHelpText(bridge: OpenMausBotBridge): string {
   const t = bridge.trigger;
   const brand = bridge.botName || 'co-bot';
-  return [
+  const lines = [
     `🤖 **${brand} 常用指南**`,
     `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
     `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
@@ -110,7 +110,13 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
     `- \`${t} bind [项目|unbind]\` / \`delegate <会话> [proj:<项目>] <问题>\`：项目目录绑定与 C2C 协作委托`,
     `- \`${t} new [话题]\` / \`task [序号]\` / \`compact [群]\`：新建、切换最近会话与上下文压缩`,
     `- \`${t} status [群]\` / \`stop\`：团队诊断、Bot 与上下文状态或停止任务（卡片回 \`ok/always/no/skip\`）`,
-  ].join('\n');
+  ];
+  const extCmds = bridge.commandRegistry?.list() ?? [];
+  if (extCmds.length) {
+    const extList = extCmds.map((c) => `\`${t} ${c.name}\`${c.description ? `（${c.description}）` : ''}`).join('、');
+    lines.push(`- 扩展指令：${extList}`);
+  }
+  return lines.join('\n');
 }
 
 /** 构造命令结果投递器，外部群敏感操作结果自动路由回自聊并携带来源标题。 */

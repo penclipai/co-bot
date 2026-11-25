@@ -112,6 +112,10 @@ export interface ProjectRef {
   path: string;
 }
 
+export type PluginInjectSpec = string | string[] | { required?: string[]; optional?: string[] };
+
+export type PluginConfigEntry = boolean | ({ enabled?: boolean } & Record<string, unknown>);
+
 export interface AppConfig {
   openmausbot: OpenMausBotConfig;
   channel: ChannelConfig;
@@ -121,6 +125,9 @@ export interface AppConfig {
   projects: ProjectConfig[];
   sharedContextDir: string;
   sharedContextPullIntervalMs: number;
+  pluginsDir: string;
+  pluginsStrict: boolean;
+  plugins: Record<string, PluginConfigEntry>;
   dataDir: string;
 }
 
@@ -267,10 +274,11 @@ export interface ChannelPluginSpec<TOptions extends Record<string, unknown> = Re
   kind?: string;
   version?: string;
   provides?: string[];
-  inject?: string[];
+  inject?: PluginInjectSpec;
   capabilities?: ChannelCapabilityInput;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
+  source?: string;
   create?: (options: TOptions, ctx: KernelContext) => ChannelAdapter;
   apply?: (ctx: KernelContext, options: TOptions) => Promise<(() => unknown) | void> | (() => unknown) | void;
 }
@@ -280,8 +288,10 @@ export interface KernelPlugin<TOptions = Record<string, unknown>> {
   kind?: string;
   version?: string;
   provides?: string | string[];
-  inject?: string | string[];
+  inject?: PluginInjectSpec;
   capabilities?: ChannelCapabilityInput;
+  source?: string;
+  isolated?: boolean;
   apply: (ctx: KernelContext, options: TOptions) => Promise<(() => unknown) | void> | (() => unknown) | void;
 }
 
@@ -310,7 +320,59 @@ export interface KernelPluginStatus {
   active: boolean;
   provides: string[];
   inject: string[];
+  optionalInject: string[];
+  source: string;
+  error: string | null;
+  reloadable: boolean;
   status: unknown;
+}
+
+export interface CustomRedactorRule {
+  name: string;
+  pattern: RegExp;
+  replace?: string | ((match: string, ...args: string[]) => string);
+}
+
+export interface SecurityExtensionService {
+  registerRedactor: (rule: CustomRedactorRule) => () => void;
+  listRedactors: () => string[];
+}
+
+export interface PluginCommandContext {
+  args: string;
+  raw: string;
+  isExternal: boolean;
+  chatId: string;
+  chatType: ChatType;
+  chatName: string;
+  targetBot: { id: string; name: string; threadId: string; isGroup?: boolean };
+  reply: (text: string) => Promise<string | null>;
+  replySensitive: (text: string) => Promise<string | null>;
+}
+
+export interface PluginCommandDef {
+  name: string;
+  aliases?: string[];
+  description?: string;
+  ownerOnly?: boolean;
+  handler: (cmdCtx: PluginCommandContext) => Promise<void> | void;
+}
+
+export interface CommandRegistryService {
+  register: (def: PluginCommandDef) => () => void;
+  list: () => Array<{ name: string; aliases: string[]; description: string }>;
+}
+
+export type AudioTranscriberFn = (filePath: string, att: InboundAttachment) => Promise<string | null | undefined>;
+
+export interface HooksExtensionService {
+  registerAudioTranscriber: (fn: AudioTranscriberFn) => () => void;
+  transcribeAudio: AudioTranscriberFn;
+}
+
+export interface PluginManagerService {
+  reloadPlugin: (name: string) => Promise<KernelPluginStatus>;
+  listReloadable: () => string[];
 }
 
 export interface KernelLike {

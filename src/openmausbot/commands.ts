@@ -829,5 +829,30 @@ export async function handleCommand(
     return true;
   }
 
+  const extCmd = bridge.commandRegistry?.match(raw);
+  if (extCmd) {
+    try {
+      await extCmd.def.handler({
+        args: extCmd.args,
+        raw,
+        isExternal,
+        chatId: extCtx?.originChatId || bridge.selfChat,
+        chatType: extCtx?.chatType ?? 'self',
+        chatName: extCtx?.chatName ?? '',
+        targetBot: {
+          id: activeTarget.id,
+          name: activeTarget.name,
+          threadId: activeTarget.threadId,
+          ...(isGroup ? { isGroup: true } : {}),
+        },
+        reply: (text) => replySink.say(text),
+        replySensitive: (text) => sensSink.say(text),
+      });
+    } catch (e) {
+      await sensSink.say(`❌ 指令「${extCmd.def.name}」执行失败：${formatOmbError(e)}`);
+    }
+    return true;
+  }
+
   return false;
 }

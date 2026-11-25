@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_ROOT, loadConfig } from '../src/config.ts';
 import { validateChannelAdapter, validateInboundEvent } from '../src/core/channel-contract.ts';
-import { Kernel } from '../src/core/kernel.ts';
+import { Kernel, parseInject } from '../src/core/kernel.ts';
 import { loadChannelPlugin } from '../src/plugins/channel-loader.ts';
 import type { AppConfig, ChannelAdapter, ChannelCapabilities, InboundEvent, KernelPlugin, RawConfig } from '../src/types.ts';
 import { WebServer } from '../src/web/server.ts';
@@ -122,7 +122,8 @@ export async function runChannelContractTest(
   }
 
   const kernel = new Kernel({ config: appCfg, logger: { warn: () => {}, error: () => {} } });
-  const needsWeb = Array.isArray(loaded.plugin.inject) && loaded.plugin.inject.includes('web');
+  const parsedInject = parseInject(loaded.plugin.inject);
+  const needsWeb = parsedInject.required.includes('web') || parsedInject.optional.includes('web');
   if (needsWeb) {
     kernel.use(createContractWebPlugin(appCfg, { dry }));
   }

@@ -2,6 +2,7 @@
  * OpenMausBot 客户端、桥接状态机、路由与卡片协同类型定义。
  */
 import type { ChatContextStore } from '../core/chat-context.ts';
+import type { CommandRegistry } from '../core/extensions.ts';
 import type {
   ChannelAction,
   ChannelCapabilities,
@@ -575,6 +576,7 @@ export interface BridgeOptions {
   sharedContextPullIntervalMs?: number;
   execGit?: ((dir: string, timeoutMs: number) => Promise<string>) | null;
   transcribeAudio?: ((filePath: string, att: InboundAttachment) => Promise<string | null | undefined>) | null;
+  commandRegistry?: CommandRegistry | null;
   now?: () => number;
 }
 

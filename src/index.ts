@@ -4,12 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { rotateLogIfNeeded } from '../scripts/omb.ts';
 import { loadConfig, validateConfig } from './config.ts';
 import { Kernel } from './core/kernel.ts';
+import { createPluginManager, discoverPlugins, resolvePluginConfig } from './core/plugin-loader.ts';
 import { loadChannelPlugin } from './plugins/channel-loader.ts';
+import { extensionsPlugin } from './plugins/extensions.ts';
 import { imContextPlugin } from './plugins/im-context.ts';
 import { inspectorPlugin } from './plugins/inspector.ts';
 import { openmausbotPlugin, type OpenMausBotService } from './plugins/openmausbot.ts';
 import { webPlugin } from './plugins/web.ts';
-import type { AppConfig } from './types.ts';
+import type { AppConfig, KernelPlugin } from './types.ts';
 
 const MANAGED_LOG_FILES = ['cobot.log', 'cobot.err.log', 'openmausbot.log', 'openmausbot.err.log'];
 const LOG_ROTATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -20,18 +22,57 @@ function rotateManagedLogs(dataDir: string): void {
   }
 }
 
-/** 装配 co-bot 插件内核（web -> IM channel -> openmausbot -> inspector）。 */
+/** 装配 co-bot 插件内核（extensions -> web -> IM channel -> im-context -> openmausbot -> plugin-manager -> inspector -> plugins/ 扩展）。 */
 export async function createApp(
   cfg: AppConfig,
   { ensureOmb = false, channelOverride = '' }: { ensureOmb?: boolean; channelOverride?: string } = {},
 ): Promise<{ kernel: Kernel; channelName: string }> {
   const kernel = new Kernel({ config: cfg });
-  const resolved = await loadChannelPlugin(cfg, { overrideUse: channelOverride });
+  const discovered = cfg.pluginsDir ? await discoverPlugins(cfg.pluginsDir) : null;
+  if (cfg.pluginsStrict && discovered?.errors.length) {
+    const details = discovered.errors.map((e) => `${e.source}: ${e.error}`).join('；');
+    throw new Error(`plugins 目录加载失败：${details}`);
+  }
+
+  const resolved = await loadChannelPlugin(cfg, { overrideUse: channelOverride, discovered });
+  const pluginManagerPlugin: KernelPlugin = {
+    name: 'plugin-manager',
+    kind: 'core',
+    version: '1.0.0',
+    source: 'builtin',
+    provides: ['pluginManager'],
+    apply(ctx) {
+      ctx.provide('pluginManager', createPluginManager(kernel, cfg));
+    },
+  };
+
+  kernel.use(extensionsPlugin);
   kernel.use(webPlugin);
   kernel.use(resolved.plugin, resolved.options);
   kernel.use(imContextPlugin);
   kernel.use(openmausbotPlugin, { ensureOmb });
+  kernel.use(pluginManagerPlugin);
   kernel.use(inspectorPlugin);
+
+  const builtinNames = new Set(kernel.entries.map((e) => e.name));
+  if (discovered) {
+    for (const errRec of discovered.errors) {
+      kernel.recordLoadError(errRec);
+    }
+    for (const rec of discovered.extensions) {
+      if (builtinNames.has(rec.name)) {
+        throw new Error(`外部插件「${rec.name}」（${rec.source}）与内置插件重名`);
+      }
+      const pCfg = resolvePluginConfig(cfg, rec.name);
+      if (!pCfg.enabled) continue;
+      kernel.use({
+        ...rec.plugin,
+        source: rec.source,
+        isolated: !cfg.pluginsStrict,
+      }, pCfg.options);
+    }
+  }
+
   return { kernel, channelName: resolved.resolvedName };
 }
 

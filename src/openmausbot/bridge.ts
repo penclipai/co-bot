@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { defaults } from '../config.ts';
 import { ChatContextStore } from '../core/chat-context.ts';
+import type { CommandRegistry } from '../core/extensions.ts';
 import { normalizeCollaborators } from '../core/inbound-policy.ts';
 import { normalizeProjectsConfig } from '../core/projects.ts';
 import { hasBotBadgePrefix } from '../core/security.ts';
@@ -97,6 +98,7 @@ export class OpenMausBotBridge {
   outPrefix: string;
   imContext: ImContextService | null;
   transcribeAudio: ((filePath: string, att: InboundAttachment) => Promise<string | null | undefined>) | null;
+  commandRegistry: CommandRegistry | null;
   now: () => number;
   chats: ChatsConfig;
   projects: ProjectConfig[];
@@ -214,6 +216,7 @@ export class OpenMausBotBridge {
     sharedContextPullIntervalMs = 300_000,
     execGit = null,
     transcribeAudio = null,
+    commandRegistry = null,
     now = () => Date.now(),
   }: BridgeOptions) {
     this.client = client;
@@ -252,6 +255,7 @@ export class OpenMausBotBridge {
     this.outPrefix = outPrefix;
     this.imContext = imContext;
     this.transcribeAudio = transcribeAudio;
+    this.commandRegistry = commandRegistry;
     this.now = now;
     this.chats = {
       ...defaults.chats,

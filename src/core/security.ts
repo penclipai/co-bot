@@ -4,6 +4,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import type { CustomRedactorRule } from '../types.ts';
+
 export interface RedactionHit {
   type: string;
   count: number;
@@ -28,6 +30,39 @@ interface SecretRule {
   type: string;
   re: RegExp;
   replace: (full: string, ...args: string[]) => string;
+}
+
+const customRedactors = new Map<string, SecretRule>();
+
+function ensureGlobalRegex(pattern: RegExp): RegExp {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  return new RegExp(pattern.source, flags);
+}
+
+/** 注册自定义出站脱敏规则，返回幂等注销函数（供安全扩展点与热重载回收）。 */
+export function registerCustomRedactor(rule: CustomRedactorRule): () => void {
+  const type = String(rule?.name || '').trim();
+  if (!type) throw new Error('自定义脱敏规则必须提供非空 name');
+  if (!(rule?.pattern instanceof RegExp)) throw new Error(`自定义脱敏规则「${type}」必须提供 RegExp pattern`);
+  const re = ensureGlobalRegex(rule.pattern);
+  const replaceFn = typeof rule.replace === 'function'
+    ? rule.replace
+    : (() => (typeof rule.replace === 'string' && rule.replace ? rule.replace : `[已脱敏:${type}]`));
+
+  const entry: SecretRule = { type, re, replace: replaceFn };
+  const key = `${type}#${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  customRedactors.set(key, entry);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    customRedactors.delete(key);
+  };
+}
+
+/** 列出当前生效的自定义脱敏规则名称。 */
+export function listCustomRedactors(): string[] {
+  return [...new Set([...customRedactors.values()].map((r) => r.type))];
 }
 
 const TEXT_FILE_EXTS = new Set([
@@ -85,8 +120,12 @@ export function scanAndRedactOutbound(text: unknown): RedactionScanResult {
 
   const hits: RedactionHit[] = [];
   let totalHits = 0;
-  for (const rule of SECRET_RULES) {
+  const activeRules = customRedactors.size > 0
+    ? [...SECRET_RULES, ...customRedactors.values()]
+    : SECRET_RULES;
+  for (const rule of activeRules) {
     let count = 0;
+    rule.re.lastIndex = 0;
     const next = out.replace(rule.re, (match: string, ...args: string[]) => {
       const replacement = rule.replace(match, ...args);
       if (replacement !== match) count += 1;

@@ -92,7 +92,7 @@
       <h2>已挂载插件（Kernel）</h2>
       <div class="tbl"><table>
         <thead>
-          <tr><th>插件</th><th>类别</th><th>状态</th><th>提供服务</th><th>依赖</th><th>详情</th></tr>
+          <tr><th>插件</th><th>类别</th><th>状态</th><th>来源</th><th>提供服务</th><th>依赖</th><th>详情</th><th>操作</th></tr>
         </thead>
         <tbody id="pluginBody"></tbody>
       </table></div>
@@ -127,6 +127,7 @@
             <option value="outbound_replayed">outbound_replayed</option>
             <option value="outbound_failed">outbound_failed</option>
             <option value="state_corrupt">state_corrupt</option>
+            <option value="plugin_reloaded">plugin_reloaded</option>
             <option value="state">state</option>
           </select></label>
         </div>
@@ -302,16 +303,47 @@
         const td2 = document.createElement('td');
         td2.textContent = p.kind;
         const td3 = document.createElement('td');
-        td3.appendChild(badge(p.active ? 'active' : 'inactive', p.active ? 'ok' : 'off'));
+        if (p.error) {
+          td3.appendChild(badge('error', 'err'));
+        } else {
+          td3.appendChild(badge(p.active ? 'active' : 'inactive', p.active ? 'ok' : 'off'));
+        }
+        const tdSrc = document.createElement('td');
+        const srcCode = document.createElement('code');
+        srcCode.textContent = p.source && p.source !== 'builtin' ? p.source.split(/[\\/]/).slice(-2).join('/') : 'builtin';
+        tdSrc.appendChild(srcCode);
         const td4 = document.createElement('td');
         td4.textContent = (p.provides || []).join(', ') || '-';
         const td5 = document.createElement('td');
-        td5.textContent = (p.inject || []).join(', ') || '-';
+        const deps = [...(p.inject || []), ...((p.optionalInject || []).map((x) => `${x}?`))];
+        td5.textContent = deps.join(', ') || '-';
         const td6 = document.createElement('td');
-        const code = document.createElement('code');
-        code.textContent = p.status ? JSON.stringify(p.status) : '-';
-        td6.appendChild(code);
-        tr.append(td1, td2, td3, td4, td5, td6);
+        if (p.error) {
+          const errSpan = document.createElement('code');
+          errSpan.style.color = 'var(--err)';
+          errSpan.textContent = p.error;
+          td6.appendChild(errSpan);
+        } else {
+          const code = document.createElement('code');
+          code.textContent = p.status ? JSON.stringify(p.status) : '-';
+          td6.appendChild(code);
+        }
+        const tdAct = document.createElement('td');
+        if (p.reloadable) {
+          const reloadBtn = document.createElement('button');
+          reloadBtn.type = 'button';
+          reloadBtn.textContent = '重载';
+          reloadBtn.addEventListener('click', () => {
+            reloadBtn.disabled = true;
+            runDebugAction({ action: 'reload_plugin', name: p.name })
+              .catch((err) => { el('updatedAt').textContent = `重载失败：${err.message}`; })
+              .finally(() => { reloadBtn.disabled = false; });
+          });
+          tdAct.appendChild(reloadBtn);
+        } else {
+          tdAct.textContent = '-';
+        }
+        tr.append(td1, td2, td3, tdSrc, td4, td5, td6, tdAct);
         pBody.appendChild(tr);
       }
     }

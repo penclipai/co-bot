@@ -2,7 +2,7 @@ import { clipSummary, normalizeCapabilities } from '../core/channel-contract.ts'
 import { redactSecrets } from '../core/chat-context.ts';
 import type { OpenMausBotBridge } from '../openmausbot/bridge.ts';
 import type { BridgeTransport, ImContextService } from '../openmausbot/types.ts';
-import type { KernelPlugin } from '../types.ts';
+import type { KernelPlugin, PluginManagerService } from '../types.ts';
 import type { WebServer } from '../web/server.ts';
 import type { OpenMausBotService } from './openmausbot.ts';
 
@@ -154,13 +154,26 @@ export const inspectorPlugin: KernelPlugin = {
     });
 
     web.route('POST', '/api/debug/action', async ({ body }) => {
+      const action = String(body?.action || '').trim();
+      if (action === 'reload_plugin') {
+        const mgr = ctx.has('pluginManager') ? ctx.get<PluginManagerService>('pluginManager') : null;
+        if (!mgr) {
+          const err = new Error('当前实例未启用插件热重载管理器') as Error & { status?: number };
+          err.status = 503;
+          throw err;
+        }
+        const name = String(body?.name || '').trim();
+        if (!name) throw new Error('缺少插件名 name');
+        const plugin = await mgr.reloadPlugin(name);
+        return { ok: true, action, name, plugin, plugins: ctx.kernel.status().plugins };
+      }
+
       const bridge = ctx.has('bridge') ? ctx.get<OpenMausBotBridge>('bridge') : null;
       if (!bridge) {
         const err = new Error('bridge 尚未就绪') as Error & { status?: number };
         err.status = 503;
         throw err;
       }
-      const action = String(body?.action || '').trim();
       if (action === 'chat_mute' || action === 'chat_allow') {
         const chatId = String(body?.chatId || '').trim();
         if (!chatId) throw new Error('缺少 chatId');
