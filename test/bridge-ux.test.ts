@@ -508,3 +508,48 @@ test('P2 /sim persistence: WebSimTransport saves and restores history & files ac
     await w2.stop();
   }
 });
+
+test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/ask defaults, and <50% compact hint', async () => {
+  const omb = await startMockOmb([
+    {
+      id: 'b1',
+      name: 'MausBot',
+      threadId: 't1',
+      chiefOfStaff: true,
+      approvalMode: 'ask',
+      tasks: [
+        { threadId: 't1', title: '日常任务', updatedAt: 200, usage: { turns: 3, context: { tokens: 20_000, window: 100_000 } } },
+      ],
+    },
+    {
+      id: 'b2',
+      name: 'Dev',
+      threadId: 't2',
+      busy: true,
+      activity: 'busy',
+      approvalMode: 'auto',
+    },
+  ]);
+
+  const sent: SentImItem[] = [];
+  const transport = makeIm(sent);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-status-ux-'));
+  const bridge = new OpenMausBotBridge({ client: new OpenMausBotClient({ baseUrl: omb.baseUrl }), transport, dataDir });
+
+  try {
+    await bridge.start();
+    await transport.emitUser('@bot status');
+    await until(() => sent.some((m) => m.text.includes('协作团队')));
+    const statusText = sent.findLast((m) => m.text.includes('协作团队'))!.text;
+
+    assert.match(statusText, /^🟢 \*\*co-bot 在线\*\*/);
+    assert.match(statusText, /📊 \*\*co-bot 当前会话\*\* 上下文：20%（20K \/ 100K · 3 轮） `[█░]+`/);
+    assert.match(statusText, /\*\*Dev\*\* · 运行中 · `deepseek\/deepseek-flash` · 审批:auto/);
+    for (const noise of ['隔离模式', '本地免配对', 'Doctor', '引擎 v', '协作 Bot：', '活跃轮次：0', '审批:ask', '运行中 · busy', '@bot compact']) {
+      assert.equal(statusText.includes(noise), false, `精简后的 status 不应包含冗余文案「${noise}」`);
+    }
+  } finally {
+    await bridge.stop();
+    await omb.close();
+  }
+});

@@ -96,7 +96,9 @@ test('code review fixes: respond retry preserves pendingCard, picker mutual excl
     };
     await transport.emitUser('@Dev status');
     await until(() => sent.some((m) => m.text.includes('90%')));
-    assert.equal(actionsLog.at(-1)?.[0]?.text, '@Dev compact');
+    const devStatus = sent.findLast((m) => m.text.includes('90%'))!;
+    assert.match(devStatus.text, /@Dev compact/);
+    assert.equal(actionsLog.length, 0);
 
     const prevCount = sent.length;
     omb.setScenario(({ reqMsg, threadId, messages, jobs }) => {

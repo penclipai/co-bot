@@ -316,8 +316,6 @@ export function createTurnTracker(
       enqueueEmit(() => bridge.say(
         `${ctrlBanner}⏳ **${shownName}** 已持续无新进展 ${elapsedSec} 秒（仍在后台运行），如需中断可回复 \`${cmdTarget} stop\`。`,
         { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
-        null,
-        [{ label: '停止任务', text: `${cmdTarget} stop`, kind: 'danger' }],
       )).catch(() => {});
     }, pollMs);
     stallTimer.unref?.();

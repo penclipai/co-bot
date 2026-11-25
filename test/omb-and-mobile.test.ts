@@ -186,6 +186,7 @@ test('Track D1: voice transcript hook, audio fallback, and linkCard normalizatio
 
 test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status and commands', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-0177-prefs-'));
+  let doctorProblems: string[] = [];
   const ombServer = http.createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://127.0.0.1');
     const chunks: Buffer[] = [];
@@ -197,7 +198,7 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
           ok: true,
           version: '0.1.177',
           box: 'off',
-          doctor: { version: '0.1.177', checked: 9, fixed: [], problems: [] },
+          doctor: { version: '0.1.177', checked: 9, fixed: [], problems: doctorProblems },
         }));
       }
       if (u.pathname === '/api/environment') return res.end(JSON.stringify({ capabilities: {} }));
@@ -210,7 +211,7 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
             threadId: 't1',
             chiefOfStaff: true,
             replyStyle: 'conversational',
-            approvalMode: 'ask',
+            approvalMode: 'auto',
             waitingForTeammates: true,
             tasks: [{ threadId: 't1', title: '自聊主线' }],
           }],
@@ -266,14 +267,19 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
       openmausbot: { doctor: { checked: number }; bots: Array<{ approvalMode: string; waitingForTeammates: boolean }> };
     };
     assert.equal(st1.openmausbot.doctor.checked, 9);
-    assert.equal(st1.openmausbot.bots[0].approvalMode, 'ask');
+    assert.equal(st1.openmausbot.bots[0].approvalMode, 'auto');
     assert.equal(st1.openmausbot.bots[0].waitingForTeammates, true);
 
     await pushMsg!({ id: 'cmd_status', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    await until(() => sentOut.some((m) => m.text.includes('审批:ask') && m.text.includes('等待队友') && m.text.includes('Doctor：正常（9项）')));
+    await until(() => sentOut.some((m) => m.text.includes('审批:auto') && m.text.includes('等待队友')));
+    const cleanStatus = sentOut.findLast((m) => m.text.includes('审批:auto'))!;
+    assert.equal(cleanStatus.text.includes('Doctor'), false);
 
-    await k1.stop();
+    doctorProblems = ['sandbox_missing'];
+    await pushMsg!({ id: 'cmd_status_warn', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
+    await until(() => sentOut.some((m) => m.text.includes('⚠️ Doctor 1 项异常') && m.text.includes('审批:auto') && m.text.includes('等待队友')));
   } finally {
+    await k1.stop().catch(() => {});
     ombServer.closeAllConnections?.();
     await new Promise<void>((r) => ombServer.close(() => r()));
     fs.rmSync(tmpDir, { recursive: true, force: true });

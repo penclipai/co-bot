@@ -48,7 +48,7 @@ export function formatContextSummary(task: OmbTaskSummary | null | undefined): {
   const turns = task?.usage?.turns;
   return {
     pct,
-    line: `${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · 共 ${turns} 轮` : ''}）\n\`${usageBar(pct)}\``,
+    line: `${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · ${turns} 轮` : ''}） \`${usageBar(pct)}\``,
   };
 }
 
@@ -61,7 +61,6 @@ export async function replyContextUsage(
     threadId,
     task,
     compactCmd,
-    compactLabel,
     isExternal = false,
     emptyHint = '暂无统计（对话后记录）',
   }: {
@@ -70,26 +69,24 @@ export async function replyContextUsage(
     threadId: string;
     task?: OmbTaskSummary | null;
     compactCmd: string;
-    compactLabel: string;
     isExternal?: boolean;
     emptyHint?: string;
   },
 ): Promise<void> {
   const summary = formatContextSummary(task);
+  const compactNote = compactCmd && summary
+    ? (summary.pct >= 80
+      ? `\n建议回复 \`${compactCmd}\` 压缩上下文`
+      : (summary.pct >= 50 ? `\n可回复 \`${compactCmd}\` 压缩上下文` : ''))
+    : '';
   if (!summary) {
-    await sensSink.say(
-      `📊 **${title}** ${emptyHint}`,
-      null,
-      null,
-      isExternal && compactCmd ? ([{ label: compactLabel, text: compactCmd }] as unknown as ChannelAction[]) : null,
-    );
+    const extHint = isExternal && compactCmd ? `（可回复 \`${compactCmd}\` 压缩）` : '';
+    await sensSink.say(`📊 **${title}** ${emptyHint}${extHint}`);
     return;
   }
   await sensSink.say(
-    `📊 **${title}** 上下文：${summary.line}`,
+    `📊 **${title}** 上下文：${summary.line}${compactNote}`,
     { botId: bot.id, botName: bot.name, threadId },
-    null,
-    [{ label: compactLabel, text: compactCmd, ...(summary.pct >= 80 ? { kind: 'primary' } : {}) }] as unknown as ChannelAction[],
   );
 }
 

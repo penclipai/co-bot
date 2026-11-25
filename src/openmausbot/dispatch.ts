@@ -363,16 +363,14 @@ async function trySteerQueueItem(
       ? await bridge.client.steerGroupQueued(botId, queueId, threadId)
       : await bridge.client.steerQueued(botId, queueId, threadId);
     if (res?.queued) {
-      const msg = typeof onQueuedText === 'function'
-        ? onQueuedText(res)
-        : `${banner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`;
       const cmdTarget = botCommandTarget(bridge, botId, botName, { isGroup });
-      await bridge.say(msg, route, null, typeof onQueuedText === 'function'
-        ? [
-            { label: '立即插队', text: `${cmdTarget} steer`, kind: 'primary' },
-            { label: '取消排队', text: `${cmdTarget} cancel`, kind: 'danger' },
-          ]
-        : null);
+      const queueHint = typeof onQueuedText === 'function'
+        ? `\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`
+        : '';
+      const msg = (typeof onQueuedText === 'function'
+        ? onQueuedText(res)
+        : `${banner}⏳ 当前工具执行暂不支持直接插队${res.blockedBy ? `（${res.blockedBy}）` : ''}，已保留在队列等待上一轮完成。`) + queueHint;
+      await bridge.say(msg, route);
       return { steered: false, res };
     }
     bridge.steeredQueue.set(sendId, { queueId, botId, botName, threadId, isGroup, text, sendId, at: bridge.now(), chatCtx });
@@ -753,11 +751,6 @@ export async function dispatchToBot(
     await bridge.say(
       `${ctrlBanner}${who ? `${who} ` : ''}📥 已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
       { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
-      null,
-      [
-        { label: '立即插队', text: `${cmdTarget} steer`, kind: 'primary' },
-        { label: '取消排队', text: `${cmdTarget} cancel`, kind: 'danger' },
-      ],
     );
     return receipt;
   }
@@ -789,10 +782,8 @@ export async function dispatchToBot(
   if (isExternal && ctxInfo.silentProgress && bridge.chats.externalAckInSelf && bridge.selfChat) {
     const cmdTarget = botCommandTarget(bridge, bot.id, bot.name, { isGroup });
     bridge.say(
-      `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…`,
+      `⏳ 已收到来自「${ctxInfo.chatName || ctxInfo.originChatId}」的提问，正在后台处理…（如需中断可回复 \`${cmdTarget} stop\`）`,
       { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: bridge.selfChat },
-      null,
-      [{ label: '停止', text: `${cmdTarget} stop`, kind: 'danger' }],
     ).catch(() => {});
   }
   return receipt;

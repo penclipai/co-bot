@@ -4,7 +4,7 @@ import { isAudioAttachment } from '../core/channel-contract.ts';
 import { sanitizeExternalMentions } from '../core/chat-context.ts';
 import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
 import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
-import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
+import type { ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
 import { botCommandTarget } from './commands.ts';
@@ -425,6 +425,10 @@ export async function deliverBotReply(
     bodyCore = formatExternalBotPrefix(bodyCore, customExtPrefix);
   }
 
+  const draftFooter = draftKey && draftMeta
+    ? `\n\n---\n👉 回复 \`${bridge.trigger} sendback ${draftKey}\` 发回「${clip(draftMeta.originName, 16)}」，或引用本条继续润色`
+    : '';
+  const tailSuffix = `${draftFooter}${delegationTagSuffix}`;
   const fixedPrefix = privHead + proHead;
   const composeMessage = (
     partBody: string,
@@ -436,11 +440,10 @@ export async function deliverBotReply(
     } = {},
   ): string => {
     const badged = badge ? attachBotBadge(badge, partBody, { partIndex, partTotal }) : partBody;
-    return `${includeFixed ? fixedPrefix : ''}${badged}${includeTag ? delegationTagSuffix : ''}`;
+    return `${includeFixed ? fixedPrefix : ''}${badged}${includeTag ? tailSuffix : ''}`;
   };
 
   const full = composeMessage(bodyCore);
-  const coreWithoutTag = `${fixedPrefix}${badge ? attachBotBadge(badge, bodyCore) : bodyCore}`;
   const compactCtx = compactChatCtx(chatCtx);
   const route: MsgRoute = {
     botId,
@@ -462,19 +465,15 @@ export async function deliverBotReply(
   const useMarkdown = Boolean(bridge.markdown && caps?.markdown !== false);
   const badgeEffLen = badge ? (useMarkdown ? badge.length : plain(badge).length) : 0;
 
-  const draftActions: ChannelAction[] | null = draftKey && draftMeta
-    ? [{ label: `发回「${clip(draftMeta.originName, 10)}」`, text: `${bridge.trigger} sendback ${draftKey}` }]
-    : null;
-
   const safeFull = scanAndRedactOutbound(full).text;
   const sentIds: string[] = [];
   if (full.length <= effResult) {
-    const sid = await bridge.say(full, route, quoteReplyId, draftActions);
+    const sid = await bridge.say(full, route, quoteReplyId);
     if (sid) sentIds.push(sid);
   } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
     let chunks: string[];
     if (badge) {
-      const splitOverhead = fixedPrefix.length + badgeEffLen + 8 + delegationTagSuffix.length;
+      const splitOverhead = fixedPrefix.length + badgeEffLen + 8 + tailSuffix.length;
       const splitCap = Math.max(20, effResult - splitOverhead);
       const rawChunks = mdSplit(bodyCore, splitCap);
       chunks = rawChunks.map((part, idx) => composeMessage(part, {
@@ -484,9 +483,10 @@ export async function deliverBotReply(
         includeTag: idx === rawChunks.length - 1,
       }));
     } else {
-      const splitCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
-      chunks = mdSplit(coreWithoutTag, splitCap);
-      if (delegationTagSuffix && chunks.length) chunks[chunks.length - 1] += delegationTagSuffix;
+      const splitCap = Math.max(20, effResult - tailSuffix.length);
+      const baseText = `${fixedPrefix}${bodyCore}`;
+      chunks = mdSplit(baseText, splitCap);
+      if (tailSuffix && chunks.length) chunks[chunks.length - 1] += tailSuffix;
     }
     for (let i = 0; i < chunks.length; i++) {
       const sid = await bridge.say(
@@ -496,7 +496,6 @@ export async function deliverBotReply(
           ombMsgId: i === chunks.length - 1 ? (finalMsg?.id ?? null) : null,
         },
         i === 0 ? quoteReplyId : null,
-        i === chunks.length - 1 ? draftActions : null,
       );
       if (sid) sentIds.push(sid);
     }
@@ -506,19 +505,19 @@ export async function deliverBotReply(
     let out: string;
     let wasCut: boolean;
     if (badge) {
-      const clipOverhead = fixedPrefix.length + badgeEffLen + 1 + delegationTagSuffix.length;
+      const clipOverhead = fixedPrefix.length + badgeEffLen + 1 + tailSuffix.length;
       const clipCap = Math.max(16, effResult - clipOverhead);
       const clipped = mdClip(bodyCore, clipCap);
       wasCut = clipped.cut;
       const badgedClip = attachBotBadge(badge, clipped.text);
-      out = `${fixedPrefix}${badgedClip}${clipped.cut ? note : ''}${delegationTagSuffix}`;
+      out = `${fixedPrefix}${badgedClip}${clipped.cut ? note : ''}${tailSuffix}`;
     } else {
-      const clipCap = delegationTagSuffix ? Math.max(20, effResult - delegationTagSuffix.length) : effResult;
-      const clipped = mdClip(coreWithoutTag, clipCap);
+      const clipCap = Math.max(20, effResult - tailSuffix.length);
+      const clipped = mdClip(`${fixedPrefix}${bodyCore}`, clipCap);
       wasCut = clipped.cut;
-      out = `${clipped.text}${clipped.cut ? note : ''}${delegationTagSuffix}`;
+      out = `${clipped.text}${clipped.cut ? note : ''}${tailSuffix}`;
     }
-    const sid = await bridge.say(out, route, quoteReplyId, draftActions);
+    const sid = await bridge.say(out, route, quoteReplyId);
     if (sid) sentIds.push(sid);
 
     if (wasCut && canAttach) {
@@ -672,8 +671,6 @@ export async function maybeWarnHighContext(
     await bridge.say(
       `${originBanner}💡 当前会话上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），建议发 \`${compactCmd}\` 压缩以保持准确度。`,
       { botId, botName: bridge.displayBotName(botId, bot?.name), threadId, ...(chatCtx?.isExternal && bridge.selfChat ? { targetChatId: bridge.selfChat } : {}) },
-      null,
-      [{ label: chatCtx?.isExternal ? '压缩该群会话' : '立即压缩', text: compactCmd, kind: 'primary' }],
     );
   } catch { /* 上下文提醒失败不影响主回复 */ }
 }

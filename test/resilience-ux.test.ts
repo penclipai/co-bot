@@ -273,7 +273,8 @@ test('Resilience A4: stall watchdog alerts once on idle turn and stays quiet on 
   await until(() => tele.some((e) => e.type === 'turn_stalled'));
   const stallMsg = tr.sent.find((m) => m.text.includes('持续无新进展'))!;
   assert.ok(stallMsg);
-  assert.ok(stallMsg.actions?.some((a) => String(a.text).includes('stop')));
+  assert.match(stallMsg.text, /@bot stop/);
+  assert.equal(stallMsg.actions?.length ?? 0, 0);
   await new Promise((r) => setTimeout(r, 80));
   assert.equal(tele.filter((e) => e.type === 'turn_stalled').length, 1, '同一静默期只提醒一次');
   await bridge.stop();
@@ -453,7 +454,9 @@ test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInS
     const polishPrompt = String(mc.sentPrompts.at(-1)!.text);
     assert.match(polishPrompt, /\[待润色草稿 · 原目标会话「架构群」\]/);
     const draftBubbleV2 = tr2.sent.find((m) => m.text.includes('建议先扩连接池'))!;
-    assert.ok(draftBubbleV2.actions?.some((a) => a.label.includes('发回「架构群」')));
+    assert.match(draftBubbleV2.text, /@bot sendback draft_/);
+    assert.match(draftBubbleV2.text, /发回「架构群」/);
+    assert.equal(draftBubbleV2.actions?.length ?? 0, 0);
 
     await tr2.push({
       id: 'self_sb',

@@ -49,7 +49,6 @@ async function replyExternalChatContext(
     threadId: entry.threadId,
     task,
     compactCmd: `${cmdTarget} compact ${extChat.id}`,
-    compactLabel: '压缩该群会话',
     isExternal: true,
     emptyHint: '上下文暂无统计（对话后记录）。',
   });
@@ -84,30 +83,26 @@ async function handleStatusCommand(
   }
 
   const desktopManaged = env?.capabilities?.selfUpdate === 'desktop-managed';
-  const authState = desktopManaged
-    ? (sess?.kind === 'session' ? '桌面端（已配对）' : '桌面端（⚠️ 未配对）')
-    : (sess?.kind === 'session' ? 'CLI 模式（已配对）' : 'CLI 模式（本地免配对）');
-  const stickyNote = bridge.isStickyActive() ? ' · 连续对话激活中' : '';
-  const groupNote = visibleGroups.length ? ` · 协作群组：${visibleGroups.length} 个` : '';
   const doc = h?.doctor;
-  const docNote = doc ? ` · Doctor：${doc.problems?.length ? `⚠️ ${doc.problems.length} 个异常` : `正常（${doc.checked ?? 0}项）`}` : '';
   const brand = bridge.botName || 'co-bot';
-  const chiefShown = chief ? showBotName(bridge, chief.id, chief.name) : '无';
   const deadBots = visible.filter((b) => b.activity === 'dead');
   const headState = chief?.activity === 'dead'
     ? `🔴 **${brand} 异常（主协调 dead）**`
     : (deadBots.length ? `🟡 **${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `🟢 **${brand} 在线**`);
 
-  const headerLine =
-    `${headState} · 隔离模式：${h.box ?? 'off'} · 认证：${authState}${docNote}\n` +
-    `协作 Bot：${visible.length} 个${groupNote} · 主协调：**${chiefShown}**（审批：${chief?.approvalMode ?? 'ask'}）· 活跃轮次：${bridge.activeTurns.size}${stickyNote} · 引擎 v${h.version ?? '?'}` +
-    (bridge.quietQueue.length ? ` · 静默待汇总：${bridge.quietQueue.length} 条` : '');
+  const headerParts = [headState];
+  if (desktopManaged && sess?.kind !== 'session') headerParts.push('⚠️ 桌面端未配对');
+  if (doc?.problems?.length) headerParts.push(`⚠️ Doctor ${doc.problems.length} 项异常`);
+  if (h.box && h.box !== 'off') headerParts.push(`隔离：${h.box}`);
+  if (bridge.activeTurns.size > 0) headerParts.push(`活跃轮次：${bridge.activeTurns.size}`);
+  if (bridge.isStickyActive()) headerParts.push('连续对话激活中');
+  if (bridge.quietQueue.length > 0) headerParts.push(`静默待汇总：${bridge.quietQueue.length} 条`);
+  const headerLine = headerParts.join(' · ');
 
   let ctxBot: OmbBot | OmbTargetBot | undefined = activeBot ?? chief;
   let ctxThreadId = targetBot?.threadId ?? ctxBot?.threadId ?? '';
   let ctxTitle = ctxBot ? `${showBotName(bridge, ctxBot.id, ctxBot.name)} 当前会话` : '当前会话';
   let compactCmd = `${cmdTarget} compact`;
-  let compactLabel = '压缩上下文';
   let missingExt = false;
   if (extCtx) {
     const extEntry = bridge.chatThreads.get(`${extCtx.originChatId}:${targetBot.id}`);
@@ -119,7 +114,6 @@ async function handleStatusCommand(
       const ctxBotShown = ctxBot ? showBotName(bridge, ctxBot.id, ctxBot.name) : 'co-bot';
       ctxTitle = `${extCtx.chatName || extCtx.originChatId}（${ctxBotShown}）隔离`;
       compactCmd = `${botCommandTarget(bridge, ctxBot?.id, ctxBot?.name)} compact ${extCtx.originChatId}`;
-      compactLabel = '压缩该群会话';
     }
   }
 
@@ -127,21 +121,29 @@ async function handleStatusCommand(
     ? ((ctxBot.tasks ?? []).find((t) => (t.threadId ?? t.id) === ctxThreadId) ?? (isExternal ? null : ctxBot.tasks?.[0]))
     : null;
   const ctxSummary = formatContextSummary(ctxTask);
+  const compactHint = ctxSummary
+    ? (ctxSummary.pct >= 80
+      ? `\n建议回复 \`${compactCmd}\` 压缩上下文`
+      : (ctxSummary.pct >= 50 ? `\n可回复 \`${compactCmd}\` 压缩上下文` : ''))
+    : '';
   const ctxLine = missingExt && extCtx
     ? `📊 **${extCtx.chatName || extCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
     : (ctxSummary
-      ? `📊 **${ctxTitle}** 上下文：${ctxSummary.line}`
+      ? `📊 **${ctxTitle}** 上下文：${ctxSummary.line}${compactHint}`
       : `📊 **${ctxTitle}** 暂无上下文统计（对话后记录）`);
 
   const sections = [headerLine, ctxLine];
   if (visible.length) {
     const botLines = visible.map((b) => {
       const role = b.chiefOfStaff ? '（主协调）' : '';
-      const st = b.activity === 'dead'
+      const act = String(b.activity ?? '').trim();
+      const st = act === 'dead'
         ? '🔴 异常(dead)'
-        : (b.busy ? `运行中 · ${b.activity || 'busy'}` : '空闲');
+        : (b.busy
+          ? (act && act.toLowerCase() !== 'busy' ? `运行中 · ${act}` : '运行中')
+          : '空闲');
       const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
-      const apv = b.approvalMode ? ` · 审批:${b.approvalMode}` : '';
+      const apv = b.approvalMode && b.approvalMode !== 'ask' ? ` · 审批:${b.approvalMode}` : '';
       const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
       return `- **${showBotName(bridge, b.id, b.name)}**${role} · ${st}${mod}${apv}${waitTm}`;
     });
@@ -158,10 +160,7 @@ async function handleStatusCommand(
   const route = ctxSummary && ctxBot
     ? { botId: ctxBot.id, botName: showBotName(bridge, ctxBot.id, ctxBot.name), threadId: ctxThreadId }
     : null;
-  const actions = ctxSummary
-    ? [{ label: compactLabel, text: compactCmd, ...(ctxSummary.pct >= 80 ? { kind: 'primary' } : {}) }]
-    : null;
-  await sensSink.say(sections.join('\n\n'), route, null, actions);
+  await sensSink.say(sections.join('\n\n'), route);
 }
 
 async function handleDefaultCommand(
@@ -288,22 +287,8 @@ async function handleDefaultCommand(
         const thr = c.threadCount ? ` · ${c.threadCount} 隔离会话` : '';
         return `- **${c.name}**（\`${c.id}\` · ${kind}）· ${flag} · 缓存 ${c.cachedMessages} 条${thr}`;
       });
-      const firstExt = known[0];
-      const actions = firstExt
-        ? [
-            firstExt.allowed
-              ? { label: `静音 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} mute ${firstExt.id}` }
-              : { label: `恢复 ${clip(firstExt.name, 10)}`, text: `${bridge.trigger} unmute ${firstExt.id}`, kind: 'primary' },
-            pol.mode === 'self_only'
-              ? { label: '切回全局', text: `${bridge.trigger} chats all` }
-              : { label: '仅自聊模式', text: `${bridge.trigger} chats self` },
-          ]
-        : [];
       await sensSink.say(
         `💬 **多会话管理**（当前模式：${modeLabel}）\n${lines.join('\n')}\n\n指令：\`${bridge.trigger} mute|unmute <群名|id>\`、\`${bridge.trigger} chats self|all|reset\``,
-        null,
-        null,
-        actions,
       );
       return true;
     }
@@ -679,7 +664,6 @@ export async function handleCommand(
           threadId: activeTarget.threadId,
           task,
           compactCmd: extCtx ? `${cmdTarget} compact ${extCtx.originChatId}` : `${cmdTarget} compact`,
-          compactLabel: extCtx ? '压缩该群会话' : '压缩上下文',
           emptyHint: '当前会话上下文暂无统计（发送对话后会自动记录）。',
         });
       } catch (e) {
@@ -708,16 +692,9 @@ export async function handleCommand(
           const busy = t.busy ? ' · 运行中' : '';
           return `${i + 1}. **${clip(t.title || '未命名会话', 36)}**${cur}${busy}`;
         });
-        const actions = top.map((t, i) => ({
-          label: `${i + 1}. ${clip(t.title || '会话', 16)}`,
-          text: String(i + 1),
-          ...((t.threadId ?? t.id) === activeTid ? { kind: 'primary' } : {}),
-        }));
         const sentId = await sensSink.say(
           `🗂 **${freshName} 最近会话**\n${lines.join('\n')}\n\n回复序号 \`1\`～\`${top.length}\` 切换，或发 \`${cmdTarget} new\` 新建会话`,
           route,
-          null,
-          actions,
         );
         bridge.clearPickers();
         bridge.pendingTaskPick = {

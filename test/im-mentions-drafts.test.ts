@@ -289,7 +289,8 @@ test('B1+B2+B3 群聊深水区：结构化 mentions 与撤回擦除、连发多�
 
     const warnMsg = sent.find((s) => s.chatId === 'chat_self' && s.text.includes('85%'))!;
     assert.ok(warnMsg, '外部群达到 85% 应在自聊收到提示');
-    assert.match(String(warnMsg.opts.actions![0].text), /^@bot compact grp_dev$/);
+    assert.match(warnMsg.text, /@bot compact grp_dev/);
+    assert.equal(warnMsg.opts.actions?.length ?? 0, 0);
 
     await bridge.onEvent({
       id: 'm_ctx_grp',

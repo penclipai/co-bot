@@ -133,7 +133,7 @@
 
 ## 七、Web 模拟器（`/sim`）与诊断台（`/debug`）
 
-- **`/sim`（`http://127.0.0.1:8787/sim`）**：模拟自聊、`研发架构群` 与外部私聊；支持粘贴/上传图片、放大灯箱预览、卡片快捷按钮（草稿 `sendback` 按钮支持持久化防误灰）、气泡一键撤回与历史持久化（`data/sim-history.json`）。
+- **`/sim`（`http://127.0.0.1:8787/sim`）**：模拟自聊、`研发架构群` 与外部私聊；支持粘贴/上传图片、放大灯箱预览、纯 Markdown 文本交互（与真实 IM 保持一致，业务消息无交互按钮）、气泡一键撤回与历史持久化（`data/sim-history.json`）。
 - **`/debug`（`http://127.0.0.1:8787/debug`）**：纯本机只读诊断台，展示运行指标、`dead` 异常预警、插件能力声明、会话策略与一键**静音/允许**（内置防误静音 `self` 保护）、项目绑定/共享目录/C2C 委托统计、**一键导出脱敏诊断包**（`/api/debug/bundle`），以及按 `chatId` / `source` / `type` / `limit`（默认最近 250 条，含 `security_redacted`、`policy_denied`、`delegation_req`、`delegation_res`、`recall`、`sendback`、`turn_failed` 等）筛选的实时事件流。
 
 ---
