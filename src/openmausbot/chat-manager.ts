@@ -178,7 +178,7 @@ export function resolvePrivateDraft(
   bridge: OpenMausBotBridge,
   { quotedId = null, draftId = null }: { quotedId?: string | null; draftId?: string | null } = {},
 ): PrivateDraft | null {
-  const cutoff = bridge.now() - 30 * 60_000;
+  const cutoff = bridge.now() - (Number(bridge.draftTtlMs) || 30 * 60_000);
   for (const [k, v] of bridge.privateDrafts) {
     if ((v.createdAt || 0) < cutoff) bridge.privateDrafts.delete(k);
   }
@@ -222,9 +222,12 @@ export async function requestSendBack(
       ? `，将真 @${draft.followUp.targetName}（\`${draft.mentions[0].id}\`）提醒并在对方回复后自动续分析`
       : `，未匹配到「${draft.followUp.targetName}」的用户 ID，将按纯文本提及发出`)
     : '';
+  const extPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
   const attrLabel = draft.delegationRe
     ? '协作结果回传，带 🤖 协议标识'
-    : (useBotPrefix ? `以 🤖 **[${bridge.botName}]** 名义` : '以本人名义直接发出');
+    : (useBotPrefix && extPrefix
+      ? (extPrefix.trim() === '🤖' ? `以 🤖 **[${bridge.botName}]** 名义` : `以「${extPrefix.trim()}」前缀`)
+      : '以本人名义直接发出');
   const titleText = draft.followUp
     ? `**📤 确认向「${draft.originChatName || draft.originChatId}」追问 @${draft.followUp.targetName}**`
     : `**📤 确认发回到「${draft.originChatName || draft.originChatId}」**`;
@@ -282,7 +285,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     { targetChatId: draft.originChatId },
     draft.replyToImMsgId,
     null,
-    draft.mentions?.length ? { mentions: draft.mentions } : {},
+    { noBuffer: true, ...(draft.mentions?.length ? { mentions: draft.mentions } : {}) },
   );
   if (!sentId) {
     if (pendingFpId) bridge.pendingFollowUps.delete(pendingFpId);

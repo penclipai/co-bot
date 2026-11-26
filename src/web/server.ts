@@ -80,7 +80,9 @@ export class WebServer {
       srv.once('error', reject);
       srv.listen(this.port, this.host, () => resolve());
     });
-    console.log(`[web] http://${this.host}:${this.port}`);
+    const addr = srv.address();
+    const actualPort = addr && typeof addr === 'object' ? addr.port : this.port;
+    console.log(`[web] http://${this.host}:${actualPort}`);
   }
 
   async stop(): Promise<void> {
@@ -133,7 +135,6 @@ export class WebServer {
 }
 
 function read(req: http.IncomingMessage, limit = 512 * 1024, allowEmpty = false): Promise<string> {
-  const maxBytes = limit ?? 512 * 1024;
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -142,7 +143,7 @@ function read(req: http.IncomingMessage, limit = 512 * 1024, allowEmpty = false)
       if (done) return;
       const buf = Buffer.isBuffer(d) ? d : Buffer.from(d);
       total += buf.length;
-      if (total > maxBytes) {
+      if (total > limit) {
         done = true;
         reject(new Error('too large'));
         req.resume();
@@ -155,6 +156,11 @@ function read(req: http.IncomingMessage, limit = 512 * 1024, allowEmpty = false)
       done = true;
       resolve(chunks.length ? Buffer.concat(chunks, total).toString('utf8') : (allowEmpty ? '{}' : ''));
     });
+    req.on('close', () => {
+      if (done || req.complete) return;
+      done = true;
+      reject(new Error('aborted'));
+    });
     req.on('error', (e) => {
       if (done) return;
       done = true;
@@ -163,7 +169,7 @@ function read(req: http.IncomingMessage, limit = 512 * 1024, allowEmpty = false)
   });
 }
 
-export function send(res: http.ServerResponse, code: number, obj: unknown): void {
+function send(res: http.ServerResponse, code: number, obj: unknown): void {
   const payload = JSON.stringify(obj);
   res.writeHead(code, {
     'content-type': 'application/json; charset=utf-8',

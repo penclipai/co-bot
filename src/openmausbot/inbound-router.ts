@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { SELF_NOTE_PREFIX_RE } from '../core/chat-context.ts';
 import { evaluateInboundPolicy } from '../core/inbound-policy.ts';
 import { findUnauthorizedProjectMention, isProjectAuthorized, resolveProjectBinding } from '../core/projects.ts';
 import { clip, fileSafe } from '../format.ts';
@@ -37,9 +38,13 @@ const APPROVE_RE = /^(ok|okay|yes|y|好|好的|可以|允许|同意|通过|执�
 const ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都允许)$/i;
 const DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$/i;
 const SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
-const NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
 const BYE_RE = /^(bye|退下|结束对话|退出对话)$/i;
 const OWNER_COMMAND_RE = /^(?:help|帮助|status|状态|stop|停止|bye|退下|steer|插队|cancel|取消排队|chats|mute|静音|unmute|解除静音|summary|汇总|纪要|sendback|发回|bind|绑定|delegate|委托|new|新会话|task|会话|compact|压缩|\/(?:goal|learn|burst|setup))(?:[\s:：]|$)/i;
+
+function extractPrivateFlag(text: string): { privateFlag: boolean; body: string } {
+  const m = text.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
+  return m ? { privateFlag: true, body: (m[1] ?? '').trim() } : { privateFlag: false, body: text };
+}
 
 /** 构建入站消息对应的会话上下文描述对象。 */
 export function buildExternalChatCtx(
@@ -88,7 +93,7 @@ export async function sendDelegation(
   if (!targetChat?.id) return { ok: false, error: '缺少目标会话' };
   const id = generateDelegationId(bridge.now());
   const wire = formatDelegationRequest({ id, project, text: question });
-  const sentId = await bridge.say(wire, { targetChatId: targetChat.id });
+  const sentId = await bridge.say(wire, { targetChatId: targetChat.id }, null, null, { noBuffer: true });
   if (!sentId) return { ok: false, error: '消息发送失败，请检查通道连接' };
   bridge.delegations.trackOutbound({
     id,
@@ -358,6 +363,7 @@ function tryDispatchDraftPolish(
     originChatType: polishSource.originChatType || 'group',
     replyToImMsgId: polishSource.replyToImMsgId ?? null,
     addBotPrefix: Boolean(polishSource.addBotPrefix),
+    ...(polishSource.forceBotPrefix ? { forceBotPrefix: true } : {}),
     ...(polishSource.delegationRe ? { delegationRe: polishSource.delegationRe } : {}),
   };
   const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
@@ -555,7 +561,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
       const curOpts = curQ?.options ?? card.options ?? [];
       const curMulti = Boolean(curQ?.multiSelect);
       const pickedAnswer = parseMultiChoiceAnswer(rawText, curOpts, curMulti);
-      const stepAnswer = pickedAnswer ?? ((isQuoted || !NOTE_PREFIX_RE.test(rawText)) ? rawText : null);
+      const stepAnswer = pickedAnswer ?? ((isQuoted || !SELF_NOTE_PREFIX_RE.test(rawText)) ? rawText : null);
       if (stepAnswer) {
         if (card.questions && card.questions.length > 1) return advanceQuestionCard(bridge, card, stepAnswer);
         return answerCard(bridge, card, 'answer', stepAnswer);
@@ -676,10 +682,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
       }
     }
     if (!isSelfChat && bridge.chats.privateFlag !== false && bodyText) {
-      const privM = bodyText.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
-      if (privM) {
+      const pf = extractPrivateFlag(bodyText);
+      if (pf.privateFlag) {
         privateReply = true;
-        bodyText = (privM[1] ?? '').trim();
+        bodyText = pf.body;
       }
     }
     if (!isSelfChat && privateReply && !bridge.selfChat) {
@@ -735,10 +741,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     }
     let bodyText = rawText;
     if (!isSelfChat && bridge.chats.privateFlag !== false) {
-      const privM = bodyText.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
-      if (privM) {
+      const pf = extractPrivateFlag(bodyText);
+      if (pf.privateFlag) {
         privateReply = true;
-        bodyText = (privM[1] ?? '').trim();
+        bodyText = pf.body;
       }
     }
     const isDraftFirst = Boolean(!isSelfChat && !privateReply && bridge.chats.externalReplyMode === 'draft_first' && bridge.selfChat);
@@ -774,7 +780,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     return bridge.dispatchToBot(targetBot, bodyText || '请查看附件', mid, quotedId, replyToOmbId, chatCtx);
   }
 
-  if (isSelfChat && bridge.isStickyActive() && bridge.focus && !NOTE_PREFIX_RE.test(rawText) && !ev.isForwarded && !ev.forwarded) {
+  if (isSelfChat && bridge.isStickyActive() && bridge.focus && !SELF_NOTE_PREFIX_RE.test(rawText) && !ev.isForwarded && !ev.forwarded) {
     if (BYE_RE.test(rawText)) {
       bridge.clearSticky();
       return bridge.say('👋 已结束连续对话，之后普通消息将作为自聊笔记不再打扰。');

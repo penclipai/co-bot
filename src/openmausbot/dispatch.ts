@@ -9,7 +9,7 @@ import type { ChatContextMessage, ChatType, InboundEvent } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatOmbError } from './cards.ts';
 import { formatAttachmentTag, messageNeedsInput } from './client.ts';
-import { botCommandTarget } from './command-helpers.ts';
+import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { claimUploads, deliverBotReply, emitCard, forwardBotMedia } from './delivery.ts';
 import { buildExternalChatCtx } from './inbound-router.ts';
 import { compactChatCtx, inQuietHours, rememberBounded, trimMapCap } from './mentions.ts';
@@ -271,9 +271,17 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
 
   if (msg.kind === 'screen' && msg.hasImage) {
     rememberBounded(bridge.deliveredOmbIds, msg.id);
+    if (extChat) {
+      bridge.saveState();
+      return; // 外部会话后台异常或重试产生的无文字截图不再误发自聊
+    }
+    if (inQuietHours(bridge.now(), bridge.quietHours)) {
+      bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: '（截图通知）', finalMsg: msg });
+      bridge.saveState();
+      return;
+    }
     bridge.saveState();
-    if (extChat) return; // 外部会话后台异常或重试产生的无文字截图不再误发自聊
-    await forwardBotMedia(bridge, threadId, [msg], { chatId: proChatCtx?.replyChatId || bridge.selfChat });
+    await forwardBotMedia(bridge, threadId, [msg], { chatId: bridge.selfChat });
     return;
   }
 
@@ -291,7 +299,7 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
       return;
     }
     bridge.saveState();
-    await forwardBotMedia(bridge, threadId, [msg], { chatId: proChatCtx?.replyChatId || bridge.selfChat });
+    await forwardBotMedia(bridge, threadId, [msg], { chatId: bridge.selfChat });
     return;
   }
 
@@ -759,8 +767,7 @@ export async function dispatchToBot(
     const list = bridge.queuedByThread.get(threadId) ?? [];
     const entry: QueuedTurnEntry = { queueId, botId: bot.id, botName: bot.name, threadId, isGroup, text, sendId, at: bridge.now(), chatCtx: compactCtx };
     const ctrlChat = bridge.resolveControlChatId(ctxInfo);
-    const ctrlBanner = ctxInfo.steerBanner
-      || (isExternal && ctrlChat === bridge.selfChat ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n` : '');
+    const ctrlBanner = ctxInfo.steerBanner || formatOriginBanner(ctxInfo, ctrlChat, bridge.selfChat);
     if (ctxInfo.autoSteer && receipt.queueId) {
       list.push(entry);
       bridge.queuedByThread.set(threadId, list);
@@ -789,8 +796,7 @@ export async function dispatchToBot(
   if (receipt?.steered === true && alreadyTracking) {
     if (!isExternal || ctxInfo.controlChatId === bridge.selfChat) {
       const ctrlChat = bridge.resolveControlChatId(ctxInfo);
-      const ctrlBanner = ctxInfo.steerBanner
-        || (isExternal && ctrlChat === bridge.selfChat ? `📍 **来自「${ctxInfo.chatName || ctxInfo.originChatId}」**\n` : '');
+      const ctrlBanner = ctxInfo.steerBanner || formatOriginBanner(ctxInfo, ctrlChat, bridge.selfChat);
       await bridge.say(`${ctrlBanner}⚡ 已将补充信息插入当前任务。`, { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) });
     }
     return receipt;
@@ -844,20 +850,26 @@ export async function handleSseEvent(bridge: OpenMausBotBridge, evt: OmbSseEvent
     return;
   }
   if (evt.kind === 'bot' && evt.bot) {
-    if (!evt.bot.hidden) await bridge.refreshMultiBot();
     for (const turn of bridge.activeTurns.values()) {
       if (turn.botId !== evt.bot.id || turn.isGroup) continue;
       if (evt.bot.busy) turn.sawBusy = true;
       else if (turn.sawBusy && !evt.bot.busy) turn.complete().catch(() => {});
     }
+    const prev = bridge.botById.get(evt.bot.id);
+    if (!evt.bot.hidden && (!prev || (evt.bot.name && prev.name !== evt.bot.name))) {
+      bridge.refreshMultiBot().catch(() => {});
+    }
     return;
   }
   if (evt.kind === 'group' && evt.group) {
-    if (!evt.group.hidden) await bridge.refreshMultiBot();
     for (const turn of bridge.activeTurns.values()) {
       if (!turn.isGroup || turn.botId !== evt.group.id) continue;
       if (evt.group.busy) turn.sawBusy = true;
       else if (turn.sawBusy && !evt.group.busy) turn.complete().catch(() => {});
+    }
+    const prev = bridge.groupById.get(evt.group.id);
+    if (!evt.group.hidden && (!prev || (evt.group.name && prev.name !== evt.group.name))) {
+      bridge.refreshMultiBot().catch(() => {});
     }
   }
 }

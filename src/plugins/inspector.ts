@@ -20,10 +20,9 @@ interface InspectorEventEntry {
 }
 
 function sanitizeConfigSnapshot(cfg: unknown = {}): unknown {
-  const redactSecret = (val: string): string => (val ? '[REDACTED]' : '');
   const clone: unknown = JSON.parse(JSON.stringify(cfg, (k, v: unknown) => {
     if (/^(token|secret|password|apikey|selfid|Authorization)$/i.test(k) && typeof v === 'string' && v) {
-      return redactSecret(v);
+      return '[REDACTED]';
     }
     if (typeof v === 'string') return redactSecrets(v);
     return v;
@@ -44,7 +43,7 @@ function runtimeSnapshot() {
   };
 }
 
-/** 本地只读可观测性插件：统一提供 `/api/status`、`/api/debug/events` 与 `/debug` 实时诊断页面。 */
+/** 本地可观测性与诊断插件：统一提供 `/api/status`、`/api/debug/events`、`/api/debug/action` 与 `/debug` 页面。 */
 export const inspectorPlugin: KernelPlugin = {
   name: 'inspector',
   kind: 'observability',

@@ -22,7 +22,7 @@ import type {
   LoggerLike,
 } from '../types.ts';
 import { isAudioAttachment, redactSecrets } from './chat-context.ts';
-import { normalizeForwarded } from './context-pull.ts';
+import { normalizeForwarded, normalizeLinkCard } from './context-pull.ts';
 
 export { isAudioAttachment };
 
@@ -58,24 +58,6 @@ export function formatLinkCardSnippet(card: LinkCard | null | undefined): string
   if (desc) parts.push(`摘要：${desc.length > 160 ? `${desc.slice(0, 160)}…` : desc}`);
   if (url) parts.push(`链接：${url}`);
   return `[转发卡片] ${parts.join(' | ')}`;
-}
-
-function normalizeLinkCard(rawCard: unknown): LinkCard | null {
-  if (!rawCard || typeof rawCard !== 'object') return null;
-  const c = rawCard as AnyRecord;
-  const title = c.title ? String(c.title).trim() : '';
-  const url = c.url || c.href ? String(c.url || c.href).trim() : '';
-  const description = c.description || c.summary || c.digest
-    ? String(c.description || c.summary || c.digest).trim()
-    : '';
-  const source = c.source || c.appName ? String(c.source || c.appName).trim() : '';
-  if (!title && !url) return null;
-  return {
-    ...(title ? { title } : {}),
-    ...(description ? { description } : {}),
-    ...(url ? { url } : {}),
-    ...(source ? { source } : {}),
-  };
 }
 
 const DEFAULT_CAPABILITIES: Readonly<ChannelCapabilities> = Object.freeze({
@@ -532,6 +514,7 @@ export class ManagedChannel {
   reconnecting: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   onEvent: ((ev: InboundEvent) => unknown) | null;
+  #connGen = 0;
 
   constructor({
     name = 'channel',
@@ -588,10 +571,12 @@ export class ManagedChannel {
 
   async #connectAdapter(): Promise<void> {
     if (this.stopped) return;
+    const gen = ++this.#connGen;
     let disconnectedDuringConnect = false;
     let connectPending = true;
     await this.adapter.start(
       (rawMsg) => {
+        if (this.stopped || gen !== this.#connGen) return;
         let ev: InboundEvent;
         try {
           ev = normalizeInboundEvent(rawMsg, {
@@ -623,6 +608,7 @@ export class ManagedChannel {
       },
       {
         onDisconnect: (err) => {
+          if (this.stopped || gen !== this.#connGen) return;
           if (connectPending) {
             disconnectedDuringConnect = true;
             this.lastError = err instanceof Error ? err.message : String(err || 'disconnected');
@@ -633,12 +619,18 @@ export class ManagedChannel {
       },
     );
     connectPending = false;
-    if (this.stopped) {
-      await Promise.resolve(this.adapter.stop?.()).catch(() => {});
+    if (this.stopped || gen !== this.#connGen) {
+      if (this.stopped) await Promise.resolve(this.adapter.stop?.()).catch(() => {});
       return;
     }
     if (disconnectedDuringConnect) {
-      this.#handleDisconnect(this.lastError || 'disconnected');
+      const msg = this.lastError || 'disconnected';
+      if (this.reconnecting) {
+        this.connected = false;
+        this.#emit('channel:state', { connected: false, error: msg, reconnectAttempts: this.reconnectAttempts });
+        throw new Error(msg);
+      }
+      this.#handleDisconnect(msg);
       return;
     }
     this.connected = true;
@@ -765,6 +757,7 @@ export class ManagedChannel {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.#connGen += 1;
     this.reconnecting = false;
     this.connected = false;
     if (this.reconnectTimer) {
@@ -788,11 +781,16 @@ function createManagedChannelPlugin<TOptions extends Record<string, unknown>>(
   }
   const createFn = spec.create;
   const name = String(spec.name || 'custom-channel');
+  const extraProvides = Array.isArray(spec.provides)
+    ? spec.provides.filter((p) => p && p !== 'channel')
+    : [];
   return {
     name,
     kind: 'channel',
     version: spec.version || '1.0.0',
-    provides: ['channel'],
+    ...(spec.source ? { source: spec.source } : {}),
+    ...(spec.inject ? { inject: spec.inject } : {}),
+    provides: ['channel', ...extraProvides],
     capabilities: spec.capabilities,
     apply(ctx, opts = {} as TOptions) {
       const adapter = createFn(opts, ctx);

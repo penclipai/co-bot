@@ -34,7 +34,7 @@ import {
 } from './outbound-queue.ts';
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
 import {
-  ensureChatThread, getChatThread, isExternalThread, refreshMultiBot,
+  ensureChatThread, getChatThread, refreshMultiBot,
   resolveOwnerByThread, resolveSelfBotThread, setChatThread, setSelfThread, syncChiefBotIdentity,
 } from './thread-manager.ts';
 import { createTurnTracker } from './turn-tracker.ts';
@@ -699,7 +699,6 @@ export class OpenMausBotBridge {
 
   getChatThread(chatId: string, targetBot: OmbTargetBot): OmbTargetBot { return getChatThread(this, chatId, targetBot); }
   setSelfThread(targetBot: OmbTargetBot): void { setSelfThread(this, targetBot); }
-  isExternalThread(threadId?: string | null): boolean { return isExternalThread(this, threadId); }
   async resolveSelfBotThread(targetBot: OmbTargetBot): Promise<OmbTargetBot> { return resolveSelfBotThread(this, targetBot); }
   setChatThread(chatId: string, targetBot: OmbTargetBot): void { setChatThread(this, chatId, targetBot); }
   async ensureChatThread(chatId: string, chatType: ChatType, chatName: string, targetBot: OmbTargetBot): Promise<OmbTargetBot> {

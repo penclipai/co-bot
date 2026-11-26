@@ -26,7 +26,7 @@
 ## 二、自聊与多 Bot 交互
 
 - **唤醒与接力**：自聊中用 `@bot <问题>`（默认对齐后端主协调 Bot `co-bot`，回复统一带 `🤖 **[co-bot]**` 徽章以便与本人人工消息区分；如需隐藏主 Bot 徽章可设 `selfChat.hideChiefPrefix: true`）或 `@<Bot名>` / `@<群名>` 指定协作对象；引用任意历史回复即可跨线程续聊。状态与路由防抖持久化在 `data/bridge-state.json`，重启后自动恢复在途轮次。
-- **连续对话窗口（默认 120s）**：Bot 回复后在 `followUpWindowMs` 内可免 `@` 直接发文字，或连续发送图片/文件（`imageBatchMs` 默认 1.5s 防抖合批）；以 `#`、`备忘`、`记一下`、`笔记`、`todo` 开头的消息视为个人笔记自动忽略；连续对话期间在自聊转发单条或合并聊天记录不会提前打断抢答，等发送 `@bot ...` 时一次性作为前文打包注入，并在本轮消费完毕后自动清空（`#`/`备忘` 私人笔记严格隔离，Prompt 与按需拉取接口均不可读）；发 `@bot bye` / `退下` 随时退出。
+- **连续对话窗口（默认 120s）**：Bot 回复后在 `followUpWindowMs` 内可免 `@` 直接发文字，或连续发送图片/文件（`imageBatchMs` 默认 1.5s 防抖合批）；以 `#`、`备忘`、`记一下`、`笔记`、`便签`、`todo`、`待办`、`清单` 开头的消息视为个人笔记自动忽略；连续对话期间在自聊转发单条或合并聊天记录不会提前打断抢答，等发送 `@bot ...` 时一次性作为前文打包注入，并在本轮消费完毕后自动清空（私人笔记严格隔离，Prompt 与按需拉取接口均不可读）；发 `@bot bye` / `退下` 随时退出。
 - **气泡控制与多媒体**：中间思考口语短窗合并上屏（单轮最多 2 条）；正文在 `resultChars`～`softSplitChars`（1500～2800 字）间智能拆为 2 段，超长自动截断并附 `.md` 原文；支持入站音频转写（`transcript` / `transcribeAudio`）、`linkCard` 及 Bot 生成图片/文件的自动回传。
 - **原生斜杠命令透传**：支持 `@bot /goal <目标>`（进入 Goal 自动多步推进模式，群组 `@<群名> /goal` 同样适用）、`@bot /learn [步骤]`（沉淀为可复用技能）、`@bot /burst <并行任务>`（生成预览伪卡片，回复 `1`/`0` 或 `ok`/`no` 启动并发执行或取消）、`@bot /setup [职责]`（回复 `1`/`0` 或 `ok`/`no` 确认团队/人设提案）及自定义 `/<skill>`；斜杠命令发送时自动置顶并把项目/上下文块附于其后，确保与 OpenMausBot 原生契约完全兼容（仅限本人使用）。
 - **卡片交互与免打扰**：
@@ -81,7 +81,7 @@
 |  | `@bot delegate <会话> [proj:<项目>] <问题>` | 向已知同事 `co-bot` 发起私聊异步委托（别名 `委托`） |
 | **会话与控制** | `@bot status [群]` | 查看运行诊断、团队成员（含 `dead` 异常）、上下文占用与指定外群上下文 |
 |  | `@bot new [话题]` / `task [序号]` / `compact [群]` | 新建会话 / 列出并切换最近 5 个会话 / 压缩当前或指定外群上下文 |
-|  | `@bot stop` / `help` | 停止当前任务并清空队列 / 查看指令指南；卡片支持 `ok/always/no/skip` |
+|  | `@bot stop` / `help` | 停止当前任务并清空队列 / 查看指令指南；卡片支持 `1/2/0` 或 `ok/always/no/skip` |
 
 ---
 
@@ -136,8 +136,8 @@
 ## 七、Web 模拟器（`/sim`）、诊断台（`/debug`）与热插拔插件（`plugins/`）
 
 - **`/sim`（`http://127.0.0.1:8787/sim`）**：模拟自聊、`研发架构群` 与外部私聊；支持粘贴/上传图片、放大灯箱预览、纯 Markdown 文本交互（业务消息无交互按钮）、单条「转发到自聊」与右上角「多选 → 逐条→自聊 / 合并→自聊 / 合并→当前群」、超长转发原文与合并转发记录卡折叠展开、出站真 `@同事` 徽章展示、气泡一键撤回及历史持久化（`data/sim-history.json`）。
-- **`/debug`（`http://127.0.0.1:8787/debug`）**：纯本机只读诊断台，展示运行指标、`dead` 异常预警、插件能力声明与 `plugins/` 扩展状态、会话策略与一键**静音/允许**（内置防误静音 `self` 保护）、项目绑定/共享目录/C2C 委托统计、**一键导出脱敏诊断包**（`/api/debug/bundle`），以及按 `chatId` / `source` / `type` / `limit`（默认最近 250 条，含 `context_pull`、`followup_reply`、`security_redacted`、`policy_denied`、`delegation_req`、`delegation_res`、`recall`、`sendback`、`turn_failed` 等）筛选的实时事件流。
-- **即插即用扩展（`plugins/`）**：把自定义通道插件、命令、出站脱敏器、钩子或音频转写扩展放到 `./plugins/` 目录即可自动扫描加载（`pluginsStrict: false` 时单插件异常自动隔离不影响主链路），并支持通过 `/api/debug/action` 执行 `reload_plugin` 热重载。
+- **`/debug`（`http://127.0.0.1:8787/debug`）**：本机诊断台（含应急静音/放行开关），展示运行指标、`dead` 异常预警、插件能力声明与 `plugins/` 扩展状态、会话策略与一键**静音/允许**（内置防误静音 `self` 保护）、项目绑定/共享目录/C2C 委托统计、**一键导出脱敏诊断包**（`/api/debug/bundle`），以及按 `chatId` / `source` / `type` / `limit`（默认最近 250 条，含 `context_pull`、`followup_reply`、`security_redacted`、`policy_denied`、`delegation_req`、`delegation_res`、`recall`、`sendback`、`turn_failed` 等）筛选的实时事件流。
+- **即插即用扩展（`plugins/`）**：把自定义通道插件、命令、出站脱敏器、钩子或音频转写扩展放到 `./plugins/` 目录即可自动扫描加载（`pluginsStrict: false` 时单插件异常自动隔离不影响主链路）；非通道扩展插件支持通过 `/api/debug/action` 执行 `reload_plugin` 热重载。
 
 ---
 

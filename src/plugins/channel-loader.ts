@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_ROOT, isPathLikeSpecifier } from '../config.ts';
-import { defineChannelPlugin } from '../core/channel-contract.ts';
 import {
   type DiscoverPluginsResult,
   discoverPlugins,
@@ -24,7 +23,7 @@ export interface ResolvedChannelPlugin {
 
 /** 解析配置中的目标 IM 通道标识（优先 `overrideUse`，其次 `channel.use`，默认 `sim`；支持 `auto`）。 */
 export function resolveChannelSpec(
-  cfg: Pick<AppConfig, 'channel'> | null | undefined,
+  cfg: Partial<Pick<AppConfig, 'channel'>> | null | undefined,
   overrideUse = '',
 ): { kind: 'builtin' | 'auto' | 'external'; name: string; spec: string } {
   const raw = String(overrideUse || cfg?.channel?.use || 'sim').trim() || 'sim';
@@ -53,7 +52,7 @@ export async function loadChannelPlugin(
     discovered?: DiscoverPluginsResult | null;
   } = {},
 ): Promise<ResolvedChannelPlugin> {
-  const target = resolveChannelSpec(cfg as Pick<AppConfig, 'channel'> | undefined, overrideUse);
+  const target = resolveChannelSpec(cfg, overrideUse);
   const chanOpts = { ...(cfg?.channel?.options ?? {}) };
 
   if (target.kind === 'builtin' && target.name === 'sim') {
@@ -121,9 +120,7 @@ export async function loadChannelPlugin(
     const plugin = normalizePluginModule(mod, { fallbackName: 'custom-channel', source: sourceLabel });
     if (plugin.kind === 'extension') plugin.kind = 'channel';
     return {
-      plugin: typeof defSpec.create === 'function'
-        ? defineChannelPlugin({ ...defSpec, source: sourceLabel })
-        : plugin,
+      plugin,
       options: chanOpts,
       resolvedName: plugin.name || 'custom-channel',
     };

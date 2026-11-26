@@ -41,7 +41,7 @@ export default defineChannelPlugin<CustomImOptions>({
     files: true,       // false 时不尝试发 .md / 文件附件
     images: true,      // false 时不回传截图/图片
     replyTo: true,     // false 时忽略引用气泡参数
-    actions: false,    // 真实 IM 无模拟器内嵌按钮时保持 false
+    actions: false,    // 真实 IM 建议保持 false，co-bot 统一发 Markdown 伪卡片
     history: false,    // 实现下方可选 getMessage / getHistory 后设为 true
     notify: false,     // 若“自聊消息”无手机推送，实现下方 notify() 后设为 true
     maxChars: 0,       // 单条字符上限，如企微/短信限 2000，0 表示沿用 selfChat.resultChars
@@ -65,7 +65,7 @@ export default defineChannelPlugin<CustomImOptions>({
         //   onEvent({
         //     msgId: raw.id,
         //     chatId: raw.conversationId,
-        //     chatType: raw.isSelfChat ? 'self' : raw.isGroup ? 'group' : 'single',
+        //     chatType: raw.isSelfChat ? 'self' : raw.isGroup ? 'group' : 'direct',
         //     chatName: raw.conversationName,
         //     fromId: raw.senderId,
         //     fromName: raw.senderName,

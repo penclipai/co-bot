@@ -453,12 +453,14 @@
     const mid = ev?.recalledMsgId;
     if (!mid) return;
     seen.delete(mid);
+    const removedSelected = selectedIds.delete(mid);
     const idx = allMsgs.findIndex((m) => m.id === mid);
     if (idx >= 0) allMsgs.splice(idx, 1);
     if (replyTo === mid) {
       replyTo = null;
       replyBar.classList.remove('on');
     }
+    if (removedSelected) updateSelectBar();
     const cid = ev.chatId || 'self';
     if (cid === activeChat) {
       renderActiveChat();
@@ -583,6 +585,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!$('#lightbox').hidden) $('#lbClose').click();
+    else if (selectMode) exitSelectMode();
     else if (replyTo) $('#replyX').click();
   });
 
@@ -684,7 +687,10 @@
       const s = await fetch('/api/status').then((r) => r.json());
       const omb = s.openmausbot;
       const br = s.bridge;
-      if (br?.botName) brandName = br.botName;
+      if (br?.botName) {
+        brandName = br.botName;
+        document.title = `${brandName} · IM 模拟器`;
+      }
       if (omb?.url) $('#ombLink').href = omb.url;
       if (omb?.ok) {
         const chief = omb.bots.find((b) => b.chiefOfStaff) || omb.bots[0];
@@ -699,7 +705,7 @@
           const whoBusy = busyBot ? (busyBot.displayName || busyBot.name) : focusName;
           const qText = (br?.queuedCount ?? 0) > 0 ? ` · 排队 ${br.queuedCount}` : '';
           $('#sub').textContent = `${whoBusy} 正在处理…${qText}`;
-          if (activeChat === 'self' || sender === 'me') {
+          if (activeChat === 'self') {
             box.placeholder = '输入继续补充，或发 @bot steer 插队…';
           }
         } else if (activeChat !== 'self') {

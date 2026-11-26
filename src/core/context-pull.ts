@@ -172,7 +172,34 @@ export function collectContextAttachments({
   return { attachments: out, sourceMsgIds: [...srcSet] };
 }
 
-function formatClockShort(ts: number | undefined): string {
+export function redactSecrets(text: unknown): string {
+  const preMasked = String(text ?? '')
+    .replace(/\bomb_sess_[A-Za-z0-9_-]+/g, '[REDACTED]')
+    .replace(/\bctx_[A-Za-z0-9._-]{12,}/g, '[REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]');
+  return scanAndRedactOutbound(preMasked).text;
+}
+
+export function normalizeLinkCard(rawCard: unknown): LinkCard | null {
+  if (!rawCard || typeof rawCard !== 'object') return null;
+  const c = rawCard as AnyRecord;
+  const title = c.title ? String(c.title).trim() : '';
+  const url = c.url || c.href ? String(c.url || c.href).trim() : '';
+  const description = c.description || c.summary || c.digest
+    ? String(c.description || c.summary || c.digest).trim()
+    : '';
+  const source = c.source || c.appName ? String(c.source || c.appName).trim() : '';
+  if (!title && !url) return null;
+  return {
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(url ? { url } : {}),
+    ...(source ? { source } : {}),
+  };
+}
+
+export function formatClock(ts: number | undefined): string {
   const d = new Date(Number(ts) || Date.now());
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
@@ -180,7 +207,7 @@ function formatClockShort(ts: number | undefined): string {
 }
 
 function redactAndClip(text: unknown, max: number): string {
-  const s = scanAndRedactOutbound(String(text ?? '')).text.replace(/\r\n/g, '\n').trim();
+  const s = redactSecrets(text).replace(/\r\n/g, '\n').trim();
   if (!s) return '';
   return max > 0 && s.length > max ? `${s.slice(0, max)}…` : s;
 }
@@ -236,7 +263,7 @@ export function normalizeForwarded(
     const senderId = m.senderId ?? m.fromId ?? senderObj?.id;
     const ts = Number(m.ts ?? m.time);
     const text = m.text ?? m.content;
-    const linkCard = normalizeLinkCardFn ? normalizeLinkCardFn(m.linkCard ?? m.card) : null;
+    const linkCard = (normalizeLinkCardFn ?? normalizeLinkCard)(m.linkCard ?? m.card);
     const attachments = normalizeAttList(m.attachments ?? m.files, idStr || parentMsgId);
     if (!text && !linkCard && !attachments.length) continue;
     messages.push({
@@ -291,10 +318,10 @@ export function formatForwardedFull(bundle: ForwardedBundle | null | undefined):
   for (let i = 0; i < list.length; i += 1) {
     const m = list[i];
     const who = redactAndClip(m.senderName || m.senderId || '成员', 40);
-    const clock = m.ts ? `[${formatClockShort(m.ts)}] ` : '';
+    const clock = m.ts ? `[${formatClock(m.ts)}] ` : '';
     const idTag = m.id ? ` (id:${m.id})` : '';
     const parts: string[] = [];
-    if (m.text) parts.push(scanAndRedactOutbound(m.text).text.replace(/\r\n/g, '\n').trim());
+    if (m.text) parts.push(redactSecrets(m.text).replace(/\r\n/g, '\n').trim());
     if (m.linkCard) {
       const cTitle = redactAndClip(m.linkCard.title || m.linkCard.description || '卡片', 160);
       const cUrl = m.linkCard.url ? ` (${redactAndClip(m.linkCard.url, 200)})` : '';
@@ -352,6 +379,13 @@ export class ContextPullManager {
     if (!cid) throw new Error('chatId 不能为空');
     const existing = this.#grantsByChat.get(cid);
     if (existing) return existing;
+    while (this.#grantsByChat.size >= 200) {
+      const oldestChat = this.#grantsByChat.keys().next().value;
+      if (oldestChat === undefined) break;
+      const oldGrant = this.#grantsByChat.get(oldestChat);
+      this.#grantsByChat.delete(oldestChat);
+      if (oldGrant) this.#grantMeta.delete(oldGrant);
+    }
     const grant = `g_${crypto.randomBytes(5).toString('hex')}`;
     this.#grantsByChat.set(cid, grant);
     this.#grantMeta.set(grant, { chatId: cid, hits: [] });
@@ -369,12 +403,12 @@ export class ContextPullManager {
 
   #composeFullText(msg: ChatContextMessage): string {
     const chunks: string[] = [];
-    if (msg.text) chunks.push(scanAndRedactOutbound(msg.text).text.replace(/\r\n/g, '\n').trim());
+    if (msg.text) chunks.push(redactSecrets(msg.text).replace(/\r\n/g, '\n').trim());
     if (msg.forwarded) chunks.push(formatForwardedFull(msg.forwarded));
     if (msg.linkCard) {
       const cardParts = [msg.linkCard.title, msg.linkCard.description, msg.linkCard.url]
         .filter(Boolean)
-        .map((x) => scanAndRedactOutbound(String(x)).text.trim());
+        .map((x) => redactSecrets(x).trim());
       if (cardParts.length) chunks.push(`[卡片]\n${cardParts.join('\n')}`);
     }
     if (msg.attachments?.length) {
@@ -389,7 +423,7 @@ export class ContextPullManager {
     return {
       id: msg.id,
       ts: msg.ts,
-      time: formatClockShort(msg.ts),
+      time: formatClock(msg.ts),
       sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
       ...(msg.isBotReply ? { isBotReply: true } : {}),
       ...(msg.isForwarded ? { isForwarded: true } : {}),

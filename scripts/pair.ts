@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { APP_ROOT, loadConfig } from '../src/config.ts';
+import { APP_ROOT, loadConfig, readJsonFile } from '../src/config.ts';
 import { writeJsonAtomic } from '../src/format.ts';
 import { OpenMausBotClient } from '../src/openmausbot/client.ts';
 import type { OmbAuthSession, OmbHttpError } from '../src/openmausbot/types.ts';
@@ -85,9 +85,9 @@ async function saveAndVerifyToken({
   let raw: Record<string, unknown> = {};
   const examplePath = path.join(APP_ROOT, 'config.example.json');
   if (existingConfigPath) {
-    raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    raw = readJsonFile(configPath) as Record<string, unknown>;
   } else if (fs.existsSync(examplePath)) {
-    raw = JSON.parse(fs.readFileSync(examplePath, 'utf8')) as Record<string, unknown>;
+    raw = readJsonFile(examplePath) as Record<string, unknown>;
   }
 
   if (!raw.openmausbot || typeof raw.openmausbot !== 'object' || Array.isArray(raw.openmausbot)) {
@@ -190,7 +190,7 @@ async function main(): Promise<void> {
 
   const configPath = configFile ? path.resolve(configFile) : path.join(APP_ROOT, 'config.json');
   const existingConfigPath = fs.existsSync(configPath) ? configPath : null;
-  const cfg = loadConfig(argv, existingConfigPath ?? undefined);
+  const cfg = loadConfig(argv, existingConfigPath);
   const client = new OpenMausBotClient({ baseUrl: cfg.openmausbot.url, timeoutMs: 10_000 });
 
   if (!code || login) {

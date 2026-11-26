@@ -7,8 +7,9 @@ import type { AddressInfo } from 'node:net';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
 import { promisify } from 'node:util';
+import vm from 'node:vm';
 import { clip, plain, hardBreaks, mdClip, mdSplit, fileSafe, pruneExpiredFiles, safeAttachmentName, stripSingleLineLeadingBold, writeJsonAtomic } from '../src/format.ts';
-import { loadConfig, APP_ROOT } from '../src/config.ts';
+import { loadConfig, readJsonFile, APP_ROOT } from '../src/config.ts';
 import { inQuietHours, OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import { formatCardPrompt, parseChoiceIndex } from '../src/openmausbot/cards.ts';
 import { attachBotBadge, hasBotBadgePrefix } from '../src/core/security.ts';
@@ -456,4 +457,42 @@ test('stripSingleLineLeadingBold strips leading ** only on single-line messages'
   assert.equal(stripSingleLineLeadingBold('**结论**：OK'), '结论：OK');
   assert.equal(stripSingleLineLeadingBold('**🟢 co-bot 在线**\n- 列表项'), '**🟢 co-bot 在线**\n- 列表项');
   assert.equal(stripSingleLineLeadingBold('🤖 **[co-bot]** 收到'), '🤖 **[co-bot]** 收到');
+});
+
+test('safeAttachmentName slices before stripping leading dots', () => {
+  const raw = `${'a'.repeat(50)}.hidden_${'b'.repeat(95)}.txt`;
+  const clean = safeAttachmentName(raw);
+  assert.equal(clean.startsWith('.'), false);
+  assert.equal(clean.length <= 100, true);
+});
+
+test('readJsonFile handles UTF-8 BOM and loadConfig supports explicit null without ENOENT', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-cfg-bom-'));
+  try {
+    const bomPath = path.join(dir, 'bom.json');
+    fs.writeFileSync(bomPath, '\uFEFF{"openmausbot":{"url":"http://127.0.0.1:9111"}}', 'utf8');
+    const parsed = readJsonFile(bomPath) as { openmausbot?: { url?: string } };
+    assert.equal(parsed.openmausbot?.url, 'http://127.0.0.1:9111');
+
+    const cfg = loadConfig(['--config', path.join(dir, 'missing.json'), '--omb', 'http://127.0.0.1:9222'], null);
+    assert.equal(cfg.openmausbot.url, 'http://127.0.0.1:9222');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('public/md.js handles nested fences, adjacent mixed lists, and code-pipe table cells', () => {
+  const src = fs.readFileSync(path.join(APP_ROOT, 'public/md.js'), 'utf8');
+  const win: { renderMarkdown?: (s: string) => string } = {};
+  vm.runInNewContext(src, { window: win });
+  const render = win.renderMarkdown!;
+
+  const nested = render('````md\n```ts\nconst x = 1;\n```\n````\nafter');
+  assert.match(nested, /<pre><code>```ts\nconst x = 1;\n```<\/code><\/pre><p>after<\/p>/);
+
+  const mixedLists = render('- a\n- b\n1. one\n2. two');
+  assert.equal(mixedLists, '<ul><li>a</li><li>b</li></ul><ol><li>one</li><li>two</li></ol>');
+
+  const pipeTable = render('|Expr|Result|\n|---|---|\n|`a | b`|ok|');
+  assert.match(pipeTable, /<td><code>a \| b<\/code><\/td><td>ok<\/td>/);
 });

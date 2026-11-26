@@ -7,7 +7,6 @@ import { SCOPED_SERVICE, type ScopedServiceProvider } from '../core/kernel.ts';
 import { listCustomRedactors, registerCustomRedactor } from '../core/security.ts';
 import type {
   AudioTranscriberFn,
-  CommandRegistryService,
   CustomRedactorRule,
   HooksExtensionService,
   KernelContext,
@@ -15,11 +14,6 @@ import type {
   PluginCommandDef,
   SecurityExtensionService,
 } from '../types.ts';
-
-function bindDispose<T>(ownerCtx: KernelContext, disposeFn: () => void, ret: T): T {
-  ownerCtx.effect(disposeFn);
-  return ret;
-}
 
 /** 构造内置扩展点提供插件，统一向外部插件暴露命令、安全与入站钩子能力。 */
 export const extensionsPlugin: KernelPlugin = {
@@ -37,10 +31,7 @@ export const extensionsPlugin: KernelPlugin = {
       {
         [SCOPED_SERVICE](callerCtx: KernelContext): CommandRegistry {
           return {
-            register: (def: PluginCommandDef) => {
-              const off = commandRegistry.register(def);
-              return bindDispose(callerCtx, off, off);
-            },
+            register: (def: PluginCommandDef) => callerCtx.effect(commandRegistry.register(def)),
             match: (rawCmd: string) => commandRegistry.match(rawCmd),
             list: () => commandRegistry.list(),
           } as CommandRegistry;
@@ -53,10 +44,7 @@ export const extensionsPlugin: KernelPlugin = {
       listRedactors: () => listCustomRedactors(),
       [SCOPED_SERVICE](callerCtx: KernelContext): SecurityExtensionService {
         return {
-          registerRedactor: (rule: CustomRedactorRule) => {
-            const off = registerCustomRedactor(rule);
-            return bindDispose(callerCtx, off, off);
-          },
+          registerRedactor: (rule: CustomRedactorRule) => callerCtx.effect(registerCustomRedactor(rule)),
           listRedactors: () => listCustomRedactors(),
         };
       },
@@ -67,10 +55,7 @@ export const extensionsPlugin: KernelPlugin = {
       transcribeAudio: hookRegistry.transcribeAudio,
       [SCOPED_SERVICE](callerCtx: KernelContext): HooksExtensionService {
         return {
-          registerAudioTranscriber: (fn: AudioTranscriberFn) => {
-            const off = hookRegistry.registerAudioTranscriber(fn);
-            return bindDispose(callerCtx, off, off);
-          },
+          registerAudioTranscriber: (fn: AudioTranscriberFn) => callerCtx.effect(hookRegistry.registerAudioTranscriber(fn)),
           transcribeAudio: hookRegistry.transcribeAudio,
         };
       },
@@ -80,7 +65,7 @@ export const extensionsPlugin: KernelPlugin = {
     ctx.provide('security', securityProvider);
     ctx.provide('hooks', hooksProvider);
     ctx.status(() => ({
-      commands: (commandRegistry as CommandRegistryService).list().map((c) => c.name),
+      commands: commandRegistry.list().map((c) => c.name),
       redactors: listCustomRedactors(),
     }));
   },

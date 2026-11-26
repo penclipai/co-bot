@@ -11,12 +11,18 @@ import type {
   ForwardedMessageItem,
   InboundAttachment,
   InboundEvent,
+  LinkCard,
   SanitizeMentionsMode,
 } from '../types.ts';
-import { collectContextAttachments, formatForwardedFull, formatForwardedSummary } from './context-pull.ts';
-import { scanAndRedactOutbound } from './security.ts';
+import {
+  collectContextAttachments,
+  formatClock,
+  formatForwardedFull,
+  formatForwardedSummary,
+  redactSecrets,
+} from './context-pull.ts';
 
-export { collectContextAttachments };
+export { collectContextAttachments, redactSecrets };
 
 interface ChatBucket {
   meta: { id: string; type: ChatType; name?: string };
@@ -54,15 +60,6 @@ export function isAudioAttachment(att: Partial<InboundAttachment> | null | undef
   if (typeof att.mime === 'string' && att.mime.toLowerCase().startsWith('audio/')) return true;
   if (typeof att.name === 'string' && AUDIO_EXT_RE.test(att.name)) return true;
   return false;
-}
-
-export function redactSecrets(text: unknown): string {
-  const preMasked = String(text ?? '')
-    .replace(/\bomb_sess_[A-Za-z0-9_-]+/g, '[REDACTED]')
-    .replace(/\bctx_[A-Za-z0-9._-]{12,}/g, '[REDACTED]')
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]');
-  return scanAndRedactOutbound(preMasked).text;
 }
 
 const DANGEROUS_MENTION_RE = /^(all|everyone|here|channel|所有人|全体成员|全体|大家|bot|ai|主bot)$/i;
@@ -133,31 +130,44 @@ function cloneAttachments(attachments: InboundAttachment[] | undefined, fallback
     }));
 }
 
-function formatClock(ts: number): string {
-  const d = new Date(Number(ts) || Date.now());
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+function sanitizeLinkCard(card: LinkCard | null | undefined): LinkCard | undefined {
+  if (!card || typeof card !== 'object') return undefined;
+  const title = card.title ? clipText(card.title, 200) : '';
+  const description = card.description ? clipText(card.description, 400) : '';
+  const url = card.url ? redactSecrets(card.url).trim() : '';
+  const source = card.source ? clipText(card.source, 120) : '';
+  if (!title && !description && !url && !source) return undefined;
+  return {
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(url ? { url } : {}),
+    ...(source ? { source } : {}),
+  };
+}
+
+function addBoundedSet(set: Set<string>, value: string, cap: number): void {
+  set.add(value);
+  while (set.size > cap) {
+    const first = set.values().next().value;
+    if (first === undefined) break;
+    set.delete(first);
+  }
 }
 
 function sanitizeForwarded(bundle: ForwardedBundle | undefined, fallbackMsgId: string): ForwardedBundle | undefined {
   if (!bundle || (!bundle.title && !bundle.messages?.length)) return undefined;
-  const items: ForwardedMessageItem[] = (bundle.messages ?? []).slice(0, 50).map((m) => ({
-    ...(m.id ? { id: String(m.id) } : {}),
-    ...(m.senderName ? { senderName: clipText(m.senderName, 80) } : {}),
-    ...(m.senderId ? { senderId: String(m.senderId) } : {}),
-    ...(m.ts ? { ts: Number(m.ts) } : {}),
-    ...(m.text ? { text: clipText(m.text, 16_384) } : {}),
-    ...(m.linkCard ? {
-      linkCard: {
-        ...(m.linkCard.title ? { title: clipText(m.linkCard.title, 200) } : {}),
-        ...(m.linkCard.description ? { description: clipText(m.linkCard.description, 400) } : {}),
-        ...(m.linkCard.url ? { url: redactSecrets(m.linkCard.url).trim() } : {}),
-        ...(m.linkCard.source ? { source: clipText(m.linkCard.source, 120) } : {}),
-      },
-    } : {}),
-    ...(m.attachments?.length ? { attachments: cloneAttachments(m.attachments, m.id || fallbackMsgId) } : {}),
-  }));
+  const items: ForwardedMessageItem[] = (bundle.messages ?? []).slice(0, 50).map((m) => {
+    const linkCard = sanitizeLinkCard(m.linkCard);
+    return {
+      ...(m.id ? { id: String(m.id) } : {}),
+      ...(m.senderName ? { senderName: clipText(m.senderName, 80) } : {}),
+      ...(m.senderId ? { senderId: String(m.senderId) } : {}),
+      ...(m.ts ? { ts: Number(m.ts) } : {}),
+      ...(m.text ? { text: clipText(m.text, 16_384) } : {}),
+      ...(linkCard ? { linkCard } : {}),
+      ...(m.attachments?.length ? { attachments: cloneAttachments(m.attachments, m.id || fallbackMsgId) } : {}),
+    };
+  });
   return {
     ...(bundle.title ? { title: clipText(bundle.title, 120) } : {}),
     messages: items,
@@ -172,7 +182,7 @@ function entryCharSize(entry: ChatContextMessage): number {
   return len;
 }
 
-const SELF_NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
+export const SELF_NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
 const SELF_PRIOR_REF_RE = /(以上|上面|上述|前面|前文|刚才|刚刚|转发|聊天记录|这几条|这些内容|这些消息|上下文|above|previous|forwarded)/i;
 
 export class ChatContextStore {
@@ -272,12 +282,28 @@ export class ChatContextStore {
     }
   }
 
+  #enforceBucketCharCap(bucket: ChatBucket): void {
+    let totalChars = 0;
+    for (const id of bucket.order) {
+      const item = bucket.byId.get(id);
+      if (item) totalChars += entryCharSize(item);
+    }
+    while (bucket.order.length > 1 && totalChars > this.maxBucketChars) {
+      const dropped = bucket.order.shift();
+      if (dropped === undefined) break;
+      const old = bucket.byId.get(dropped);
+      bucket.byId.delete(dropped);
+      if (old) totalChars -= entryCharSize(old);
+    }
+  }
+
   #upsertEntry(bucket: ChatBucket, entry: ChatContextMessage): ChatContextMessage {
     const existing = bucket.byId.get(entry.id);
     if (existing) {
       const merged = { ...existing, ...entry };
       bucket.byId.set(entry.id, merged);
-      return merged;
+      this.#enforceBucketCharCap(bucket);
+      return bucket.byId.get(entry.id) ?? merged;
     }
     bucket.byId.set(entry.id, entry);
     if (!bucket.order.length || (bucket.byId.get(bucket.order[bucket.order.length - 1])?.ts ?? 0) <= entry.ts) {
@@ -291,26 +317,48 @@ export class ChatContextStore {
       const dropped = bucket.order.shift();
       if (dropped !== undefined) bucket.byId.delete(dropped);
     }
-    let totalChars = 0;
-    for (const id of bucket.order) {
-      const item = bucket.byId.get(id);
-      if (item) totalChars += entryCharSize(item);
-    }
-    while (bucket.order.length > 1 && totalChars > this.maxBucketChars) {
-      const dropped = bucket.order.shift();
-      if (dropped === undefined) break;
-      const old = bucket.byId.get(dropped);
-      bucket.byId.delete(dropped);
-      if (old) totalChars -= entryCharSize(old);
-    }
+    this.#enforceBucketCharCap(bucket);
     return entry;
+  }
+
+  /** 将入站事件或通道历史条目规整并脱敏为 `ChatContextMessage`（不写入存储）。 */
+  normalizeInbound(
+    ev: Partial<InboundEvent> | null | undefined,
+    fallbackChatId = '',
+    fallbackChatMeta?: { type?: ChatType; name?: string },
+  ): ChatContextMessage | null {
+    if (!ev?.id || ev.kind === 'recall') return null;
+    const chatId = String(ev.chat?.id ?? fallbackChatId ?? '');
+    if (!chatId || (fallbackChatId && chatId !== String(fallbackChatId))) return null;
+    const mid = String(ev.id);
+    const ts = Number(ev.ts) || this.now();
+    const forwarded = sanitizeForwarded(ev.forwarded, mid);
+    const linkCard = sanitizeLinkCard(ev.linkCard);
+    return {
+      id: mid,
+      ts,
+      chatId,
+      chatType: ev.chat?.type || fallbackChatMeta?.type || 'direct',
+      chatName: ev.chat?.name ? String(ev.chat.name) : fallbackChatMeta?.name,
+      senderId: String(ev.sender?.id ?? ''),
+      senderName: ev.sender?.name ? String(ev.sender.name) : undefined,
+      isSelf: Boolean(ev.sender?.isSelf),
+      isBotReply: false,
+      replyTo: ev.replyTo != null ? String(ev.replyTo) : undefined,
+      mentionsMe: Boolean(ev.mentionsMe),
+      ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
+      text: clipText(ev.text ?? '', this.maxTextChars),
+      ...(linkCard ? { linkCard } : {}),
+      ...(ev.isForwarded || forwarded ? { isForwarded: true } : {}),
+      ...(forwarded ? { forwarded } : {}),
+      attachments: cloneAttachments(ev.attachments, mid),
+    };
   }
 
   recordInbound(ev: Partial<InboundEvent> | null | undefined): ChatContextMessage | null {
     if (!ev?.id || !ev?.chat?.id) return null;
     if (ev.kind === 'recall') return null;
     const chatId = String(ev.chat.id);
-    const ts = Number(ev.ts) || this.now();
     const bucket = this.#getOrCreateBucket(chatId, {
       type: ev.chat.type,
       name: ev.chat.name,
@@ -322,34 +370,8 @@ export class ChatContextStore {
         if (m && !m.isAll) this.#rememberMember(bucket, m.id, m.name);
       }
     }
-    const forwarded = sanitizeForwarded(ev.forwarded, String(ev.id));
-    const entry: ChatContextMessage = {
-      id: String(ev.id),
-      ts,
-      chatId,
-      chatType: bucket.meta.type,
-      chatName: bucket.meta.name,
-      senderId: String(ev.sender?.id ?? ''),
-      senderName: ev.sender?.name ? String(ev.sender.name) : undefined,
-      isSelf: Boolean(ev.sender?.isSelf),
-      isBotReply: false,
-      replyTo: ev.replyTo != null ? String(ev.replyTo) : undefined,
-      mentionsMe: Boolean(ev.mentionsMe),
-      ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
-      text: clipText(ev.text ?? '', this.maxTextChars),
-      ...(ev.linkCard ? {
-        linkCard: {
-          ...(ev.linkCard.title ? { title: clipText(ev.linkCard.title, 200) } : {}),
-          ...(ev.linkCard.description ? { description: clipText(ev.linkCard.description, 400) } : {}),
-          ...(ev.linkCard.url ? { url: redactSecrets(ev.linkCard.url).trim() } : {}),
-          ...(ev.linkCard.source ? { source: clipText(ev.linkCard.source, 120) } : {}),
-        },
-      } : {}),
-      ...(ev.isForwarded || forwarded ? { isForwarded: true } : {}),
-      ...(forwarded ? { forwarded } : {}),
-      attachments: cloneAttachments(ev.attachments, ev.id),
-    };
-    return this.#upsertEntry(bucket, entry);
+    const entry = this.normalizeInbound(ev, chatId, bucket.meta);
+    return entry ? this.#upsertEntry(bucket, entry) : null;
   }
 
   recallMessage(chatId: string, msgId: string): { ok: boolean; removed: boolean } {
@@ -357,11 +379,7 @@ export class ChatContextStore {
     const cid = String(chatId);
     const mid = String(msgId);
     const bucket = this.#getOrCreateBucket(cid);
-    bucket.recalled.add(mid);
-    if (bucket.recalled.size > 200) {
-      const first = bucket.recalled.values().next().value;
-      if (first !== undefined) bucket.recalled.delete(first);
-    }
+    addBoundedSet(bucket.recalled, mid, 200);
     const existed = bucket.byId.delete(mid);
     if (existed) {
       const idx = bucket.order.indexOf(mid);
@@ -517,12 +535,7 @@ export class ChatContextStore {
     if (!bucket) return;
     for (const id of msgIds) {
       const s = String(id ?? '').trim();
-      if (!s) continue;
-      bucket.dispatchedIds.add(s);
-      if (bucket.dispatchedIds.size > 500) {
-        const oldest = bucket.dispatchedIds.values().next().value;
-        if (oldest !== undefined) bucket.dispatchedIds.delete(oldest);
-      }
+      if (s) addBoundedSet(bucket.dispatchedIds, s, 500);
     }
   }
 
@@ -553,12 +566,13 @@ export class ChatContextStore {
   hasOlderMessages(chatId: string, oldestIncludedId?: string | null): boolean {
     const bucket = this.chats.get(String(chatId));
     if (!bucket?.order.length) return false;
-    if (!oldestIncludedId) return bucket.order.length > 0;
+    if (!oldestIncludedId) return true;
     const idx = bucket.order.indexOf(String(oldestIncludedId));
     return idx > 0;
   }
 
   searchMessages(chatId: string, query: string, limit = 20): ChatContextMessage[] {
+    this.#pruneExpired();
     const bucket = this.chats.get(String(chatId));
     const q = String(query ?? '').trim().toLowerCase();
     if (!bucket || !q) return [];

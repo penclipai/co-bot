@@ -8,7 +8,6 @@ import type {
   OmbHttpError,
   OmbMessage,
   OmbSseEvent,
-  OmbTargetBot,
   OmbTaskSummary,
 } from './types.ts';
 
@@ -368,10 +367,6 @@ export class OpenMausBotClient {
     return this.#json(`/api/bursts/${enc(burstId)}/cancel`, { method: 'POST', body: {} });
   }
 
-  retryBurst(burstId: string): Promise<Record<string, unknown>> {
-    return this.#json(`/api/bursts/${enc(burstId)}/retry`, { method: 'POST', body: {} });
-  }
-
   getMessages(threadId: string, limit = 20): Promise<{ messages?: OmbMessage[] }> {
     return this.#json(`/api/threads/${enc(threadId)}/messages?limit=${limit}`);
   }
@@ -515,5 +510,3 @@ export class OpenMausBotClient {
     }
   }
 }
-
-export type { OmbTargetBot };

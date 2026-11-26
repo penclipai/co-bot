@@ -16,6 +16,7 @@ export function compactChatCtx(chatCtx: BridgeChatContext | CompactChatContext |
           originChatType: chatCtx.polishDraft.originChatType || 'group',
           replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
           addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
+          ...(chatCtx.polishDraft.forceBotPrefix ? { forceBotPrefix: true } : {}),
           ...(chatCtx.polishDraft.delegationRe ? { delegationRe: chatCtx.polishDraft.delegationRe } : {}),
         },
       };

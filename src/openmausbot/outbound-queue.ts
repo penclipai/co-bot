@@ -65,7 +65,11 @@ export async function flushOutboundBuffer(bridge: OpenMausBotBridge): Promise<nu
       for (const rem of items.slice(i)) bufferOutboundItem(bridge, rem);
       break;
     }
-    const sid = await bridge.say(it.text, it.route, it.replyTo, it.actions, { chatId: it.chatId, noBuffer: true });
+    const sid = await bridge.say(it.text, it.route, it.replyTo, it.actions, {
+      chatId: it.chatId,
+      noBuffer: true,
+      ...(it.mentions?.length ? { mentions: it.mentions } : {}),
+    });
     if (sid != null) {
       replayed += 1;
       bridge.outboundReplayed += 1;
@@ -123,6 +127,7 @@ export async function sendBridgeText(
         route: msgRoute,
         replyTo,
         actions,
+        ...(Array.isArray(extra?.mentions) && extra.mentions.length ? { mentions: extra.mentions } : {}),
         expiresAt: bridge.now() + (Number(bridge.outboundBufferTtlMs) || 5 * 60_000),
       });
       return null;
@@ -165,6 +170,7 @@ export async function sendBridgeText(
             route: msgRoute,
             replyTo,
             actions,
+            ...(Array.isArray(extra?.mentions) && extra.mentions.length ? { mentions: extra.mentions } : {}),
             expiresAt: bridge.now() + (Number(bridge.outboundBufferTtlMs) || 5 * 60_000),
           });
         }

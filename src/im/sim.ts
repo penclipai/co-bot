@@ -207,7 +207,10 @@ export class WebSimTransport {
     this.#loadHistory();
     if (this.fileRetentionDays > 0) {
       const ttlMs = this.fileRetentionDays * DAY_MS;
-      this.cleanupTimer = setInterval(() => pruneExpiredFiles(this.filesDir, ttlMs), DAY_MS);
+      this.cleanupTimer = setInterval(
+        () => pruneExpiredFiles(this.filesDir, ttlMs, { keepPaths: [...this.files.values()].map((f) => f.path) }),
+        DAY_MS,
+      );
       this.cleanupTimer.unref?.();
     }
     const { web } = this;
@@ -220,7 +223,19 @@ export class WebSimTransport {
       for (const m of this.history) res.write(`data: ${JSON.stringify(m)}\n\n`);
       res.write(`data: ${JSON.stringify({ kind: 'history_end' })}\n\n`);
       this.clients.add(res);
-      const hb = setInterval(() => res.write(': hb\n\n'), 20_000);
+      const hb = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          clearInterval(hb);
+          this.clients.delete(res);
+          return;
+        }
+        try {
+          res.write(': hb\n\n');
+        } catch {
+          clearInterval(hb);
+          this.clients.delete(res);
+        }
+      }, 20_000);
       hb.unref?.();
       req.on('close', () => { clearInterval(hb); this.clients.delete(res); });
     });
@@ -379,8 +394,8 @@ export class WebSimTransport {
         return;
       }
       const stream = fs.createReadStream(f.path);
+      res.on('close', () => { if (!stream.destroyed) stream.destroy(); });
       stream.on('error', () => {
-        if (!res.headersSent) res.writeHead(404);
         if (!res.writableEnded) res.destroy();
       });
       stream.pipe(res);
@@ -514,6 +529,7 @@ export class WebSimTransport {
     }
     this.#saveHistory();
     for (const c of this.clients) c.end();
+    this.clients.clear();
   }
 
   status() {

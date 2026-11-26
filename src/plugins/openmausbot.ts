@@ -37,10 +37,10 @@ export async function probeOpenMausBot(client: OpenMausBotClient): Promise<Probe
   const [botsRes, env, sess] = await Promise.all([
     client.listBots().catch((e: OmbHttpError) => ({ bots: [] as OmbBot[], groups: [] as OmbGroup[], _error: e })),
     client.environment().catch(() => null),
-    client.authSession().catch((e: OmbHttpError) => ({ _error: e } as OmbAuthSession & { _error?: OmbHttpError })),
+    client.authSession().catch((e: OmbHttpError): OmbAuthSession & { _error?: OmbHttpError } => ({ _error: e })),
   ]);
   const botsErr = '_error' in botsRes ? botsRes._error : undefined;
-  const sessErr = '_error' in sess ? (sess as { _error?: OmbHttpError })._error : undefined;
+  const sessErr = '_error' in sess ? sess._error : undefined;
   const authErr = [botsErr, sessErr].find((e) => e?.status === 401 || e?.status === 403) ?? null;
   const bots = Array.isArray(botsRes?.bots) ? botsRes.bots : [];
   const groups = Array.isArray(botsRes?.groups) ? botsRes.groups : [];
@@ -124,12 +124,11 @@ export const openmausbotPlugin: KernelPlugin<OpenMausBotPluginOptions> = {
       ...cfg.selfChat,
     });
 
+    ctx.effect(() => bridge.stop());
     await bridge.start();
-    const offChanState = ctx.on('channel:state', (p) => {
+    ctx.on('channel:state', (p) => {
       if ((p as { connected?: boolean } | null)?.connected) bridge.flushOutboundBuffer().catch(() => {});
     });
-    ctx.effect(() => offChanState());
-    ctx.effect(() => bridge.stop());
 
     const ombService: OpenMausBotService = {
       client,

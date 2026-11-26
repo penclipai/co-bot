@@ -7,8 +7,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import path from 'node:path';
-import { APP_ROOT, loadConfig, validateConfig } from '../src/config.ts';
+import { loadConfig, readJsonFile, resolveConfigPath, validateConfig } from '../src/config.ts';
 import { discoverPlugins } from '../src/core/plugin-loader.ts';
 import { OpenMausBotClient } from '../src/openmausbot/client.ts';
 import { resolveChannelSpec } from '../src/plugins/channel-loader.ts';
@@ -18,14 +17,12 @@ import { findOpenMausBotServer, probeHostOf } from './omb.ts';
 
 const argv = process.argv.slice(2);
 const fixCli = argv.includes('--fix-cli');
-const cfgIdx = argv.indexOf('--config');
-const explicitCfg = cfgIdx >= 0 && argv[cfgIdx + 1] ? argv[cfgIdx + 1] : null;
-const rawCfgPath = explicitCfg ?? (fs.existsSync('config.json') ? 'config.json' : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null));
+const rawCfgPath = resolveConfigPath(argv);
 let fails = 0;
 
 if (rawCfgPath && fs.existsSync(rawCfgPath)) {
   try {
-    const rawJson: unknown = JSON.parse(fs.readFileSync(rawCfgPath, 'utf8'));
+    const rawJson = readJsonFile(rawCfgPath);
     const v = validateConfig(rawJson);
     for (const w of v.warnings) console.log(`⚠ [config] ${w}`);
     for (const e of v.errors) { console.error(`✗ [config] ${e}`); fails++; }

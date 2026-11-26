@@ -20,7 +20,7 @@
        }
      }
      ```
-   - **热插拔目录模式**：放到 `pluginsDir`（默认 `./plugins`）子目录下并声明 `kind: 'channel'`；当 `config.channel.use` 为 `'auto'` 时自动发现加载，支持 `/api/debug/action` 热重载。
+   - **目录插件模式**：放到 `pluginsDir`（默认 `./plugins`）子目录下并声明 `kind: 'channel'`；当 `config.channel.use` 为 `'auto'` 时自动发现加载（通道插件变更需重启生效，非通道扩展插件支持 `/api/debug/action` `reload_plugin` 热重载）。
 2. **托管运行时行为**：`ManagedChannel` 会自动接管以下能力，插件无需重复实现：
    - 断线指数退避重连（`reconnectDelayMs = 2000ms` 至 `maxReconnectDelayMs = 30000ms`）；
    - `selfChatId` 自动学习（首条 `chat.type === 'self'` 入站消息自动回填）；
@@ -40,7 +40,7 @@
 | `images` | `boolean` | 同 `files` | 为 `false` 时不回传 Bot 截图与图片 |
 | `replyTo` | `boolean` | `true` | 为 `false` 时出站忽略 `opts.replyTo` 引用参数 |
 | `actions` | `boolean` | `false` | 真实 IM 建议保持 `false`；`co-bot` 统一使用结构化 Markdown 伪卡片 |
-| `history` | `boolean` | `false` | 若实现 `getHistory` / `getMessage`，建议显式设为 `true`，使 `context_pull` 可穿透拉取进程启动前或更早历史 |
+| `history` | `boolean` | 按是否实现 `getHistory`/`getMessage` 自动推断 | 显式设为 `false` 可禁用历史穿透；实现 `getHistory` 后默认自动启用，使 `context_pull` 可拉取更早历史 |
 | `notify` | `boolean` | 按是否实现 `notify` 推断 | 若"给自己发自聊消息"手机端无系统通知，实现 `notify()` 并设为 `true` |
 | `maxChars` | `number` | `0` | 单条文本硬上限（例如 `2000`）；`0` 表示沿用 `selfChat.resultChars`（默认 `1500`） |
 | `multiDevice` | `boolean` | `false` | 是否在 `device` 中区分 `mobile` / `desktop` / `pad` / `web`，配合 `commandDevices` 过滤 |

@@ -179,7 +179,7 @@ export const fileSafe = (s: unknown): string => String(s ?? '')
 /** 统一清洗入站/出站附件文件名，去除路径段、危险字符与前导点。 */
 export function safeAttachmentName(raw: unknown, fallback = 'file'): string {
   const baseName = path.posix.basename(String(raw || fallback).replace(/\\/g, '/'));
-  return baseName.replace(/[^\w.\-\u4e00-\u9fff]/g, '_').replace(/^\.+/, '_').slice(-100) || fallback;
+  return baseName.replace(/[^\w.\-\u4e00-\u9fff]/g, '_').slice(-100).replace(/^\.+/, '_') || fallback;
 }
 
 /** 原子写入 JSON 文件（先写临时文件再 rename），防止半写损坏状态。 */

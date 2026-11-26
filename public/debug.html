@@ -55,7 +55,7 @@
 <body>
   <div class="wrap">
     <header>
-      <h1>co-bot 本地只读诊断台</h1>
+      <h1>co-bot 本地诊断台</h1>
       <div class="toolbar">
         <span id="updatedAt">加载中…</span>
         <button id="exportBtn" type="button">导出诊断包</button>
@@ -113,7 +113,11 @@
             <option value="recall">recall</option>
             <option value="sendback">sendback</option>
             <option value="card">card</option>
+            <option value="card_answer">card_answer</option>
+            <option value="card_dismiss">card_dismiss</option>
             <option value="proactive">proactive</option>
+            <option value="notify">notify</option>
+            <option value="media_failed">media_failed</option>
             <option value="security_redacted">security_redacted</option>
             <option value="policy_denied">policy_denied</option>
             <option value="project_bound">project_bound</option>
@@ -127,6 +131,7 @@
             <option value="outbound_replayed">outbound_replayed</option>
             <option value="outbound_failed">outbound_failed</option>
             <option value="state_corrupt">state_corrupt</option>
+            <option value="state_save_error">state_save_error</option>
             <option value="context_pull">context_pull</option>
             <option value="followup_reply">followup_reply</option>
             <option value="plugin_reloaded">plugin_reloaded</option>
@@ -179,12 +184,12 @@
         const chief = (omb.bots || []).find((b) => b.chiefOfStaff) || (omb.bots || [])[0];
         const deadBots = (omb.bots || []).filter((b) => b.activity === 'dead');
         if (deadBots.length) {
-          ombBox.appendChild(badge(`异常: ${deadBots.map((b) => b.name).join('、')} (dead)`, 'err'));
+          ombBox.appendChild(badge(`异常: ${deadBots.map((b) => b.displayName || b.name).join('、')} (dead)`, 'err'));
         }
         const waitCount = (omb.bots || []).filter((b) => b.waitingForTeammates).length;
         addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}${waitCount ? `（${waitCount} 个等待队友）` : ''}`);
         if (chief?.approvalMode) {
-          addLine(ombBox, '主 Bot 审批模式', `${chief.name} · ${chief.approvalMode}`);
+          addLine(ombBox, '主 Bot 审批模式', `${chief.displayName || chief.name} · ${chief.approvalMode}`);
         }
         if (omb.doctor) {
           const docErrs = Array.isArray(omb.doctor.problems) ? omb.doctor.problems.length : 0;
@@ -267,10 +272,15 @@
             const actBtn = document.createElement('button');
             actBtn.type = 'button';
             actBtn.textContent = c.allowed ? '静音' : '允许';
-            actBtn.addEventListener('click', () => {
-              runDebugAction({ action: c.allowed ? 'chat_mute' : 'chat_allow', chatId: c.id })
-                .catch((err) => { el('updatedAt').textContent = `操作失败：${err.message}`; });
-            });
+            if (!c.allowed && pol?.mode === 'self_only') {
+              actBtn.disabled = true;
+              actBtn.title = '当前为仅自聊模式（self_only），请先切换为 owner_everywhere';
+            } else {
+              actBtn.addEventListener('click', () => {
+                runDebugAction({ action: c.allowed ? 'chat_mute' : 'chat_allow', chatId: c.id })
+                  .catch((err) => { el('updatedAt').textContent = `操作失败：${err.message}`; });
+              });
+            }
             td7.appendChild(actBtn);
           } else {
             td7.textContent = '-';
@@ -421,7 +431,7 @@
       } catch (e) {
         if (seq === reqSeq) el('updatedAt').textContent = `刷新失败：${e.message}`;
       } finally {
-        refreshing = false;
+        if (seq === reqSeq) refreshing = false;
       }
     }
 

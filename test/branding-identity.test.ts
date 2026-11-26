@@ -229,7 +229,7 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     });
     await until(() => bridge.quietQueue.length === 1);
     await tr.emitUser('@bot status');
-    await until(() => tr.sent.some((m) => m.text.includes('静默待汇总：1 条')));
+    await until(() => tr.sent.some((m) => m.text.includes('待汇总 1')));
     await bridge.flushQuietDigest();
     await until(() => tr.sent.some((m) => m.text.includes('静默期间主协调消息')));
     assert.ok(tr.sent.some((m) => m.text.includes('- **co-bot**：静默期间主协调消息')));
@@ -243,11 +243,11 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     await until(() => tr.sent.some((m) => m.text.includes('API Key')));
     assert.ok(tr.sent.at(-1)!.text.includes('管理后台'));
 
-    const cmds = ['@bot help', '@bot status', '@bot new', '@bot task', '@bot compact', '@bot chats'];
+    const cmds = ['@bot', '@bot help', '@bot status', '@bot new', '@bot task', '@bot compact', '@bot chats'];
     for (const c of cmds) {
-      const before = tr.sent.length;
+      const before = tr.sent.length + tr.filesSent.length;
       await tr.emitUser(c);
-      await until(() => tr.sent.length > before);
+      await until(() => tr.sent.length + tr.filesSent.length > before);
     }
 
     for (const m of tr.sent) {
@@ -256,6 +256,7 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
     }
     for (const f of tr.filesSent) {
       assert.equal(/mausbot/i.test(f.name), false, `检测到未替换的附件文件名：${f.name}`);
+      assert.equal(/mausbot|opencode|grok|手机端\s*IM/i.test(f.content), false, `检测到未清理的技术/旧品牌文案：${f.name}`);
     }
   } finally {
     await bridge.stop();
@@ -283,7 +284,7 @@ test('Custom botName & client.resolveBot support co-bot/cobot/custom aliases sea
     assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[协调官\]\*\*/);
 
     await tr.emitUser('@bot status');
-    await until(() => tr.sent.some((m) => m.text.includes('**🟢 协调官 在线**')));
+    await until(() => tr.sent.some((m) => m.text.includes('**✅ 协调官 在线**')));
 
     const c = new OpenMausBotClient({ baseUrl: 'http://127.0.0.1:8799' });
     c.listBots = mock.rawListBots;

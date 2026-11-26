@@ -9,7 +9,7 @@ import { Kernel } from '../src/core/kernel.ts';
 import {
   clipSummary,
   defineChannelPlugin,
-  type ManagedChannel,
+  ManagedChannel,
   normalizeInboundEvent,
   validateChannelAdapter,
   validateInboundEvent,
@@ -426,8 +426,8 @@ test('Kernel full-stack: WebPlugin + custom channel + OpenMausBotPlugin + Inspec
 
     const debugHtml = await fetch(`http://127.0.0.1:${webPort}/debug`).then((r) => r.text());
     const rootHtml = await fetch(`http://127.0.0.1:${webPort}/`).then((r) => r.text());
-    assert.match(debugHtml, /co-bot 本地只读诊断台/);
-    assert.match(rootHtml, /co-bot 本地只读诊断台/);
+    assert.match(debugHtml, /co-bot 本地诊断台/);
+    assert.match(rootHtml, /co-bot 本地诊断台/);
   } finally {
     await kernel.stop();
     ombServer.closeAllConnections?.();
@@ -502,4 +502,55 @@ test('scripts/channel-test.ts: --dry validates custom channel plugins and catche
   assert.equal(resWait.ok, true);
   assert.equal(resWait.inboundValidated, true);
   assert.equal(resWait.sentMsgId, 'w_out');
+});
+
+test('ManagedChannel: reconnect survives synchronous onDisconnect during start and ignores stale callbacks', async () => {
+  let startCount = 0;
+  let staleOnEvent: unknown = null;
+  let staleOnDisconnect: unknown = null;
+  const received: string[] = [];
+
+  const ch = new ManagedChannel({
+    name: 'race-test',
+    reconnectDelayMs: 20,
+    maxReconnectDelayMs: 40,
+    logger: {},
+    adapter: {
+      async start(onEvent, { onDisconnect }) {
+        startCount += 1;
+        if (startCount === 1) {
+          staleOnEvent = onEvent;
+          staleOnDisconnect = onDisconnect ?? null;
+          onEvent({ msgId: 'm1', chatId: 'c1', chatType: 'self', fromId: 'u1', text: 'first' });
+          setTimeout(() => onDisconnect?.(new Error('drop1')), 10);
+          return;
+        }
+        if (startCount === 2) {
+          await new Promise((r) => setTimeout(r, 15));
+          onDisconnect?.(new Error('drop_during_reconnect_start'));
+          return;
+        }
+        onEvent({ msgId: 'm3', chatId: 'c1', chatType: 'self', fromId: 'u1', text: 'recovered' });
+      },
+      async send() { return 's1'; },
+      async stop() {},
+    },
+  });
+
+  await ch.start((ev) => { received.push(ev.text); });
+  const deadline = Date.now() + 2500;
+  while (startCount < 3 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(startCount >= 3, `expected at least 3 starts, got ${startCount}`);
+  assert.equal(ch.status().connected, true);
+
+  // Stale generation callbacks from attempt #1 must not drop or pollute connection #3
+  (staleOnEvent as ((raw: unknown) => void) | null)?.({ msgId: 'stale_1', chatId: 'c1', chatType: 'self', fromId: 'u1', text: 'stale' });
+  (staleOnDisconnect as ((err?: unknown) => void) | null)?.(new Error('stale_drop'));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ch.status().connected, true);
+  assert.deepEqual(received, ['first', 'recovered']);
+
+  await ch.stop();
 });

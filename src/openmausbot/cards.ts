@@ -94,9 +94,9 @@ export function fmtTokens(n: unknown): string {
   return String(v);
 }
 
-export function usageBar(pct: number): string {
-  const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
-  return '█'.repeat(filled) + '░'.repeat(10 - filled);
+export function usageBar(pct: number, width = 6): string {
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
 }
 
 function toolLabel(rawName: unknown): { label: string; mapped: boolean } {
@@ -210,7 +210,7 @@ export function formatQuestionStepPrompt(
   if (q.options.length) {
     if (lines.length > 1) lines.push('');
     q.options.forEach((opt, i) => {
-      lines.push(`${i + 1}. **${opt.label}**${opt.description ? ` — ${clip(opt.description, 80)}` : ''}`);
+      lines.push(`${i + 1}. **${opt.label}**${opt.description ? `：${clip(opt.description, 80)}` : ''}`);
     });
     const multiHint = q.multiSelect ? '（多选 **`1,2`**）' : '';
     lines.push(

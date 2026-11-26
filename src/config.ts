@@ -289,17 +289,30 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
   return { ok: errors.length === 0, errors, warnings };
 }
 
+/** 读取 JSON 文件（兼容 UTF-8 BOM）。 */
+export function readJsonFile(filePath: string): unknown {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
+}
+
+/** 按 `--config` 参数或默认路径定位配置文件；`explicitFile === null` 表示跳过配置文件读取。 */
+export function resolveConfigPath(argv: string[] = process.argv.slice(2), explicitFile?: string | null): string | null {
+  if (explicitFile === null) return null;
+  if (explicitFile !== undefined) return explicitFile;
+  const i = argv.indexOf('--config');
+  if (i >= 0 && argv[i + 1]) return argv[i + 1];
+  if (fs.existsSync('config.json')) return 'config.json';
+  const rootCfg = path.join(APP_ROOT, 'config.json');
+  return fs.existsSync(rootCfg) ? rootCfg : null;
+}
+
 /** 读入 config.json 与命令行覆盖项（--config、--port、--omb、--omb-token、--channel）。 */
-export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?: string): AppConfig {
+export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?: string | null): AppConfig {
   const flag = (k: string): string | undefined => {
     const i = argv.indexOf(k);
     return i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
   };
-  const defaultCfg = fs.existsSync('config.json')
-    ? 'config.json'
-    : (fs.existsSync(path.join(APP_ROOT, 'config.json')) ? path.join(APP_ROOT, 'config.json') : null);
-  const file = explicitFile ?? flag('--config') ?? defaultCfg;
-  const parsedRaw = file ? JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) : {};
+  const file = resolveConfigPath(argv, explicitFile);
+  const parsedRaw = file ? readJsonFile(file) : {};
   if (!asObj(parsedRaw)) {
     throw new Error(`配置文件根节点必须是 JSON 对象：${file || '(empty)'}`);
   }
@@ -311,7 +324,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), explicitFile?
     : (asObj(raw.channel) ?? {});
   const configUseRaw = String(rawChan.use ?? defaults.channel.use).trim() || 'sim';
   const normalizedUse = configUseRaw === 'web' ? 'sim' : configUseRaw;
-  const configUse = normalizedUse && isPathLikeSpecifier(normalizedUse)
+  const configUse = isPathLikeSpecifier(normalizedUse)
     ? path.resolve(base, normalizedUse)
     : normalizedUse;
 

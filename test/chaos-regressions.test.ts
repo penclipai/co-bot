@@ -291,7 +291,6 @@ test('turn-tracker & commands: dead 状态检测、空转显式报错、媒体�
 
   try {
     await bridge.onEvent({ id: 'cmd_status', ts: Date.now() + 1, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    assert.match(sent.at(-1)!.text, /异常\(dead\)/);
     assert.match(sent.at(-1)!.text, /🔴.*异常（主协调 dead）/);
 
     await bridge.onEvent({ id: 'turn_dead', ts: Date.now() + 2, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot 测试 dead 空回执' });
@@ -323,6 +322,8 @@ test('turn-tracker & commands: dead 状态检测、空转显式报错、媒体�
 
     await bridge.onEvent({ id: 'cmd_del', ts: Date.now() + 9, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot delegate unknown_chat 你好' });
     assert.match(sent.at(-1)!.text, /未找到可委托的外部群\/联系人/);
+    await bridge.onEvent({ id: 'cmd_del_grp', ts: Date.now() + 9.5, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot delegate grp_dev 你好' });
+    assert.match(sent.at(-1)!.text, /仅支持点对点私聊/);
 
     await bridge.onEvent({ id: 'cmd_sum1', ts: Date.now() + 10, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot summary grp_dev 99999' });
     assert.match(sent.at(-1)!.text, /1～200/);
@@ -339,6 +340,144 @@ test('turn-tracker & commands: dead 状态检测、空转显式报错、媒体�
     mock.client.sendMessage = async () => { throw new Error('boom'); };
     await bridge.onEvent({ id: 'cmd_new_fail', ts: Date.now() + 15, chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot new 排查故障' });
     assert.equal(bridge.lastBotReplyAt, 0);
+  } finally {
+    await bridge.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('externalBotPrefix custom/empty, disconnected noBuffer + mentions replay, and polish forceBotPrefix', async () => {
+  for (const [extPrefix, expectRe] of [
+    ['', /^纯正文回复$/],
+    ['[AI] ', /^\[AI\] 纯正文回复$/],
+    ['🤖 ', /^🤖 \*\*\[co-bot\]\*\* 纯正文回复$/],
+  ] as Array<[string, RegExp]>) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-prefix-'));
+    const mock = makeMockHarness({
+      onSendMessage(entry) {
+        return { message: { id: `req_${mock.sentPrompts.length}` }, text: entry.text };
+      },
+    });
+    mock.client.getMessages = async (_tid: string) => ({
+      messages: [
+        { id: `req_${mock.sentPrompts.length}`, role: 'user', text: 'hi' },
+        { id: `bot_${mock.sentPrompts.length}`, role: 'bot', requestMessageId: `req_${mock.sentPrompts.length}`, kind: 'text', turnTerminal: true, text: '纯正文回复' },
+      ],
+    });
+    const { sent, transport } = makeMockTransport();
+    const bridge = new OpenMausBotBridge({
+      client: mock.client,
+      transport,
+      dataDir: tmpDir,
+      chats: { mode: 'owner_everywhere', externalBotPrefix: extPrefix, isolateThreadsByChat: false },
+    });
+    await bridge.start();
+    try {
+      await bridge.onEvent({ id: 's0', ts: 1, chat: { id: 'self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: 'hi' });
+      await bridge.onEvent({ id: 'g1', ts: 2, chat: { id: 'grp_1', type: 'group', name: 'G1' }, sender: { id: 'me', isSelf: true }, text: '@bot ping' });
+      await until(() => sent.length >= 1, 2000);
+      assert.match(sent.at(-1)!.text, expectRe);
+    } finally {
+      await bridge.stop();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  // Disconnected noBuffer + mentions replay + polish forceBotPrefix
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-nobuf-'));
+  let connected = false;
+  const replayedOpts: Array<Record<string, unknown>> = [];
+  const mock = makeMockHarness();
+  let lastReqId = '';
+  mock.client.sendMessage = async () => {
+    lastReqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    return { message: { id: lastReqId } };
+  };
+  mock.client.getMessages = async () => ({
+    messages: [
+      { id: lastReqId, role: 'user', text: 'q' },
+      { id: `bot_${lastReqId}`, role: 'bot', requestMessageId: lastReqId, kind: 'text', turnTerminal: true, text: '草稿内容' },
+    ],
+  });
+  const transport = {
+    selfChatId: 'self',
+    status: () => ({ kind: 'mock', connected, selfChatId: 'self', lastError: null, reconnectAttempts: 0 }),
+    async start() {},
+    async stop() {},
+    async send(_chatId: string, _text: string, opts: Record<string, unknown> = {}) {
+      if (!connected) throw new Error('disconnected');
+      replayedOpts.push(opts);
+      return `m_${replayedOpts.length}`;
+    },
+  };
+  const bridge = new OpenMausBotBridge({
+    client: mock.client,
+    transport: transport as never,
+    dataDir: tmpDir,
+    sendRetries: 0,
+    chats: { mode: 'owner_everywhere', collaborators: [{ id: 'u_col', name: 'Alice', policy: 'confirm_in_self', projects: [], chats: [] }] },
+  });
+  await bridge.start();
+  try {
+    // 1. Disconnected say buffers with mentions and replays with mentions
+    await bridge.say('hello @Alice', { targetChatId: 'grp_1' }, null, null, { mentions: [{ id: 'u_col', name: 'Alice' }] });
+    assert.equal(bridge.disconnectedBuffer.length, 1);
+    assert.equal(bridge.disconnectedBuffer[0].mentions?.[0]?.id, 'u_col');
+    connected = true;
+    await bridge.flushOutboundBuffer();
+    assert.equal(replayedOpts.length, 1);
+    assert.deepEqual(replayedOpts[0].mentions, [{ id: 'u_col', name: 'Alice' }]);
+
+    // 2. Disconnected sendDelegation & confirmSendBack do not buffer
+    connected = false;
+    const delRes = await bridge.sendDelegation({ id: 'dm_1', name: 'Bob', type: 'direct' }, '请协助排查');
+    assert.equal(delRes.ok, false);
+    assert.equal(bridge.disconnectedBuffer.length, 0);
+
+    bridge.pendingSendBack = {
+      draft: {
+        id: 'd_sb',
+        imMsgId: 'im_d_sb',
+        originChatId: 'grp_1',
+        originChatName: 'G1',
+        originChatType: 'group',
+        replyToImMsgId: null,
+        rawText: '回发测试',
+        addBotPrefix: true,
+        createdAt: bridge.now(),
+      },
+      text: '回发测试',
+      expiresAt: bridge.now() + 60_000,
+    };
+    const sbRes = await bridge.confirmSendBack();
+    assert.equal(sbRes, null);
+    assert.equal(bridge.disconnectedBuffer.filter((x) => x.chatId === 'grp_1').length, 0);
+    bridge.disconnectedBuffer.length = 0;
+
+    // 3. PolishDraft preserves forceBotPrefix on confirm_in_self / draft_first drafts
+    connected = true;
+    await bridge.onEvent({
+      id: 'col_q',
+      ts: Date.now(),
+      chat: { id: 'grp_col', type: 'group', name: '协同群' },
+      sender: { id: 'u_col', name: 'Alice', isSelf: false },
+      text: '@bot 查一下发布状态',
+    });
+    await until(() => bridge.privateDrafts.size >= 1, 2000);
+    const origDraft = [...bridge.privateDrafts.values()][0];
+    assert.equal(origDraft.forceBotPrefix, true);
+
+    await bridge.onEvent({
+      id: 'pol_1',
+      ts: Date.now() + 10,
+      chat: { id: 'self', type: 'self' },
+      sender: { id: 'me', isSelf: true },
+      replyTo: origDraft.imMsgId,
+      text: '@bot 改得更简洁一点',
+    });
+    await until(() => bridge.privateDrafts.size >= 2, 2000);
+    const polished = [...bridge.privateDrafts.values()].at(-1)!;
+    assert.equal(polished.forceBotPrefix, true, '润色草稿应继承原草稿的 forceBotPrefix');
   } finally {
     await bridge.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rotateLogIfNeeded } from '../scripts/omb.ts';
-import { loadConfig, validateConfig } from './config.ts';
+import { probeHostOf, rotateLogIfNeeded } from '../scripts/omb.ts';
+import { loadConfig, readJsonFile, resolveConfigPath, validateConfig } from './config.ts';
+import type { WebServer } from './web/server.ts';
 import { Kernel } from './core/kernel.ts';
 import { createPluginManager, discoverPlugins, resolvePluginConfig } from './core/plugin-loader.ts';
 import { loadChannelPlugin } from './plugins/channel-loader.ts';
@@ -77,13 +78,13 @@ export async function createApp(
 }
 
 /**
- * co-bot 入口：基于插件微内核装配 Web、IM 通道、OpenMausBot 网关与本地只读诊断台。
+ * co-bot 入口：基于插件微内核装配 Web、IM 通道、OpenMausBot 网关与本地诊断台。
  */
 async function main(): Promise<void> {
-  const cfgPath = fs.existsSync('config.json') ? 'config.json' : null;
-  if (cfgPath) {
+  const cfgPath = resolveConfigPath(process.argv.slice(2));
+  if (cfgPath && fs.existsSync(cfgPath)) {
     try {
-      const v = validateConfig(JSON.parse(fs.readFileSync(cfgPath, 'utf8')));
+      const v = validateConfig(readJsonFile(cfgPath));
       for (const w of v.warnings) console.warn(`[co-bot:config] ⚠ ${w}`);
       for (const e of v.errors) console.error(`[co-bot:config] ✗ ${e}`);
     } catch (e) {
@@ -121,7 +122,11 @@ async function main(): Promise<void> {
       }
     }
   }
-  const baseUrl = `http://${cfg.web.host}:${cfg.web.port}`;
+  const webSvc = kernel.has('web') ? kernel.get<WebServer>('web') : null;
+  const bound = webSvc?.server?.address();
+  const webHost = bound && typeof bound === 'object' ? probeHostOf(bound.address) : probeHostOf(cfg.web.host);
+  const webPort = bound && typeof bound === 'object' ? bound.port : cfg.web.port;
+  const baseUrl = `http://${webHost}:${webPort}`;
   if (channelName === 'sim') {
     console.log(`[co-bot] 自聊模拟 ${baseUrl}/sim （诊断台 ${baseUrl}/debug）`);
   } else {

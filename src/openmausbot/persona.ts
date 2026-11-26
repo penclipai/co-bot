@@ -3,7 +3,7 @@
  */
 export const COBOT_COORDINATOR_TITLE = 'Coordinator Bot';
 
-export const LEGACY_GROK_SOUL_RE = /Grok Bot/i;
+const LEGACY_GROK_SOUL_RE = /Grok Bot/i;
 
 export const COBOT_MANAGED_SOUL_PREFIX = '你是 co-bot（Coordinator Bot），主人手机端随时可用的个人协调助手。';
 

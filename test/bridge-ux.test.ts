@@ -421,7 +421,8 @@ test('P1 commands: @bot status context & >80% warning, @bot compact, help scopin
   ]);
 
   const sent: SentImItem[] = [];
-  const transport = makeIm(sent);
+  const filesSent: SentImFileItem[] = [];
+  const transport = makeIm(sent, filesSent);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-p1-'));
   const bridge = new OpenMausBotBridge({ client: new OpenMausBotClient({ baseUrl: omb.baseUrl }), transport, dataDir });
 
@@ -438,7 +439,7 @@ test('P1 commands: @bot status context & >80% warning, @bot compact, help scopin
     await bridge.start();
 
     await transport.emitUser('@bot status');
-    await until(() => sent.some((m) => m.text.includes('85%') && m.text.includes('85K / 100K')));
+    await until(() => sent.some((m) => m.text.includes('85%') && m.text.includes('85K/100K')));
 
     await transport.emitUser('@bot 看下日志');
     await until(() => sent.some((m) => m.text.includes('完成：看下日志')) && sent.some((m) => m.text.includes('上下文已达 85%')));
@@ -448,8 +449,17 @@ test('P1 commands: @bot status context & >80% warning, @bot compact, help scopin
     await transport.emitUser('@bot compact');
     await until(() => sent.some((m) => m.text.includes('压缩当前会话上下文')));
 
+    await transport.emitUser('@bot');
+    await until(() => sent.some((m) => m.text.includes('常用指南') && m.text.includes('@bot help')));
+
     await transport.emitUser('@bot help');
-    await until(() => sent.some((m) => m.text.includes('常用指南')));
+    await until(() => filesSent.some((f) => f.name === 'co-bot-help.html'));
+    const helpFile = filesSent.find((f) => f.name === 'co-bot-help.html')!;
+    assert.match(helpFile.content, /<!doctype html>/i);
+    assert.match(helpFile.content, /<svg\b/);
+    assert.match(helpFile.content, /多人协作的 IM 智能体工作区/);
+    assert.match(helpFile.content, /常用指令速查/);
+    assert.equal(helpFile.content.includes('<script'), false);
 
     for (const cmd of ['@bot help me debug', '@bot memory', '@bot 记住 用中文总结代码变更', '@bot approval auto', '@bot digest', '@bot bots', '@bot tasks', '@bot context']) {
       const stripped = cmd.replace(/^@bot\s+/, '');
@@ -539,12 +549,12 @@ test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/
   try {
     await bridge.start();
     await transport.emitUser('@bot status');
-    await until(() => sent.some((m) => m.text.includes('协作团队')));
-    const statusText = sent.findLast((m) => m.text.includes('协作团队'))!.text;
+    await until(() => sent.some((m) => m.text.includes('团队（2）')));
+    const statusText = sent.findLast((m) => m.text.includes('团队（2）'))!.text;
 
-    assert.match(statusText, /^\*\*🟢 co-bot 在线\*\*/);
-    assert.match(statusText, /- \*\*co-bot 当前会话\*\* 上下文：20%（20K \/ 100K · 3 轮） `[█░]+`/);
-    assert.match(statusText, /\*\*Dev\*\* · 运行中 · `deepseek\/deepseek-flash` · 审批:auto/);
+    assert.match(statusText, /^\*\*✅ co-bot 在线\*\*/);
+    assert.match(statusText, /- 上下文：20%（20K\/100K · 3轮） `[█░]{6}`/);
+    assert.match(statusText, /\*\*Dev\*\* · 运行中 · `deepseek-flash` · auto/);
     for (const noise of ['隔离模式', '本地免配对', 'Doctor', '引擎 v', '协作 Bot：', '活跃轮次：0', '审批:ask', '运行中 · busy', '@bot compact']) {
       assert.equal(statusText.includes(noise), false, `精简后的 status 不应包含冗余文案「${noise}」`);
     }
@@ -556,7 +566,7 @@ test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/
     };
     assertFirstTwoLinesMarkdown(statusText, '@bot status');
 
-    for (const cmd of ['@bot help', '@bot chats', '@bot bind']) {
+    for (const cmd of ['@bot', '@bot chats', '@bot bind']) {
       const beforeLen = sent.length;
       await transport.emitUser(cmd);
       await until(() => sent.length > beforeLen);
@@ -580,5 +590,65 @@ test('P2 status UX: normal state omits noisy ops fields, duplicate counts, busy/
   } finally {
     await bridge.stop();
     await omb.close();
+  }
+});
+
+test('TurnTracker: resuming after needs-input card aborts prior /job watcher', async () => {
+  const omb = await startMockOmb([{ id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true }]);
+  const sent: SentImItem[] = [];
+  const transport = makeIm(sent, []);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omb-watch-abort-'));
+  const client = new OpenMausBotClient({ baseUrl: omb.baseUrl });
+
+  const watcherSignals: AbortSignal[] = [];
+  const origGetJob = client.getJob.bind(client);
+  let callIdx = 0;
+  client.getJob = async (tid, opts = {}) => {
+    callIdx += 1;
+    if (opts.signal && !watcherSignals.includes(opts.signal)) watcherSignals.push(opts.signal);
+    if (callIdx === 1) {
+      return { state: 'needs-input', since: 1, version: 1, needsInput: [{}] };
+    }
+    if (callIdx === 2) {
+      return await new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener('abort', () => {
+          const e = new Error('aborted');
+          e.name = 'AbortError';
+          reject(e);
+        }, { once: true });
+      });
+    }
+    return origGetJob(tid, opts);
+  };
+
+  omb.setScenario(({ reqMsg, threadId, messages, broadcast, nextId }) => {
+    const cardMsg = {
+      id: nextId(),
+      role: 'bot',
+      kind: 'card',
+      threadId,
+      requestMessageId: reqMsg.id,
+      card: { requestId: 'req_card_1', requestType: 'permission', title: '确认继续' },
+    };
+    messages.push(cardMsg as never);
+    broadcast({ kind: 'thread.message', threadId, message: cardMsg });
+  });
+
+  const bridge = new OpenMausBotBridge({ client, transport, dataDir, turnStallMs: 0 });
+  try {
+    await bridge.start();
+    await transport.emitUser('@bot test card resume');
+    await until(() => sent.some((s) => s.text.includes('确认继续')));
+    const turn = [...bridge.activeTurns.values()][0];
+    assert.ok(turn);
+    // Simulate card completion fallback calling complete() and restarting watcher
+    await turn.complete('needs-input');
+    assert.equal(watcherSignals.length, 2);
+    assert.equal(watcherSignals[0].aborted, true, '恢复等待输入后的新 watcher 应中止旧 watcher 的 AbortSignal');
+    turn.markStopped();
+  } finally {
+    await bridge.stop();
+    await omb.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });

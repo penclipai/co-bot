@@ -256,7 +256,7 @@ test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bo
 
     await transport.emitUser('@bot status');
     await until(() => sent.length === 2);
-    assert.match(sent[1].text, /静默待汇总：1 条/);
+    assert.match(sent[1].text, /待汇总 1/);
 
     curNow = new Date(2026, 10, 19, 10, 0, 0).getTime();
     const flushed = await bridge.flushQuietDigest();

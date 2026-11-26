@@ -702,3 +702,90 @@ test('/api/debug/events 过滤、/debug UI 与 /sim 撤回渲染校验', async (
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('im-context: respects capabilities.history=false, blocks non-loopback pull URL, preserves linkCard in paged history', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-imctx-reg-'));
+  let historyCalls = 0;
+
+  const noHistChannel = defineChannelPlugin({
+    name: 'no-hist-im',
+    capabilities: { history: false },
+    create() {
+      return {
+        async start() {},
+        async send() { return 'o1'; },
+        async stop() {},
+        async getHistory() {
+          historyCalls += 1;
+          return [{ id: 'r1', ts: 1000, chat: { id: 'grp_1', type: 'group' }, sender: { id: 'u1', isSelf: false }, text: 'old' }];
+        },
+      };
+    },
+  });
+
+  const k1 = new Kernel({
+    config: {
+      web: { host: '127.0.0.1', port: 0 },
+      openmausbot: { url: 'http://192.168.1.50:8799' },
+      dataDir: tmpDir,
+      chats: {},
+    } as RawConfig,
+  });
+  k1.use(webPlugin);
+  k1.use(noHistChannel);
+  k1.use(imContextPlugin);
+  await k1.start();
+  try {
+    const imCtx1 = k1.get<ImContextService>('imContext');
+    const hist = await imCtx1.getHistory!('grp_1', { limit: 10 });
+    assert.equal(hist.length, 0);
+    assert.equal(historyCalls, 0, 'capabilities.history=false 时不应调用 adapter.getHistory');
+    const hint = imCtx1.getContextPullHint!('grp_1', { oldestMsgId: 'm_cur', hasTruncated: true, hasOlder: true });
+    assert.equal(hint, '', '非回环 OpenMausBot 地址不应暴露本机拉取地址');
+  } finally {
+    await k1.stop();
+  }
+
+  const withHistChannel = defineChannelPlugin({
+    name: 'with-hist-im',
+    capabilities: { history: true },
+    create() {
+      return {
+        async start() {},
+        async send() { return 'o2'; },
+        async stop() {},
+        async getHistory() {
+          return [{
+            id: 'old_card',
+            ts: 1000,
+            chat: { id: 'grp_1', type: 'group', name: '研发群' },
+            sender: { id: 'u1', name: 'Alice', isSelf: false },
+            text: '',
+            linkCard: { title: '发布单', url: 'https://example.com?token=omb_sess_secret999' },
+          }];
+        },
+      };
+    },
+  });
+  const k2 = new Kernel({ config: { web: { host: '127.0.0.1', port: 0 }, dataDir: tmpDir, chats: {} } as RawConfig });
+  k2.use(withHistChannel);
+  k2.use(imContextPlugin);
+  await k2.start();
+  try {
+    const imCtx2 = k2.get<ImContextService>('imContext');
+    imCtx2.recordInbound({
+      id: 'cur_msg',
+      ts: 2000,
+      chat: { id: 'grp_1', type: 'group', name: '研发群' },
+      sender: { id: 'u2', name: 'Bob', isSelf: false },
+      text: '最新消息',
+    });
+    const paged = await imCtx2.getHistory!('grp_1', { limit: 5, before: 'cur_msg' });
+    assert.equal(paged.length, 1);
+    assert.equal(paged[0].linkCard?.title, '发布单');
+    assert.equal(paged[0].linkCard?.url, 'https://example.com?token=[REDACTED]');
+  } finally {
+    await k2.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

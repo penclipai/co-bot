@@ -40,6 +40,13 @@ export function resolveChatOrId(
   return bridge.resolveKnownChat(q) ?? (/^[\w.:-]+$/.test(q) ? { id: q, name: q, type: 'group' } : null);
 }
 
+/** 返回去除 provider 前缀后的短模型名。 */
+export function shortModelName(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  const slash = s.lastIndexOf('/');
+  return slash >= 0 ? s.slice(slash + 1) : s;
+}
+
 /** 计算单个会话的上下文占比与进度条文案；无窗口统计时返回 null。 */
 export function formatContextSummary(task: OmbTaskSummary | null | undefined): { pct: number; line: string } | null {
   const ctx = task?.usage?.context;
@@ -48,7 +55,7 @@ export function formatContextSummary(task: OmbTaskSummary | null | undefined): {
   const turns = task?.usage?.turns;
   return {
     pct,
-    line: `${pct}%（${fmtTokens(ctx.tokens || 0)} / ${fmtTokens(ctx.window)}${turns != null ? ` · ${turns} 轮` : ''}） \`${usageBar(pct)}\``,
+    line: `${pct}%（${fmtTokens(ctx.tokens || 0)}/${fmtTokens(ctx.window)}${turns != null ? ` · ${turns}轮` : ''}） \`${usageBar(pct)}\``,
   };
 }
 
@@ -82,12 +89,12 @@ export async function replyContextUsage(
   const hasBanner = Boolean(sensSink.banner);
   if (!summary) {
     const extHint = isExternal && compactCmd ? `（可回复 \`${compactCmd}\` 压缩）` : '';
-    await sensSink.say(hasBanner ? `- **📊 ${title}** ${emptyHint}${extHint}` : `📊 ${title} ${emptyHint}${extHint}`);
+    await sensSink.say(hasBanner ? `- **📊 ${title}**：${emptyHint}${extHint}` : `📊 ${title}：${emptyHint}${extHint}`);
     return;
   }
   const usageLine = compactNote || hasBanner
-    ? `${!compactNote && hasBanner ? '- ' : ''}**📊 ${title}** 上下文：${summary.line}${compactNote}`
-    : `📊 ${title} 上下文：${summary.line}`;
+    ? `${!compactNote && hasBanner ? '- ' : ''}**📊 ${title}**：${summary.line}${compactNote}`
+    : `📊 ${title}：${summary.line}`;
   await sensSink.say(
     usageLine,
     { botId: bot.id, botName: bot.name, threadId },
@@ -102,25 +109,53 @@ export function botCommandTarget(bridge: OpenMausBotBridge, botId?: string, botN
   return bridge.trigger;
 }
 
+/** 统一生成外部会话转入自聊时的来源横幅。 */
+export function formatOriginBanner(
+  chatCtx: { isExternal?: boolean; chatName?: string; originChatId?: string } | null | undefined,
+  ctrlChat: string | null | undefined,
+  selfChat: string | null | undefined,
+  suffix = '',
+): string {
+  if (!chatCtx?.isExternal || !ctrlChat || ctrlChat !== selfChat) return '';
+  const label = chatCtx.chatName || chatCtx.originChatId || '';
+  return `**📍 来自「${label}」${suffix}**\n`;
+}
+
 /** 构造 `@bot help` 简洁使用说明。 */
 export function buildHelpText(bridge: OpenMausBotBridge): string {
   const t = bridge.trigger;
   const brand = bridge.botName || 'co-bot';
-  const lines = [
-    `**🤖 ${brand} 常用指南**`,
-    `- \`${t} <问题>\` / \`@<Bot名>\` / \`@<群名>\`：找主 Bot 或协作团队（自聊回复后 ${Math.round(bridge.followUpWindowMs / 1000)}s 内可免 \`@\` 续聊，\`${t} bye\` 退出）`,
-    `- \`${t}! <问题>\`（外部群）：私密起草发回自聊，可引用润色后发 \`${t} sendback\` 确认回群`,
-    `- \`${t} chats [self|all|reset]\` / \`mute|unmute [群]\` / \`summary <群> [条数]\`：管群策略、静音与跨群纪要`,
-    `- \`${t} bind [项目|unbind]\` / \`delegate <会话> [proj:<项目>] <问题>\`：项目目录绑定与 C2C 协作委托`,
-    `- \`${t} new [话题]\` / \`task [序号]\` / \`compact [群]\`：新建、切换最近会话与上下文压缩`,
-    `- \`${t} status [群]\` / \`stop\`：团队诊断、Bot 与上下文状态或停止任务（卡片回 \`ok/always/no/skip\`）`,
+  const followUpSec = Math.round(bridge.followUpWindowMs / 1000);
+  const generalLines = [
+    `**通用（\`${t}\` / \`@Bot名\` / \`@群名\`）**`,
+    `- \`${t} <问题>\` / \`${t}!\`：提问 / 外群私密起草`,
+    '- `new [话题]` / `task [号]` / `stop`：会话与停止',
+    '- `status [群]`：查看状态与上下文（仅单Bot）',
+    '- `compact [群]`：压缩上下文（仅单Bot）',
+    `- \`bye\`：退出自聊 ${followUpSec}s 免 \`@\` 续聊`,
   ];
   const extCmds = bridge.commandRegistry?.list() ?? [];
   if (extCmds.length) {
     const extList = extCmds.map((c) => `\`${t} ${c.name}\`${c.description ? `（${c.description}）` : ''}`).join('、');
-    lines.push(`- 扩展指令：${extList}`);
+    generalLines.push(`- 扩展指令：${extList}`);
   }
-  return lines.join('\n');
+  const ownerLines = [
+    `**仅 \`${t}\` 可用**`,
+    '- `sendback [ID]`：草稿确认回群',
+    '- `chats` / `mute|unmute`：管群与静音',
+    '- `summary <群>`：跨群纪要',
+    '- `bind [项目]`：绑定项目目录',
+    '- `delegate <私聊> <问题>`：私聊委托',
+  ];
+  return [
+    `**🤖 ${brand} 常用指南**`,
+    ...generalLines,
+    '',
+    ...ownerLines,
+    '',
+    '💡 卡片回 `1/2/0` 或 `ok/always/no/skip`',
+    `📄 发 \`${t} help\` 获取完整图文指南`,
+  ].join('\n');
 }
 
 /** 构造命令结果投递器，外部群敏感操作结果自动路由回自聊并携带来源标题。 */
@@ -141,8 +176,7 @@ export function makeCommandSink(
     ? bridge.resolveControlChatId(chatCtx)
     : bridge.selfChat;
   const targetId = sensitive ? ctrlId : chatCtx.replyChatId;
-  const label = chatCtx.chatName || chatCtx.originChatId;
-  const originBanner = sensitive && ctrlId && ctrlId === bridge.selfChat ? `**📍 来自「${label}」的指令结果**\n` : '';
+  const originBanner = sensitive ? formatOriginBanner(chatCtx, ctrlId, bridge.selfChat, '的指令结果') : '';
   let bannerSent = false;
   return {
     chatId: targetId,

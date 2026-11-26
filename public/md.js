@@ -34,6 +34,33 @@
     return s;
   }
 
+  function splitTableRow(row) {
+    const trimmed = row.trim().replace(/^\|/, '').replace(/(^|[^\\])\|$/, '$1');
+    const cells = [];
+    let cur = '';
+    let inCode = false;
+    for (let j = 0; j < trimmed.length; j += 1) {
+      const ch = trimmed[j];
+      if (ch === '\\' && !inCode && j + 1 < trimmed.length) {
+        cur += ch + trimmed[++j];
+        continue;
+      }
+      if (ch === '`') {
+        inCode = !inCode;
+        cur += ch;
+        continue;
+      }
+      if (ch === '|' && !inCode) {
+        cells.push(inline(cur.trim()));
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+    cells.push(inline(cur.trim()));
+    return cells;
+  }
+
   function render(md) {
     const lines = String(md ?? '').replace(/\r/g, '').split('\n');
     const out = [];
@@ -47,12 +74,13 @@
     while (i < lines.length) {
       const l = lines[i];
       let m;
-      if ((m = l.match(/^\s*(```|~~~)\s*([\w-]*)/))) {
+      if ((m = l.match(/^\s*(`{3,}|~{3,})\s*([\w-]*)\s*$/))) {
         flush();
-        const fence = m[1], lang = m[2];
+        const fence = m[1], fChar = fence[0], fLen = fence.length, lang = m[2];
+        const closeRe = new RegExp(`^\\s*\\${fChar}{${fLen},}\\s*$`);
         const body = [];
         i++;
-        while (i < lines.length && !lines[i].trim().startsWith(fence)) body.push(lines[i++]);
+        while (i < lines.length && !closeRe.test(lines[i])) body.push(lines[i++]);
         i++;
         const html = body.map((b) => lang === 'diff' && /^[+-]/.test(b) ? `<span class="${b[0] === '+' ? 'add' : 'del'}">${esc(b)}</span>` : esc(b)).join('\n');
         out.push(`<pre><code>${html}</code></pre>`);
@@ -71,9 +99,10 @@
       if (/^\s*([-*+]|\d+[.)])\s+/.test(l)) {
         flush();
         const ordered = /^\s*\d/.test(l);
+        const itemRe = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
         const items = [];
-        while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
-          let item = lines[i++].replace(/^\s*([-*+]|\d+[.)])\s+/, '');
+        while (i < lines.length && itemRe.test(lines[i])) {
+          let item = lines[i++].replace(itemRe, '');
           while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) item += '\n' + lines[i++].trim();
           items.push(`<li>${item.split('\n').map((x) => inline(x.replace(/ {2,}$/, ''))).join('<br>')}</li>`);
         }
@@ -82,11 +111,10 @@
       }
       if (/^\s*\|.*\|\s*$/.test(l) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1] ?? '')) {
         flush();
-        const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
-        const head = cells(l);
+        const head = splitTableRow(l);
         i += 2;
         const rows = [];
-        while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(cells(lines[i++]));
+        while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(splitTableRow(lines[i++]));
         out.push(`<div class="tbl"><table><tr>${head.map((c) => `<th>${c}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</table></div>`);
         continue;
       }

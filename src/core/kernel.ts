@@ -349,6 +349,11 @@ export class Kernel implements KernelLike {
   }
 
   async #mountEntry(entry: KernelEntry<Record<string, unknown>>, gen: number): Promise<boolean> {
+    for (const dep of entry.inject) {
+      if (!this.services.has(dep)) {
+        throw new Error(`插件「${entry.name}」缺少依赖服务：${dep}`);
+      }
+    }
     entry.error = null;
     const ctx = this.#createPluginContext(entry);
     const ret = await entry.apply(ctx, entry.options);
@@ -445,7 +450,8 @@ export class Kernel implements KernelLike {
     if (mIdx >= 0) this.mounted.splice(mIdx, 1);
     await this.#unmount(entry);
     if (!keepEntry) {
-      this.entries.splice(idx, 1);
+      const curIdx = this.entries.indexOf(entry);
+      if (curIdx >= 0) this.entries.splice(curIdx, 1);
     }
     return true;
   }
@@ -472,7 +478,9 @@ export class Kernel implements KernelLike {
     nextEntry.name = name;
     nextEntry.source = nextEntry.source === 'builtin' ? prev.source : nextEntry.source;
     nextEntry.isolated = prev.isolated;
-    this.entries[idx] = nextEntry;
+    const curIdx = this.entries.indexOf(prev);
+    if (curIdx >= 0) this.entries[curIdx] = nextEntry;
+    else this.entries.push(nextEntry);
 
     if (!this.started) {
       return this.status().plugins.find((p) => p.name === name)!;

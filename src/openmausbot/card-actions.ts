@@ -1,6 +1,7 @@
 import { clip } from '../format.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatMultiQuestionAnswers, formatOmbError, formatQuestionStepPrompt } from './cards.ts';
+import { formatOriginBanner } from './command-helpers.ts';
 import type { BridgeChatContext, MsgRoute, OmbHttpError, PendingCard } from './types.ts';
 
 function buildCardReplyContext(bridge: OpenMausBotBridge, card: PendingCard): {
@@ -24,7 +25,7 @@ function buildCardReplyContext(bridge: OpenMausBotBridge, card: PendingCard): {
 }
 
 /** 清理与当前响应关联的 pendingCards 条目并持久化状态。 */
-export function deleteCard(bridge: OpenMausBotBridge, card: PendingCard): void {
+function deleteCard(bridge: OpenMausBotBridge, card: PendingCard): void {
   for (const [k, v] of bridge.pendingCards) {
     const sameReq = Boolean(card.requestId && v.requestId === card.requestId);
     const sameBurst = Boolean(card.burstId && v.burstId === card.burstId);
@@ -34,6 +35,13 @@ export function deleteCard(bridge: OpenMausBotBridge, card: PendingCard): void {
     }
   }
   bridge.saveState();
+}
+
+function cleanupIfStaleCardError(bridge: OpenMausBotBridge, card: PendingCard, err: unknown): void {
+  const status = (err as OmbHttpError | null | undefined)?.status;
+  if (status === 404 || status === 409 || status === 410) {
+    deleteCard(bridge, card);
+  }
 }
 
 /** 当有多张待处理卡片且用户裸回复快捷词时，提示引用对应消息回复以免误批。 */
@@ -58,10 +66,8 @@ export async function advanceQuestionCard(bridge: OpenMausBotBridge, card: Pendi
     const { ctrlChatId, who, head, route } = buildCardReplyContext(bridge, card);
     const multiCard = bridge.pendingCards.size > 1;
     const step = formatQuestionStepPrompt(who, card.title || '需要你做个决定', questions, nextIndex, { multiCard });
-    const originBanner = card.chatCtx?.isExternal && ctrlChatId === bridge.selfChat
-      ? `**📍 来自「${card.chatCtx.chatName || card.chatCtx.originChatId || ''}」的审批 / 确认**\n`
-      : '';
-    const nextSentId = await bridge.say(`${originBanner}${step.text}`, route, null, null);
+    const originBanner = formatOriginBanner(card.chatCtx, ctrlChatId, bridge.selfChat, '的审批 / 确认');
+    const nextSentId = await bridge.say(`${originBanner}${step.text}`, route, null, null, { noBuffer: true });
     if (!nextSentId) {
       await bridge.say(`${head}⚠️ 下一题发送失败，请稍后重试当前回复。`, route);
       return undefined;
@@ -98,8 +104,7 @@ export async function handleBurstCardAction(
       if (action === 'run') await bridge.client.runBurst(card.burstId);
       else await bridge.client.cancelBurst(card.burstId);
     } catch (e) {
-      const err = e as OmbHttpError;
-      if (err?.status === 404 || err?.status === 409 || err?.status === 410) deleteCard(bridge, card);
+      cleanupIfStaleCardError(bridge, card, e);
       throw e;
     }
     deleteCard(bridge, card);
@@ -141,8 +146,7 @@ export async function dismissBlockCard(bridge: OpenMausBotBridge, card: PendingC
         await bridge.client.cancelSignInCard(cardBotId, ombId, card.threadId);
       }
     } catch (e) {
-      const err = e as OmbHttpError;
-      if (err?.status === 404 || err?.status === 409 || err?.status === 410) deleteCard(bridge, card);
+      cleanupIfStaleCardError(bridge, card, e);
       throw e;
     }
     deleteCard(bridge, card);
@@ -217,7 +221,7 @@ export async function answerCard(
         delete payload.rememberCommand;
         await bridge.client.respond(card.threadId, payload);
       } else {
-        if (err?.status === 404 || err?.status === 409 || err?.status === 410) deleteCard(bridge, card);
+        cleanupIfStaleCardError(bridge, card, err);
         throw e;
       }
     }

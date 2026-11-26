@@ -1,37 +1,13 @@
 /**
  * IM 会话上下文插件：提供进程内 ChatContextStore、通道历史合并去重、以及本机只读 `/api/context/history` 探索接口。
  */
-import { isLoopbackUrl } from '../../scripts/omb.ts';
-import { assemblePromptContext, ChatContextStore, redactSecrets } from '../core/chat-context.ts';
+import { isLoopbackUrl, probeHostOf } from '../../scripts/omb.ts';
+import { assemblePromptContext, ChatContextStore } from '../core/chat-context.ts';
 import { ContextPullManager } from '../core/context-pull.ts';
 import type { ManagedChannel } from '../core/channel-contract.ts';
 import type { ImContextService } from '../openmausbot/types.ts';
 import type { ChatContextMessage, ChatsConfig, InboundEvent, KernelPlugin } from '../types.ts';
 import type { WebServer } from '../web/server.ts';
-
-function normalizeChannelEntry(ev: Partial<InboundEvent> | null | undefined, fallbackChatId: string): ChatContextMessage | null {
-  if (!ev || !ev.id) return null;
-  const chatId = String(ev.chat?.id ?? fallbackChatId ?? '');
-  if (!chatId || (fallbackChatId && chatId !== String(fallbackChatId))) return null;
-  return {
-    id: String(ev.id),
-    ts: Number(ev.ts) || Date.now(),
-    chatId,
-    chatType: ev.chat?.type || 'direct',
-    chatName: ev.chat?.name ? String(ev.chat.name) : undefined,
-    senderId: String(ev.sender?.id ?? ''),
-    senderName: ev.sender?.name ? String(ev.sender.name) : undefined,
-    isSelf: Boolean(ev.sender?.isSelf),
-    isBotReply: false,
-    replyTo: ev.replyTo != null ? String(ev.replyTo) : undefined,
-    mentionsMe: Boolean(ev.mentionsMe),
-    ...(Array.isArray(ev.mentions) && ev.mentions.length ? { mentions: ev.mentions.map((m) => ({ ...m })) } : {}),
-    text: redactSecrets(ev.text ?? ''),
-    ...(ev.isForwarded || ev.forwarded ? { isForwarded: true } : {}),
-    ...(ev.forwarded ? { forwarded: ev.forwarded } : {}),
-    attachments: Array.isArray(ev.attachments) ? ev.attachments : [],
-  };
-}
 
 function mergeDedupedMessages(
   local: ChatContextMessage[],
@@ -66,15 +42,26 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       ttlMs: chatsCfg.contextTtlMs ?? 24 * 60 * 60_000,
     });
 
+    const channelHasHistory = Boolean(
+      channel?.capabilities?.history !== undefined
+        ? channel.capabilities.history
+        : typeof channel?.getHistory === 'function',
+    );
+    const channelHasMessage = Boolean(
+      channel?.capabilities?.history !== undefined
+        ? channel.capabilities.history
+        : typeof channel?.getMessage === 'function',
+    );
+
     const resolveMessage = async (chatId: string, msgId: string): Promise<ChatContextMessage | null> => {
       if (!chatId || !msgId) return null;
       if (store.isRecalled(chatId, msgId)) return null;
       const cached = store.getMessage(chatId, msgId);
       if (cached) return cached;
 
-      if (typeof channel?.getMessage === 'function') {
+      if (channelHasMessage && typeof channel?.getMessage === 'function') {
         try {
-          const remote = (await channel.getMessage(chatId, msgId)) as Partial<InboundEvent> | null;
+          const remote = await channel.getMessage(chatId, msgId) as Partial<InboundEvent> | null;
           if (remote && String(remote.chat?.id ?? chatId) === String(chatId)) {
             const fixed: Partial<InboundEvent> = remote.chat?.id
               ? remote
@@ -84,15 +71,15 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
         } catch { /* fallback below */ }
       }
 
-      if (typeof channel?.getHistory === 'function') {
+      if (channelHasHistory && typeof channel?.getHistory === 'function') {
         try {
-          const hist = (await channel.getHistory(chatId, { limit: 40 })) as Array<Partial<InboundEvent>>;
+          const hist = await channel.getHistory(chatId, { limit: 40 });
           if (Array.isArray(hist) && hist.length) {
             store.recordHistoryBatch(chatId, hist);
             const found = store.getMessage(chatId, msgId);
             if (found) return found;
             const hit = hist.find((m) => String(m?.id) === String(msgId) && String(m?.chat?.id ?? chatId) === String(chatId));
-            if (hit) return normalizeChannelEntry(hit, chatId);
+            if (hit) return store.normalizeInbound(hit, chatId);
           }
         } catch { /* ignore history lookup failure */ }
       }
@@ -108,15 +95,15 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       const max = Math.max(1, Math.min(200, Number(limit) || 20));
       let local = store.getRecent(chatId, { limit: max, beforeMsgId: before, excludeMsgId });
 
-      const missingInLocal = before && !store.getMessage(chatId, before);
-      if ((local.length < max || missingInLocal) && typeof channel?.getHistory === 'function') {
+      const anchor = before ? store.getMessage(chatId, before) : null;
+      const missingInLocal = Boolean(before && !anchor);
+      if ((local.length < max || missingInLocal) && channelHasHistory && typeof channel?.getHistory === 'function') {
         try {
-          const anchor = before ? store.getMessage(chatId, before) : null;
-          const remote = (await channel.getHistory(chatId, {
+          const remote = await channel.getHistory(chatId, {
             limit: max + 5,
             beforeMsgId: before || undefined,
             beforeTs: anchor?.ts,
-          })) as Array<Partial<InboundEvent>>;
+          });
           if (Array.isArray(remote) && remote.length) {
             const scoped = remote.filter((m) => m && String(m.chat?.id ?? chatId) === String(chatId));
             if (!before) {
@@ -124,7 +111,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
               local = store.getRecent(chatId, { limit: max, beforeMsgId: before, excludeMsgId });
             } else {
               const normalizedRemote = scoped
-                .map((m) => normalizeChannelEntry(m, chatId))
+                .map((m) => store.normalizeInbound(m, chatId))
                 .filter((m): m is ChatContextMessage => Boolean(m && (!excludeMsgId || m.id !== String(excludeMsgId)) && m.id !== String(before)));
               return mergeDedupedMessages(local, normalizedRemote, (id) => store.isRecalled(chatId, id), max);
             }
@@ -154,8 +141,9 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       if (ombUrl && !isLoopbackUrl(ombUrl)) return null;
       const addr = web.server.address();
       if (!addr || typeof addr !== 'object') return null;
-      const host = !addr.address || addr.address === '::' || addr.address === '0.0.0.0' ? '127.0.0.1' : addr.address;
-      return `http://${host.includes(':') ? `[${host}]` : host}:${addr.port}`;
+      const host = probeHostOf(addr.address);
+      const url = `http://${host}:${addr.port}`;
+      return isLoopbackUrl(url) ? url : null;
     };
 
     const getContextPullHint: NonNullable<ImContextService['getContextPullHint']> = (chatId, info) => (
@@ -164,7 +152,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
         oldestMsgId: info.oldestMsgId,
         hasTruncated: info.hasTruncated,
         hasOlder: info.hasOlder,
-        channelHasHistory: Boolean(channel?.capabilities?.history || typeof channel?.getHistory === 'function'),
+        channelHasHistory,
         readonly: Boolean(info.readonly),
       })
     );

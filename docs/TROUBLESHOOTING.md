@@ -8,7 +8,7 @@
 
 实现 [im-plugin.example.ts](../im-plugin.example.ts) 并接入真实 IM 后，建议重点核对以下 4 项：
 
-1. **回执 ID 同步返回**：`send()` 与 `sendFile()` 必须同步返回通道实际消息 ID，以便桥接层写入 `ownIds` 精确去重，防止本人账号发送后回环重触。
+1. **返回真实消息 ID**：`send()` 与 `sendFile()` 的 `Promise` 必须解析为通道实际消息 ID，以便桥接层写入 `ownIds` 精确去重，防止本人账号发送后回环重触。
 2. **契约与实时收发验收**：执行 `npm run channel:test -- --wait 15 --send "hello" --check-file`，确认收发文本、回复引用与附件上传/下载均正常。
 3. **可选能力钩子**：按目标平台支持度补充 `getMessage` / `getHistory`（配 `capabilities.history: true`）、入站 `recall` 撤回事件与结构化 `mentions`。
 4. **自聊提醒校验**：确认手机端能否收到“自己发给自己”的消息推送；若 IM 默认静音自发消息，请实现插件可选的 `notify` 钩子并声明 `capabilities.notify: true`。

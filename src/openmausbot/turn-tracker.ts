@@ -4,7 +4,7 @@
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
 import { messageNeedsInput } from './client.ts';
-import { botCommandTarget } from './command-helpers.ts';
+import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
 import type {
   BridgeChatContext,
@@ -116,7 +116,7 @@ export function createTurnTracker(
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let intermediateTimer: ReturnType<typeof setTimeout> | null = null;
   let stallTimer: ReturnType<typeof setInterval> | null = null;
-  let resumedWatchAc: AbortController | null = null;
+  let watcherAc: AbortController | null = null;
   let progressCount = 0;
   let intermediateBubbleCount = 0;
   let lastProgressAt = 0;
@@ -265,8 +265,8 @@ export function createTurnTracker(
 
   const dispose = (): void => {
     ac.abort();
-    resumedWatchAc?.abort();
-    resumedWatchAc = null;
+    watcherAc?.abort();
+    watcherAc = null;
     if (progressTimer) {
       clearTimeout(progressTimer);
       progressTimer = null;
@@ -281,15 +281,21 @@ export function createTurnTracker(
     }
   };
 
-  const markStopped = (): void => {
-    stoppedByUser = true;
+  const teardownTurn = (clearIntermediates = true): void => {
     settled = true;
-    pendingIntermediates.length = 0;
-    heldIntermediates.length = 0;
+    if (clearIntermediates) {
+      pendingIntermediates.length = 0;
+      heldIntermediates.length = 0;
+    }
     dispose();
     bridge.activeTurns.delete(key);
     bridge.inFlightTurns?.delete(key);
     bridge.saveState();
+  };
+
+  const markStopped = (): void => {
+    stoppedByUser = true;
+    teardownTurn(true);
   };
 
   const ensureStallWatchdog = (): void => {
@@ -302,10 +308,7 @@ export function createTurnTracker(
       stallNotified = true;
       const elapsedSec = Math.max(1, Math.round((bridge.now() - startedAt) / 1000));
       const ctrlChat = bridge.resolveControlChatId(chatCtx);
-      const extLabel = chatCtx?.chatName || chatCtx?.originChatId || '';
-      const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
-        ? `📍 **来自「${extLabel}」**\n`
-        : '';
+      const ctrlBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat);
       const shownName = bridge.displayBotName(botId, botName, { isGroup });
       const cmdTarget = botCommandTarget(bridge, botId, botName, { isGroup });
       bridge.emitTelemetry?.('turn_stalled', {
@@ -321,22 +324,17 @@ export function createTurnTracker(
     stallTimer.unref?.();
   };
 
-  const startWatcher = (afterInput = false): void => {
+  const startWatcher = (): void => {
+    if (settled || ac.signal.aborted) return;
     ensureStallWatchdog();
-    let watchAc: AbortController;
-    if (afterInput) {
-      resumedWatchAc?.abort();
-      resumedWatchAc = new AbortController();
-      watchAc = resumedWatchAc;
-      ac.signal.addEventListener('abort', () => watchAc.abort(), { once: true });
-    } else {
-      watchAc = ac;
-    }
+    watcherAc?.abort();
+    const watchAc = new AbortController();
+    watcherAc = watchAc;
     (async () => {
       let since: unknown;
       let version: unknown;
       let prevState: string | undefined;
-      while (!settled && !watchAc.signal.aborted) {
+      while (!settled && !ac.signal.aborted && !watchAc.signal.aborted) {
         try {
           const job = await bridge.client.getJob(threadId, {
             scope: 'turn',
@@ -362,7 +360,7 @@ export function createTurnTracker(
             await new Promise((r) => setTimeout(r, 150));
             continue;
           }
-          if (job?.state && FINAL_JOB_STATES.has(job.state) && job.state !== 'needs-input') {
+          if (job?.state && FINAL_JOB_STATES.has(job.state)) {
             if (job.state === 'idle' && (bridge.now() - startedAt) < 2500) {
               const res = await bridge.client.getMessages(threadId, 10);
               const msgs = res.messages ?? [];
@@ -390,10 +388,7 @@ export function createTurnTracker(
     completing = true;
     try {
       const ctrlChat = bridge.resolveControlChatId(chatCtx);
-      const extLabel = chatCtx?.chatName || chatCtx?.originChatId || '';
-      const ctrlBanner = isExternal && ctrlChat === bridge.selfChat
-        ? `📍 **来自「${extLabel}」**\n`
-        : '';
+      const ctrlBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat);
 
       let messages: OmbMessage[];
       try {
@@ -401,13 +396,7 @@ export function createTurnTracker(
         messages = Array.isArray(res.messages) ? res.messages : [];
       } catch (e) {
         if (settled || stoppedByUser) return;
-        settled = true;
-        pendingIntermediates.length = 0;
-        heldIntermediates.length = 0;
-        dispose();
-        bridge.activeTurns.delete(key);
-        bridge.inFlightTurns?.delete(key);
-        bridge.saveState();
+        teardownTurn(true);
         const shownName = bridge.displayBotName(botId, botName, { isGroup });
         await bridge.say(`${ctrlBanner}⚠️ 获取 **${shownName}** 回复失败：${formatOmbError(e)}`, ctrlChat ? { targetChatId: ctrlChat } : null);
         return;
@@ -445,17 +434,13 @@ export function createTurnTracker(
         await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
         if (!settled && !stoppedByUser) {
           bridge.activeTurns.set(key, turn);
-          startWatcher(true);
+          startWatcher();
         }
         return;
       }
 
-      settled = true;
       const droppedIntermediates = [...pendingIntermediates.splice(0), ...heldIntermediates.splice(0)];
-      dispose();
-      bridge.activeTurns.delete(key);
-      bridge.inFlightTurns?.delete(key);
-      bridge.saveState();
+      teardownTurn(false);
 
       await emitChain.catch(() => {});
       if (stoppedByUser) return;

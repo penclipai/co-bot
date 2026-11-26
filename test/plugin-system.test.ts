@@ -418,8 +418,20 @@ export function apply(ctx) {
     await sendSim('@bot ping hello');
     await until(() => sim.history.some((m) => (m.text || '').includes('pong-v1:cfg:hello')));
 
-    await sendSim('@bot help');
+    await sendSim('@bot');
     await until(() => sim.history.some((m) => (m.text || '').includes('扩展指令') && (m.text || '').includes('`@bot ping`')));
+
+    await sendSim('@bot help');
+    await until(() => sim.history.some((m) => m.file?.name?.endsWith('-help.html')));
+    const helpMsg = sim.history.findLast((m) => m.file?.name?.endsWith('-help.html'))!;
+    const helpRes = await fetch(`${baseUrl}${helpMsg.file!.url}`);
+    assert.equal(helpRes.status, 200);
+    assert.match(helpRes.headers.get('content-type') || '', /^text\/html/i);
+    const helpHtml = await helpRes.text();
+    assert.match(helpHtml, /<!doctype html>/i);
+    assert.match(helpHtml, /<svg\b/);
+    assert.match(helpHtml, /扩展指令/);
+    assert.match(helpHtml, /@bot ping/);
 
     // 3. Drop-in security redactor plugin redacts custom secret in outbound reply and cleans up on unmount
     assert.ok(listCustomRedactors().includes('emp_int_secret'));

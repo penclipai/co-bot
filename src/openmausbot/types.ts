@@ -270,6 +270,7 @@ export interface PolishDraftInfo {
   originChatType: ChatType;
   replyToImMsgId: string | null;
   addBotPrefix: boolean;
+  forceBotPrefix?: boolean;
   delegationRe?: string;
 }
 
@@ -486,7 +487,7 @@ export interface TurnTrackerHandle {
   complete: (jobState?: string | null) => Promise<void>;
   dispose: () => void;
   markStopped: () => void;
-  startWatcher: (afterInput?: boolean) => void;
+  startWatcher: () => void;
 }
 
 export interface ChatThreadEntry {
@@ -505,6 +506,7 @@ export interface OutboundBufferItem {
   route: MsgRoute | null;
   replyTo: string | null;
   actions: ChannelAction[] | null;
+  mentions?: OutboundMention[];
   expiresAt: number;
 }
 
@@ -534,7 +536,7 @@ export interface ImContextService {
   recordInbound: (ev: Partial<InboundEvent>) => unknown;
   recordOutbound: (chatId: string, info: Record<string, unknown>) => unknown;
   recallMessage?: (chatId: string, msgId: string) => unknown;
-  getHistory: (chatId: string, opts?: { limit?: number; excludeMsgId?: string }) => Promise<ChatContextMessage[]>;
+  getHistory: (chatId: string, opts?: { limit?: number; before?: string | null; excludeMsgId?: string | null }) => Promise<ChatContextMessage[]>;
   listChats?: () => Array<{ id: string; type: ChatType; name: string; count: number; updatedAt: number }>;
   stats?: () => { chatCount: number; totalMessages: number };
   getContextPullHint?: (

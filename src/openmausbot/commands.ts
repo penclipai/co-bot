@@ -11,12 +11,14 @@ import {
   replyContextUsage,
   resolveChatOrId,
   runQueueAction,
+  shortModelName,
   showBotName,
   stopTarget,
 } from './command-helpers.ts';
+import { buildHelpHtml, sendHelpHtmlAttachment } from './help-html.ts';
 import type { BridgeChatContext, MsgRoute, OmbBot, OmbTargetBot } from './types.ts';
 
-export { botCommandTarget, buildHelpText };
+export { botCommandTarget, buildHelpHtml, buildHelpText };
 
 const TASK_PICK_TTL = 2 * 60 * 1000;
 const parseListChoice = (raw: unknown): number | null => {
@@ -44,7 +46,7 @@ async function replyExternalChatContext(
   const freshName = showBotName(bridge, fresh.id, fresh.name);
   const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === entry.threadId);
   await replyContextUsage(sensSink, {
-    title: `${extChat.name || extChat.id}（${freshName}）隔离`,
+    title: `${extChat.name || extChat.id}（${freshName}）`,
     bot: { id: fresh.id, name: freshName },
     threadId: entry.threadId,
     task,
@@ -88,31 +90,40 @@ async function handleStatusCommand(
   const deadBots = visible.filter((b) => b.activity === 'dead');
   const headState = chief?.activity === 'dead'
     ? `**🔴 ${brand} 异常（主协调 dead）**`
-    : (deadBots.length ? `**🟡 ${brand} 部分异常（${deadBots.length} 个 Bot 离线）**` : `**🟢 ${brand} 在线**`);
+    : (deadBots.length ? `**⚠️ ${brand} 部分异常（${deadBots.length} 离线）**` : `**✅ ${brand} 在线**`);
 
   const headerParts = [headState];
+  if (visible.length === 1 && chief) {
+    const chiefMod = shortModelName(chief.modelSelection?.model);
+    if (chiefMod) headerParts.push(`\`${chiefMod}\``);
+    if (chief.busy) {
+      const act = String(chief.activity ?? '').trim();
+      headerParts.push(act && act.toLowerCase() !== 'busy' ? `运行中·${act}` : '运行中');
+    }
+    if (chief.approvalMode && chief.approvalMode !== 'ask') headerParts.push(chief.approvalMode);
+    if (chief.waitingForTeammates) headerParts.push('等待队友');
+  }
   if (desktopManaged && sess?.kind !== 'session') headerParts.push('⚠️ 桌面端未配对');
   if (doc?.problems?.length) headerParts.push(`⚠️ Doctor ${doc.problems.length} 项异常`);
-  if (h.box && h.box !== 'off') headerParts.push(`隔离：${h.box}`);
-  if (bridge.activeTurns.size > 0) headerParts.push(`活跃轮次：${bridge.activeTurns.size}`);
-  if (bridge.isStickyActive()) headerParts.push('连续对话激活中');
-  if (bridge.quietQueue.length > 0) headerParts.push(`静默待汇总：${bridge.quietQueue.length} 条`);
+  if (h.box && h.box !== 'off') headerParts.push(`隔离:${h.box}`);
+  if (bridge.activeTurns.size > 0) headerParts.push(`${bridge.activeTurns.size} 任务中`);
+  if (bridge.isStickyActive()) headerParts.push('续聊中');
+  if (bridge.quietQueue.length > 0) headerParts.push(`待汇总 ${bridge.quietQueue.length}`);
   const headerLine = headerParts.join(' · ');
 
   let ctxBot: OmbBot | OmbTargetBot | undefined = activeBot ?? chief;
   let ctxThreadId = targetBot?.threadId ?? ctxBot?.threadId ?? '';
-  let ctxTitle = ctxBot ? `${showBotName(bridge, ctxBot.id, ctxBot.name)} 当前会话` : '当前会话';
+  let ctxLabel = '上下文';
   let compactCmd = `${cmdTarget} compact`;
   let missingExt = false;
   if (extCtx) {
     const extEntry = bridge.chatThreads.get(`${extCtx.originChatId}:${targetBot.id}`);
+    ctxLabel = `**${extCtx.chatName || extCtx.originChatId}**`;
     if (!extEntry) {
       missingExt = true;
     } else {
       ctxBot = bots.find((b) => b.id === extEntry.botId) ?? ctxBot;
       ctxThreadId = extEntry.threadId;
-      const ctxBotShown = ctxBot ? showBotName(bridge, ctxBot.id, ctxBot.name) : 'co-bot';
-      ctxTitle = `${extCtx.chatName || extCtx.originChatId}（${ctxBotShown}）隔离`;
       compactCmd = `${botCommandTarget(bridge, ctxBot?.id, ctxBot?.name)} compact ${extCtx.originChatId}`;
     }
   }
@@ -127,34 +138,35 @@ async function handleStatusCommand(
       : (ctxSummary.pct >= 50 ? `\n可回复 \`${compactCmd}\` 压缩上下文` : ''))
     : '';
   const ctxLine = missingExt && extCtx
-    ? `- **${extCtx.chatName || extCtx.originChatId}**：尚未建立独立隔离上下文（发送对话后自动创建）。`
+    ? `- ${ctxLabel}：尚未建立隔离上下文（对话后自动创建）`
     : (ctxSummary
-      ? `- **${ctxTitle}** 上下文：${ctxSummary.line}${compactHint}`
-      : `- **${ctxTitle}** 暂无上下文统计（对话后记录）`);
+      ? `- ${ctxLabel}：${ctxSummary.line}${compactHint}`
+      : `- ${ctxLabel}：暂无统计（对话后记录）`);
 
   const sections = [`${headerLine}\n${ctxLine}`];
-  if (visible.length) {
+  if (visible.length > 1) {
     const botLines = visible.map((b) => {
-      const role = b.chiefOfStaff ? '（主协调）' : '';
+      const role = b.chiefOfStaff ? '（主）' : '';
       const act = String(b.activity ?? '').trim();
       const st = act === 'dead'
         ? '🔴 异常(dead)'
         : (b.busy
-          ? (act && act.toLowerCase() !== 'busy' ? `运行中 · ${act}` : '运行中')
+          ? (act && act.toLowerCase() !== 'busy' ? `运行中·${act}` : '运行中')
           : '空闲');
-      const mod = b.modelSelection?.model ? ` · \`${b.modelSelection.model}\`` : '';
-      const apv = b.approvalMode && b.approvalMode !== 'ask' ? ` · 审批:${b.approvalMode}` : '';
+      const shortMod = shortModelName(b.modelSelection?.model);
+      const mod = shortMod ? ` · \`${shortMod}\`` : '';
+      const apv = b.approvalMode && b.approvalMode !== 'ask' ? ` · ${b.approvalMode}` : '';
       const waitTm = b.waitingForTeammates ? ' · 等待队友' : '';
       return `- **${showBotName(bridge, b.id, b.name)}**${role} · ${st}${mod}${apv}${waitTm}`;
     });
-    sections.push(`**🤖 协作团队（${visible.length}）**\n${botLines.join('\n')}`);
+    sections.push(`**🤖 团队（${visible.length}）**\n${botLines.join('\n')}`);
   }
   if (visibleGroups.length) {
     const gLines = visibleGroups.map((g) => {
-      const count = Array.isArray(g.memberIds) ? `${g.memberIds.length} 成员` : '协作群';
+      const count = Array.isArray(g.memberIds) ? `${g.memberIds.length}人` : '群组';
       return `- **${g.name}**（${count} · ${g.busy ? '讨论中' : '空闲'}）`;
     });
-    sections.push(`**👥 协作群组（${visibleGroups.length}，用 \`@群名\` 发起协作）**\n${gLines.join('\n')}`);
+    sections.push(`**👥 群组（${visibleGroups.length}）**\n${gLines.join('\n')}`);
   }
 
   const route = ctxSummary && ctxBot
@@ -188,8 +200,15 @@ async function handleDefaultCommand(
   const replySink = makeCommandSink(bridge, chatCtx, { sensitive: false });
   const sensSink = makeCommandSink(bridge, chatCtx, { sensitive: true });
 
-  if ((!low && !quotedId && !hasAttachments) || /^(?:help|帮助|\?|？)$/i.test(raw)) {
+  if (!low && !quotedId && !hasAttachments) {
     await replySink.say(buildHelpText(bridge));
+    return true;
+  }
+  if (/^(?:help|帮助|\?|？)$/i.test(raw)) {
+    const sent = await sendHelpHtmlAttachment(bridge, replySink, {
+      replyTo: isExternal ? chatCtx?.replyToImMsgId : null,
+    });
+    if (!sent) await replySink.say(buildHelpText(bridge));
     return true;
   }
 
@@ -536,6 +555,10 @@ async function handleDefaultCommand(
       await sensSink.say(`未找到可委托的外部群/联系人「${m[1]}」，发 \`${bridge.trigger} chats\` 查看已知会话。`);
       return true;
     }
+    if (targetChat.type !== 'direct') {
+      await sensSink.say(`⚠️ 协作委托仅支持点对点私聊（\`direct\`），「${targetChat.name || targetChat.id}」是群聊，不可发起委托。`);
+      return true;
+    }
     let qRest = m[2].trim();
     let project = '';
     const projM = qRest.match(/^proj:(\S+)\s+([\s\S]+)$/i);
@@ -660,7 +683,7 @@ export async function handleCommand(
         const freshName = showBotName(bridge, fresh.id, fresh.name);
         const task = (fresh.tasks ?? []).find((t) => (t.threadId ?? t.id) === activeTarget.threadId) ?? fresh.tasks?.[0];
         await replyContextUsage(sensSink, {
-          title: `${freshName} 当前会话`,
+          title: freshName,
           bot: { id: fresh.id, name: freshName },
           threadId: activeTarget.threadId,
           task,

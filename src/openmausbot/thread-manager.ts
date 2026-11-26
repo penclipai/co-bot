@@ -137,6 +137,14 @@ export function isExternalThread(bridge: OpenMausBotBridge, threadId?: string | 
   return false;
 }
 
+function registerThreadTarget(bridge: OpenMausBotBridge, targetBot: OmbTargetBot, threadId: string): void {
+  if (targetBot.isGroup) {
+    bridge.groupByThread.set(threadId, { id: targetBot.id, name: targetBot.name, threadId, isGroup: true });
+  } else {
+    bridge.botByThread.set(threadId, { id: targetBot.id, name: targetBot.name, threadId });
+  }
+}
+
 /** 确保自聊回到独立的自聊主线 Thread，防止误连到外群隔离 Thread。 */
 export async function resolveSelfBotThread(bridge: OpenMausBotBridge, targetBot: OmbTargetBot): Promise<OmbTargetBot> {
   if (!targetBot) return targetBot;
@@ -146,10 +154,12 @@ export async function resolveSelfBotThread(bridge: OpenMausBotBridge, targetBot:
   }
   const saved = bridge.selfThreads.get(String(targetBot.id));
   if (saved?.threadId && !isExternalThread(bridge, saved.threadId)) {
+    registerThreadTarget(bridge, targetBot, saved.threadId);
     return { ...targetBot, threadId: saved.threadId };
   }
   if (bridge.focus?.botId === targetBot.id && bridge.focus?.threadId && !isExternalThread(bridge, bridge.focus.threadId)) {
     const next = { ...targetBot, threadId: bridge.focus.threadId };
+    registerThreadTarget(bridge, targetBot, bridge.focus.threadId);
     setSelfThread(bridge, next);
     return next;
   }
@@ -161,6 +171,7 @@ export async function resolveSelfBotThread(bridge: OpenMausBotBridge, targetBot:
         : null);
     const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
     if (newTid && !isExternalThread(bridge, newTid)) {
+      registerThreadTarget(bridge, targetBot, newTid);
       const next = { ...targetBot, threadId: newTid };
       setSelfThread(bridge, next);
       return next;
@@ -219,11 +230,7 @@ export async function ensureChatThread(
     }
     const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
     if (!newTid) return targetBot;
-    if (targetBot.isGroup) {
-      bridge.groupByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid, isGroup: true });
-    } else {
-      bridge.botByThread.set(newTid, { id: targetBot.id, name: targetBot.name, threadId: newTid });
-    }
+    registerThreadTarget(bridge, targetBot, newTid);
     const nextTarget = { ...targetBot, threadId: newTid };
     setChatThread(bridge, chatId, nextTarget);
     return nextTarget;

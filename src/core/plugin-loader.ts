@@ -44,7 +44,7 @@ function asPlainObj(val: unknown): Record<string, unknown> | null {
 }
 
 /** 判断文件名是否为合法的插件模块文件（排除类型声明与测试文件）。 */
-export function isPluginFileName(name: string): boolean {
+function isPluginFileName(name: string): boolean {
   const lower = String(name || '').toLowerCase();
   if (!lower || lower.startsWith('.') || lower.startsWith('_')) return false;
   if (lower.endsWith('.d.ts') || lower.includes('.test.') || lower.includes('.spec.')) return false;
@@ -229,11 +229,26 @@ export async function discoverPlugins(
     let fallbackName: string;
     const fullPath = path.join(pluginsDir, entryName);
 
-    if (dirent.isFile() || dirent.isSymbolicLink()) {
+    let isFile = dirent.isFile();
+    let isDir = dirent.isDirectory();
+    if (dirent.isSymbolicLink()) {
+      try {
+        const targetStat = fs.statSync(fullPath);
+        isFile = targetStat.isFile();
+        isDir = targetStat.isDirectory();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.warn?.(`[co-bot:plugins] 跳过无效符号链接「${fullPath}」：${msg}`);
+        result.errors.push({ name: entryName, source: fullPath, error: msg });
+        continue;
+      }
+    }
+
+    if (isFile) {
       if (!isPluginFileName(entryName)) continue;
       entryFile = fullPath;
       fallbackName = entryName.replace(/\.(?:[cm]?[jt]s)$/i, '');
-    } else if (dirent.isDirectory()) {
+    } else if (isDir) {
       entryFile = resolvePluginEntryFile(fullPath);
       if (!entryFile) continue;
       fallbackName = entryName;

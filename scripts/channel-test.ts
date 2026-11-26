@@ -160,6 +160,7 @@ export async function runChannelContractTest(
     log(`  能力声明：${JSON.stringify(check.capabilities)}`);
     for (const w of warnings) log(`⚠ ${w}`);
     for (const e of errors) log(`✗ ${e}`);
+    const loggedErrors = errors.length;
 
     if (dry || errors.length) {
       return {
@@ -193,8 +194,7 @@ export async function runChannelContractTest(
       if (!ev?.sender?.isSelf) {
         log('  ⚠ 提示：该事件 sender.isSelf === false，自聊触发器不会响应他人的消息');
       }
-      const needsSelfChatId = Boolean((sendText || checkFile) && !channel.selfChatId);
-      if (!needsSelfChatId || channel.selfChatId) gotInboundResolve();
+      if (!sendText && !checkFile || channel.selfChatId) gotInboundResolve();
     }, {});
 
     log(`✓ 通道已连接：${JSON.stringify(channel.status?.() ?? {})}`);
@@ -235,6 +235,7 @@ export async function runChannelContractTest(
       }
     }
 
+    for (const e of errors.slice(loggedErrors)) log(`✗ ${e}`);
     return {
       ok: errors.length === 0,
       channelName: loaded.resolvedName,
@@ -267,7 +268,6 @@ async function main(): Promise<void> {
     checkFile,
   });
   if (!res.ok) {
-    for (const e of res.errors) console.error(`✗ ${e}`);
     process.exitCode = 1;
   }
 }

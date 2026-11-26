@@ -7,7 +7,7 @@ import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../f
 import type { ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
-import { botCommandTarget } from './commands.ts';
+import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { formatDelegationResponse } from './delegation.ts';
 import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
@@ -217,7 +217,7 @@ export async function forwardBotMedia(
           forwarded += 1;
         } catch (e) {
           const reason = formatOmbError(e);
-          console.warn('[omb-media] 图片回传失败:', nameOrId(msg), reason);
+          console.warn('[omb-media] 图片回传失败:', String(msg.id || 'unknown'), reason);
           bridge.emitTelemetry('media_failed', { chatId: chatId || bridge.selfChat || null, summary: `image ${msg.id}: ${reason}` });
         }
       }
@@ -247,10 +247,6 @@ export async function forwardBotMedia(
   return forwarded;
 }
 
-function nameOrId(msg: OmbMessage): string {
-  return String(msg.id || 'unknown');
-}
-
 /** 投递审批、选项/提问或阻塞类卡片至控制会话并记录 pendingCards。 */
 export async function emitCard(
   bridge: OpenMausBotBridge,
@@ -273,7 +269,6 @@ export async function emitCard(
   const speakerName = isGroup ? (msg.from?.name || '') : '';
   const speakerBotId = isGroup ? (msg.from?.botId || null) : null;
   const shownName = bridge.displayBotName(botId, botName, { isGroup });
-  const isExternal = Boolean(chatCtx?.isExternal);
   const route: MsgRoute = {
     botId,
     botName,
@@ -285,9 +280,7 @@ export async function emitCard(
   const who = bridge.botPrefix(botId, botName, { isGroup, speakerName, speakerBotId });
   const multiCard = bridge.pendingCards.size >= 1;
   const prompt = formatCardPrompt(shownName, msg, who, { multiCard });
-  const originBanner = isExternal && ctrlChat === bridge.selfChat
-    ? `**📍 来自「${chatCtx?.chatName || chatCtx?.originChatId || ''}」的审批 / 确认**\n`
-    : '';
+  const originBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat, '的审批 / 确认');
   const sentId = await bridge.say(`${originBanner}${prompt.text}`, route, null, null, { noBuffer: true });
   if (!sentId) {
     bridge.deliveredCards.delete(cid);
@@ -386,6 +379,7 @@ export async function deliverBotReply(
           originChatType: chatCtx.polishDraft.originChatType || 'group',
           replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
           addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
+          forceBotPrefix: Boolean(chatCtx.polishDraft.forceBotPrefix),
           delegationRe: chatCtx.polishDraft.delegationRe || null,
         }
       : null);
@@ -414,7 +408,11 @@ export async function deliverBotReply(
   const useDefaultExtBadge = Boolean(
     isDirectExternalReply && !isDirectDelegationRes && customExtPrefix && customExtPrefix.trim() === '🤖',
   );
-  const badge = proactive ? '' : (who || (useDefaultExtBadge ? `🤖 **[${shownName}]**` : ''));
+  const badge = proactive
+    ? ''
+    : (isDirectExternalReply && !isDirectDelegationRes
+      ? (useDefaultExtBadge ? (who || `🤖 **[${shownName}]**`) : '')
+      : who);
 
   let bodyCore = safeBody;
   let delegationTagSuffix = '';
@@ -666,9 +664,9 @@ export async function maybeWarnHighContext(
         trimMapCap(bridge.lastAutoCompactAt, 200);
         await bridge.client.compact(botId, threadId);
         bridge.contextWarnedThreads.delete(threadId);
-        const originLabel = chatCtx.chatName || chatCtx.originChatId || '';
+        const originBanner = formatOriginBanner(chatCtx, bridge.selfChat, bridge.selfChat, '的会话维护');
         await bridge.say(
-          `📍 **来自「${originLabel}」的会话维护**\n🗜️ 该群隔离上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），已自动后台压缩，群内零打扰。`,
+          `${originBanner}🗜️ 该群隔离上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），已自动后台压缩，群内零打扰。`,
           { botId, botName: bridge.displayBotName(botId, bot?.name), threadId, targetChatId: bridge.selfChat },
         );
       }
@@ -679,9 +677,7 @@ export async function maybeWarnHighContext(
     rememberBounded(bridge.contextWarnedThreads, threadId, 200);
     const cmdTarget = botCommandTarget(bridge, botId, bot?.name);
     const compactCmd = chatCtx?.isExternal && chatCtx.originChatId ? `${cmdTarget} compact ${chatCtx.originChatId}` : `${cmdTarget} compact`;
-    const originBanner = chatCtx?.isExternal
-      ? `📍 **来自「${chatCtx.chatName || chatCtx.originChatId || ''}」的会话提醒**\n`
-      : '';
+    const originBanner = formatOriginBanner(chatCtx, bridge.selfChat, bridge.selfChat, '的会话提醒');
     await bridge.say(
       `${originBanner}💡 当前会话上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），建议发 \`${compactCmd}\` 压缩以保持准确度。`,
       { botId, botName: bridge.displayBotName(botId, bot?.name), threadId, ...(chatCtx?.isExternal && bridge.selfChat ? { targetChatId: bridge.selfChat } : {}) },

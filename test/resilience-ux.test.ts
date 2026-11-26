@@ -7,10 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { validateConfig } from '../src/config.ts';
 import { Kernel } from '../src/core/kernel.ts';
+import { scanAndRedactOutbound } from '../src/core/security.ts';
 import { defineChannelPlugin } from '../src/core/channel-contract.ts';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import type { OpenMausBotClient } from '../src/openmausbot/client.ts';
-import { buildHelpText } from '../src/openmausbot/commands.ts';
+import { buildHelpHtml, buildHelpText } from '../src/openmausbot/commands.ts';
 import type { BridgeTransport, OmbMessage } from '../src/openmausbot/types.ts';
 import { openmausbotPlugin } from '../src/plugins/openmausbot.ts';
 import { inspectorPlugin } from '../src/plugins/inspector.ts';
@@ -389,10 +390,48 @@ test('Usability B3: /api/debug/bundle redacts secrets and POST /api/debug/action
 test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInSelf', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-ux-polish-'));
   try {
-    const fakeBridge = { trigger: '@bot', followUpWindowMs: 120_000 } as OpenMausBotBridge;
+    const fakeBridge = { trigger: '@bot', botName: 'co-bot', followUpWindowMs: 120_000 } as OpenMausBotBridge;
     const help = buildHelpText(fakeBridge);
-    assert.match(help, /chats[\s\S]*mute\|unmute[\s\S]*summary[\s\S]*new[\s\S]*task[\s\S]*compact[\s\S]*status/);
+    assert.match(help, /通用（`@bot` \/ `@Bot名` \/ `@群名`）[\s\S]*new[\s\S]*task[\s\S]*stop[\s\S]*status \[群\][\s\S]*compact \[群\][\s\S]*bye/);
+    assert.match(help, /仅 `@bot` 可用[\s\S]*sendback[\s\S]*chats[\s\S]*mute\|unmute[\s\S]*summary[\s\S]*bind[\s\S]*delegate/);
+    assert.match(help, /`@bot help`/);
     assert.doesNotMatch(help, /schedule|routines|@bot model|export|style cobot|@bot bots|@bot tasks|@bot context|@bot memory|@bot approval|@bot digest|steer|cancel/);
+
+    const html = buildHelpHtml(fakeBridge);
+    assert.match(html, /<!doctype html>/i);
+    assert.match(html, /<svg\b/);
+    assert.match(html, /多人协作的 IM 智能体工作区/);
+    assert.match(html, /常用指令速查/);
+    for (const banned of [
+      '<script',
+      'OpenMausBot',
+      'MausBot',
+      'opencode',
+      '手机端 IM',
+      'sharedContextDir',
+      'context_pull',
+      'cobot:req',
+      '/burst',
+      'SSE',
+      '零宽空格',
+      'Coordinator Bot',
+    ]) {
+      assert.equal(html.includes(banned), false, `HTML 帮助不应暴露内部细节「${banned}」`);
+    }
+    assert.equal(scanAndRedactOutbound(html).redacted, false, 'HTML 帮助不应误触发安全脱敏规则');
+
+    const escapedHtml = buildHelpHtml({
+      trigger: '@my<bot>&"',
+      botName: 'X<Bot>"&',
+      followUpWindowMs: 90_000,
+      commandRegistry: {
+        list: () => [{ name: 'ping<1>', description: '测"试&<脚本>' }],
+      },
+    } as unknown as OpenMausBotBridge);
+    assert.match(escapedHtml, /X&lt;Bot&gt;&quot;&amp;/);
+    assert.match(escapedHtml, /@my&lt;bot&gt;&amp;&quot; ping&lt;1&gt;/);
+    assert.match(escapedHtml, /测&quot;试&amp;&lt;脚本&gt;/);
+    assert.equal(escapedHtml.includes('<1>'), false);
 
     let replySeq = 0;
     const threadMsgs = new Map<string, OmbMessage[]>();
@@ -479,6 +518,36 @@ test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInS
     assert.equal(backInGroup.replyTo, 'grp_m1');
     assert.match(backInGroup.text, /@\u200BAlice/);
     await b2.stop();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('@bot help falls back to plain text when transport disables files', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-help-fallback-'));
+  try {
+    const tr = makeTransport();
+    tr.transport.canFiles = false;
+    tr.transport.capabilities = { ...tr.transport.capabilities!, files: false };
+    const mc = makeMockClient();
+    const bridge = new OpenMausBotBridge({
+      client: mc.client,
+      transport: tr.transport,
+      dataDir: tmpDir,
+      turnStallMs: 0,
+    });
+    await bridge.start();
+    await tr.push({
+      id: 'help_no_file',
+      ts: Date.now(),
+      chat: { id: 'chat_self', type: 'self' },
+      sender: { id: 'me', isSelf: true },
+      text: '@bot help',
+    });
+    await until(() => tr.sent.some((m) => m.text.includes('常用指南') && m.text.includes('@bot help')));
+    assert.equal(tr.sent.some((m) => m.text.startsWith('[file:')), false);
+    assert.equal(mc.sentPrompts.length, 0);
+    await bridge.stop();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

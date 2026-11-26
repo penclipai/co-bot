@@ -405,7 +405,7 @@ test('Phase 3 UX: multi-bot group room @<群名> dual-bot replies, quote continu
     await bridge.start();
 
     await transport.emitUser('@bot status');
-    await until(() => sent.some((m) => m.text.includes('协作群组') && m.text.includes('架构组')));
+    await until(() => sent.some((m) => m.text.includes('群组（') && m.text.includes('架构组')));
 
     omb.setScenario(({ group, reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
       if (!group) return;

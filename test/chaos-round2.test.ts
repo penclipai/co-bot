@@ -344,7 +344,7 @@ test('Round 2 路由/C2C/草稿/队列/命令与 SSE 竞态防护', async () => 
     assert.match(sent.at(-1)!.text, /已解除「Ops2」的项目绑定/);
 
     await bridge.onEvent({ id: 'g_ctx', ts: Date.now() + 16, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    assert.match(sent.at(-1)!.text, /尚未建立独立隔离上下文/);
+    assert.match(sent.at(-1)!.text, /尚未建立隔离上下文/);
     await bridge.onEvent({ id: 'g_cmp', ts: Date.now() + 17, chat: { id: 'grp_ops2', type: 'group', name: 'Ops2' }, sender: { id: 'me', isSelf: true }, text: '@bot compact' });
     assert.match(sent.at(-1)!.text, /尚未建立独立隔离上下文/);
 

@@ -271,13 +271,14 @@ test('Track D2: 0.1.177 doctor, approvalMode & waitingForTeammates across status
     assert.equal(st1.openmausbot.bots[0].waitingForTeammates, true);
 
     await pushMsg!({ id: 'cmd_status', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    await until(() => sentOut.some((m) => m.text.includes('审批:auto') && m.text.includes('等待队友')));
-    const cleanStatus = sentOut.findLast((m) => m.text.includes('审批:auto'))!;
+    await until(() => sentOut.some((m) => m.text.includes('· auto') && m.text.includes('等待队友')));
+    const cleanStatus = sentOut.findLast((m) => m.text.includes('· auto'))!;
     assert.equal(cleanStatus.text.includes('Doctor'), false);
+    assert.equal(cleanStatus.text.includes('🤖 团队'), false);
 
     doctorProblems = ['sandbox_missing'];
     await pushMsg!({ id: 'cmd_status_warn', ts: Date.now(), chat: { id: 'chat_self', type: 'self' }, sender: { id: 'me', isSelf: true }, text: '@bot status' });
-    await until(() => sentOut.some((m) => m.text.includes('⚠️ Doctor 1 项异常') && m.text.includes('审批:auto') && m.text.includes('等待队友')));
+    await until(() => sentOut.some((m) => m.text.includes('⚠️ Doctor 1 项异常') && m.text.includes('· auto') && m.text.includes('等待队友')));
   } finally {
     await k1.stop().catch(() => {});
     ombServer.closeAllConnections?.();

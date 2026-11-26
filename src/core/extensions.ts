@@ -22,7 +22,7 @@ export const BUILTIN_RESERVED_COMMANDS = new Set([
   'sendback', '发回',
   'chats', '会话列表',
   'mute', '静音',
-  'unmute', '取消静音', '恢复通知',
+  'unmute', '取消静音', '解除静音', '恢复通知',
   'summary', '汇总', '纪要',
   'bind', '绑定',
   'delegate', '委托',
