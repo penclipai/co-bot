@@ -402,6 +402,10 @@ test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInS
     assert.match(html, /<svg\b/);
     assert.match(html, /多人协作的 IM 智能体工作区/);
     assert.match(html, /常用指令速查/);
+    assert.match(html, /id="theme-toggle"/);
+    assert.match(html, /for="theme-toggle"/);
+    assert.match(html, /#theme-toggle:checked/);
+    assert.match(html, /#f7f6f2/);
     for (const banned of [
       '<script',
       'OpenMausBot',

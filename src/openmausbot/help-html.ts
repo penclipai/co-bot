@@ -46,19 +46,138 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
     body {
       margin: 0;
       background: #14120b;
-      color: #edecec;
       font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
       font-size: 15px;
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
     }
+    body:has(#theme-toggle:checked) { background: #f7f6f2; }
+    .theme-input {
+      position: fixed;
+      opacity: 0;
+      pointer-events: none;
+      width: 0;
+      height: 0;
+    }
+    .page {
+      --page-bg: #14120b;
+      --surface: #1b1913;
+      --surface-border: transparent;
+      --chip-bg: #252219;
+      --ink: #edecec;
+      --ink-soft: rgba(237, 236, 236, 0.86);
+      --ink-muted: rgba(237, 236, 236, 0.72);
+      --ink-faint: rgba(237, 236, 236, 0.56);
+      --border: rgba(237, 236, 236, 0.14);
+      --divider: rgba(237, 236, 236, 0.08);
+      --accent: #f54e00;
+      --code-ink: #f4b79b;
+      --tag-bg: #28241b;
+      --tag-ink: rgba(237, 236, 236, 0.7);
+      --diagram-bg: #06080f;
+      min-height: 100vh;
+      background: var(--page-bg);
+      color: var(--ink);
+      color-scheme: dark;
+      transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+    }
+    #theme-toggle:checked ~ .page {
+      --page-bg: #f7f6f2;
+      --surface: #ffffff;
+      --surface-border: #e3dfd4;
+      --chip-bg: #efede6;
+      --ink: #1a1814;
+      --ink-soft: #2e2a23;
+      --ink-muted: #5c574b;
+      --ink-faint: #756f62;
+      --border: #ddd8cc;
+      --divider: #ece8de;
+      --accent: #d94400;
+      --code-ink: #8b2b00;
+      --tag-bg: #efede6;
+      --tag-ink: #5c574b;
+      --diagram-bg: #f4f5f7;
+      color-scheme: light;
+    }
+    #theme-toggle:checked ~ .page svg[data-theme="dark"] {
+      color-scheme: light;
+      --bg: #f4f5f7;
+      --grid: #e9edf2;
+      --canvas-dot: #e2e7ec;
+      --text: #111827;
+      --text-muted: #5b6474;
+      --text-dim: #9aa3b2;
+      --text-faint: #6b7280;
+      --panel: #ffffff;
+      --panel-border: #e5e7eb;
+      --lane-fill: rgba(248, 250, 252, 0.65);
+      --lane-stroke: #cbd5e1;
+      --arrow: #64748b;
+      --arrow-emphasis: #059669;
+      --arrow-security: #b43b57;
+      --arrow-dashed: #6d4fc2;
+      --edge-label: var(--text-muted);
+      --mask: #ffffff;
+      --frontend-fill: rgba(34, 211, 238, 0.15);
+      --frontend-stroke: #0891b2;
+      --backend-fill: rgba(52, 211, 153, 0.18);
+      --backend-stroke: #059669;
+      --database-fill: rgba(167, 139, 250, 0.2);
+      --database-stroke: #7c3aed;
+      --cloud-fill: rgba(251, 191, 36, 0.18);
+      --cloud-stroke: #d97706;
+      --security-fill: rgba(251, 113, 133, 0.15);
+      --security-stroke: #e11d48;
+      --messagebus-fill: rgba(251, 146, 60, 0.15);
+      --messagebus-stroke: #ea580c;
+      --external-fill: rgba(148, 163, 184, 0.18);
+      --external-stroke: #64748b;
+    }
+    #theme-toggle:checked ~ .page svg[data-theme="dark"] > rect[fill="#020617"] { fill: var(--bg); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-frontend { fill: var(--frontend-fill); stroke: var(--frontend-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-backend { fill: var(--backend-fill); stroke: var(--backend-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-database { fill: var(--database-fill); stroke: var(--database-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-cloud { fill: var(--cloud-fill); stroke: var(--cloud-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-security { fill: var(--security-fill); stroke: var(--security-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-messagebus { fill: var(--messagebus-fill); stroke: var(--messagebus-stroke); }
+    #theme-toggle:checked ~ .page svg[data-node-ui] [data-node-id] > rect:not(.c-mask).c-external { fill: var(--external-fill); stroke: var(--external-stroke); }
     .wrap { max-width: 660px; margin: 0 auto; padding: 24px 16px 48px; }
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
     .eyebrow {
       font-size: 12px;
-      color: rgba(237, 236, 236, 0.56);
+      color: var(--ink-faint);
       letter-spacing: 0.04em;
-      margin-bottom: 8px;
     }
+    .theme-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--ink-soft);
+      font-size: 12px;
+      line-height: 1.4;
+      cursor: pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+    }
+    .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+    #theme-toggle:focus-visible ~ .page .theme-btn {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .lbl-dark { display: none; }
+    #theme-toggle:checked ~ .page .lbl-light { display: none; }
+    #theme-toggle:checked ~ .page .lbl-dark { display: inline; }
     h1 {
       margin: 0 0 10px;
       font-size: 28px;
@@ -68,40 +187,44 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
     }
     .lead {
       margin: 0 0 16px;
-      color: rgba(237, 236, 236, 0.72);
+      color: var(--ink-muted);
       font-size: 15px;
     }
     .toc {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      background: #1b1913;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
       border-radius: 4px;
       padding: 10px 12px;
       margin-bottom: 28px;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
     }
     .toc a {
-      color: #edecec;
+      color: var(--ink);
       text-decoration: none;
       font-size: 13px;
       padding: 3px 9px;
       border-radius: 4px;
-      background: #252219;
+      background: var(--chip-bg);
+      transition: background-color 0.2s ease, color 0.2s ease;
     }
-    .toc a:hover { color: #f54e00; }
+    .toc a:hover { color: var(--accent); }
     h2 {
       margin: 34px 0 12px;
       font-size: 19px;
       font-weight: 700;
       letter-spacing: -0.005em;
     }
-    p { margin: 0 0 14px; color: rgba(237, 236, 236, 0.86); }
+    p { margin: 0 0 14px; color: var(--ink-soft); }
     .diagram-box {
-      background: #06080f;
-      border: 1px solid rgba(237, 236, 236, 0.14);
+      background: var(--diagram-bg);
+      border: 1px solid var(--border);
       border-radius: 4px;
       padding: 10px;
       margin: 14px 0 16px;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
     }
     .diagram-scroll {
       overflow-x: auto;
@@ -115,7 +238,7 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
     .d-hint {
       margin-top: 8px;
       font-size: 12px;
-      color: rgba(237, 236, 236, 0.52);
+      color: var(--ink-faint);
       text-align: center;
     }
     .note-grid {
@@ -124,31 +247,35 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
       margin: 14px 0;
     }
     .flat-card {
-      background: #1b1913;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
       border-radius: 4px;
       padding: 13px 14px;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
     }
     .flat-card h3 {
       margin: 0 0 6px;
       font-size: 14px;
       font-weight: 600;
-      color: #edecec;
+      color: var(--ink);
     }
     .flat-card p {
       margin: 0;
       font-size: 13.5px;
-      color: rgba(237, 236, 236, 0.72);
+      color: var(--ink-muted);
     }
     .cmd-group {
-      background: #1b1913;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
       border-radius: 4px;
       padding: 12px 14px;
       margin-bottom: 12px;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
     }
     .cmd-title {
       font-size: 13px;
       font-weight: 700;
-      color: #f54e00;
+      color: var(--accent);
       margin: 0 0 8px;
     }
     .cmd-row {
@@ -156,40 +283,40 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
       flex-direction: column;
       gap: 2px;
       padding: 7px 0;
-      border-top: 1px solid rgba(237, 236, 236, 0.08);
+      border-top: 1px solid var(--divider);
     }
     .cmd-row:first-of-type { border-top: 0; padding-top: 2px; }
     .cmd-row:last-of-type { padding-bottom: 0; }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12.5px;
-      color: #f4b79b;
-      background: #252219;
+      color: var(--code-ink);
+      background: var(--chip-bg);
       padding: 1px 5px;
       border-radius: 3px;
     }
-    .cmd-desc { font-size: 13px; color: rgba(237, 236, 236, 0.74); }
+    .cmd-desc { font-size: 13px; color: var(--ink-muted); }
     .tag {
       display: inline-block;
       font-size: 11px;
       padding: 1px 6px;
       border-radius: 3px;
       margin-left: 6px;
-      background: #28241b;
-      color: rgba(237, 236, 236, 0.7);
+      background: var(--tag-bg);
+      color: var(--tag-ink);
       vertical-align: middle;
     }
     .foot {
       margin-top: 28px;
       padding-top: 14px;
-      border-top: 1px solid rgba(237, 236, 236, 0.12);
+      border-top: 1px solid var(--border);
       font-size: 13px;
-      color: rgba(237, 236, 236, 0.6);
+      color: var(--ink-faint);
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
-    .tomb { color: #f54e00; font-size: 14px; }
+    .tomb { color: var(--accent); font-size: 14px; }
     @media (min-width: 560px) {
       .wrap { padding: 36px 24px 56px; }
       .note-grid { grid-template-columns: repeat(2, 1fr); }
@@ -198,8 +325,13 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
   </style>
 </head>
 <body>
+  <input type="checkbox" id="theme-toggle" class="theme-input" aria-label="切换亮色或暗色主题" />
+  <div class="page">
   <main class="wrap">
-    <div class="eyebrow">${brand} · 使用指南</div>
+    <div class="top-bar">
+      <div class="eyebrow">${brand} · 使用指南</div>
+      <label for="theme-toggle" class="theme-btn" title="切换亮色 / 暗色主题"><span class="lbl-light">☀️ 亮色</span><span class="lbl-dark">🌙 暗色</span></label>
+    </div>
     <h1>多人协作的 IM 智能体工作区</h1>
     <p class="lead">把日常自聊与群聊直接升级为团队 AI 协作空间。每位成员保留私密自聊与独立的群聊对话上下文，同时在团队间按需共享信息、发起跨人协作，并守住出站安全边界。</p>
 
@@ -282,6 +414,7 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
       <span class="tomb">■</span>
     </footer>
   </main>
+  </div>
 </body>
 </html>
 `;
