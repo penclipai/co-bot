@@ -575,7 +575,7 @@ test('E2E: nested card.questionRequest multi-question onboarding card & profileR
     await transport.emitUser('1');
     await until(() => omb.responds.length === 2);
     assert.equal(omb.responds[1].behavior, 'allow');
-    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\* ✅ /);
+    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*\n---\n✅ /);
   } finally {
     await bridge.stop();
     await omb.close();

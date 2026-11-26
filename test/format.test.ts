@@ -26,8 +26,9 @@ test('format helpers: clip, fileSafe, plain, hardBreaks, mdClip', () => {
   assert.equal(clip('abc', 4), 'abc');
   assert.equal(fileSafe('a/b:c d?e'), 'a-b-c-d-e');
 
-  const md = '# 标题\n**加粗** 与 `code`\n```\nkeep **raw**\n```\n- 条目';
+  const md = '# 标题\n**加粗** 与 `code`\n```\nkeep **raw**\n```\n---\n- 条目';
   assert.equal(plain(md), '标题\n加粗 与 code\n  keep **raw**\n- 条目');
+  assert.equal(plain('🤖 **[co-bot]**\n---\n一切正常'), '🤖 [co-bot]\n一切正常');
 
   assert.equal(hardBreaks('第一行\n第二行\n\n- 列表'), '第一行  \n第二行\n\n- 列表');
 
@@ -403,25 +404,26 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
 
 test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix order, hideChiefPrefix opt-out, and isEcho loop guard', () => {
   const badge = '🤖 **[co-bot]**';
-  // 单行纯文本徽章同行
-  assert.equal(attachBotBadge(badge, '一切正常'), '🤖 **[co-bot]** 一切正常');
-  // 多行或 Markdown 块语法开头时徽章独立成行
-  assert.equal(attachBotBadge(badge, '第一行\n第二行'), '🤖 **[co-bot]**\n第一行\n第二行');
-  assert.equal(attachBotBadge(badge, '# 标题\n正文'), '🤖 **[co-bot]**\n# 标题\n正文');
-  assert.equal(attachBotBadge(badge, '```ts\nconst x = 1;\n```'), '🤖 **[co-bot]**\n```ts\nconst x = 1;\n```');
-  assert.equal(attachBotBadge(badge, '- 条目A\n- 条目B'), '🤖 **[co-bot]**\n- 条目A\n- 条目B');
-  assert.equal(attachBotBadge(badge, '1. 第一步'), '🤖 **[co-bot]**\n1. 第一步');
-  assert.equal(attachBotBadge(badge, '> 引用'), '🤖 **[co-bot]**\n> 引用');
-  assert.equal(attachBotBadge(badge, '| col1 | col2 |'), '🤖 **[co-bot]**\n| col1 | col2 |');
+  // 统一在徽章后附加 --- 分隔线再接正文（含单行与多行/块语法）
+  assert.equal(attachBotBadge(badge, '一切正常'), '🤖 **[co-bot]**\n---\n一切正常');
+  assert.equal(attachBotBadge(badge, '第一行\n第二行'), '🤖 **[co-bot]**\n---\n第一行\n第二行');
+  assert.equal(attachBotBadge(badge, '# 标题\n正文'), '🤖 **[co-bot]**\n---\n# 标题\n正文');
+  assert.equal(attachBotBadge(badge, '```ts\nconst x = 1;\n```'), '🤖 **[co-bot]**\n---\n```ts\nconst x = 1;\n```');
+  assert.equal(attachBotBadge(badge, '- 条目A\n- 条目B'), '🤖 **[co-bot]**\n---\n- 条目A\n- 条目B');
+  assert.equal(attachBotBadge(badge, '1. 第一步'), '🤖 **[co-bot]**\n---\n1. 第一步');
+  assert.equal(attachBotBadge(badge, '> 引用'), '🤖 **[co-bot]**\n---\n> 引用');
+  assert.equal(attachBotBadge(badge, '| col1 | col2 |'), '🤖 **[co-bot]**\n---\n| col1 | col2 |');
+  assert.equal(attachBotBadge(badge, '---\n已有分隔线'), '🤖 **[co-bot]**\n---\n已有分隔线');
   // 软拆分编号与幂等防重复
-  assert.equal(attachBotBadge(badge, '第一段', { partIndex: 1, partTotal: 2 }), '🤖 **[co-bot]** (1/2) 第一段');
-  assert.equal(attachBotBadge(badge, '第二段A\n第二段B', { partIndex: 2, partTotal: 2 }), '🤖 **[co-bot]** (2/2)\n第二段A\n第二段B');
+  assert.equal(attachBotBadge(badge, '第一段', { partIndex: 1, partTotal: 2 }), '🤖 **[co-bot]** (1/2)\n---\n第一段');
+  assert.equal(attachBotBadge(badge, '第二段A\n第二段B', { partIndex: 2, partTotal: 2 }), '🤖 **[co-bot]** (2/2)\n---\n第二段A\n第二段B');
   assert.equal(attachBotBadge(badge, '🤖 **[co-bot]** 已有徽章'), '🤖 **[co-bot]** 已有徽章');
   // 普通 🤖 开头人工文本仍应加徽章，不被误判
-  assert.equal(attachBotBadge(badge, '🤖 hello'), '🤖 **[co-bot]** 🤖 hello');
+  assert.equal(attachBotBadge(badge, '🤖 hello'), '🤖 **[co-bot]**\n---\n🤖 hello');
 
   assert.equal(hasBotBadgePrefix('🤖 **[co-bot]** 一切正常'), true);
-  assert.equal(hasBotBadgePrefix('🤖 **[项目组 · Dev]** (1/2)\n内容'), true);
+  assert.equal(hasBotBadgePrefix('🤖 **[co-bot]**\n---\n一切正常'), true);
+  assert.equal(hasBotBadgePrefix('🤖 **[项目组 · Dev]** (1/2)\n---\n内容'), true);
   assert.equal(hasBotBadgePrefix('🤖 [co-bot] 降级纯文本'), true);
   assert.equal(hasBotBadgePrefix('🤖 hello'), false);
   assert.equal(hasBotBadgePrefix('普通文本'), false);

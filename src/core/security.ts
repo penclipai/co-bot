@@ -193,7 +193,7 @@ export function formatExternalBotPrefix(text: unknown, prefix = '🤖 '): string
 }
 
 const BOT_BADGE_RE = /^🤖\s*(?:\*\*\[[^\]\r\n]{1,80}\]\*\*|\[[^\]\r\n]{1,80}\])(?=\s|$)/;
-const MARKDOWN_BLOCK_START_RE = /^(?:#{1,6}\s|```|~~~|>\s?|[-*+]\s|\d+\.\s|\||([-*_])(?:\s*\1){2,}\s*(?:\n|$))/;
+const HR_LINE_START_RE = /^\s*([-*_])(?:\s*\1){2,}\s*(?:\n|$)/;
 
 /** 检测消息正文是否以样式 A 的 Bot 徽章开头（用于自发消息回声防环）。 */
 export function hasBotBadgePrefix(text: unknown): boolean {
@@ -203,8 +203,8 @@ export function hasBotBadgePrefix(text: unknown): boolean {
 
 /**
  * 为机器人回复前置样式 A 徽章（如 `🤖 **[co-bot]**`）：
- * - 单行纯文本徽章与正文同行；
- * - 多行或以 Markdown 块语法（标题/列表/代码块/引用/表格）开头时徽章独立成行；
+ * - 统一在徽章后附加独立 `---` 分隔行再接正文（含单行短答复），稳定触发 IM 的 Markdown 渲染；
+ * - 若正文已以水平分隔线开头则直接换行衔接，避免重复分隔线；
  * - 拆分气泡传入 `partIndex`/`partTotal`（>1）时附加 `(i/n)` 标识。
  */
 export function attachBotBadge(
@@ -223,6 +223,6 @@ export function attachBotBadge(
   const trimmedStart = raw.trimStart();
   if (!partTag && (trimmedStart.startsWith(b) || hasBotBadgePrefix(trimmedStart))) return raw;
   const cleanBody = raw.startsWith('\n') ? raw.replace(/^\n+/, '') : raw;
-  const sep = (raw.includes('\n') || MARKDOWN_BLOCK_START_RE.test(cleanBody.trimStart())) ? '\n' : ' ';
+  const sep = HR_LINE_START_RE.test(cleanBody) ? '\n' : '\n---\n';
   return `${head}${sep}${cleanBody}`;
 }

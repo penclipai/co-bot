@@ -33,9 +33,10 @@ function nextFenceState(line: string, openFence: OpenFenceState | null): { openF
   return { openFence, isFenceLine: false };
 }
 
-/** 不渲染 Markdown 的 IM：去掉加粗、标题、行内代码、代码块围栏，代码块内容保留 2 空格缩进。 */
+/** 不渲染 Markdown 的 IM：去掉加粗、标题、行内代码、分隔线、代码块围栏，代码块内容保留 2 空格缩进。 */
 export function plain(text: unknown): string {
   let openFence: OpenFenceState | null = null;
+  const HR = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
   const out: string[] = [];
   for (let line of String(text ?? '').replace(/\r\n/g, '\n').split('\n')) {
     const f = nextFenceState(line, openFence);
@@ -45,6 +46,7 @@ export function plain(text: unknown): string {
       out.push(line ? `  ${line}` : '');
       continue;
     }
+    if (HR.test(line)) continue;
     const codeSpans: string[] = [];
     line = line.replace(/`([^`\n]+)`/g, (_, code: string) => {
       const idx = codeSpans.push(code) - 1;

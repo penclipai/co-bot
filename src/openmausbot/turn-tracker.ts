@@ -1,6 +1,7 @@
 /**
  * OpenMausBot 单轮执行追踪器：监听 SSE 消息与 /job 轮询，合并中间气泡、推送去噪进度并在轮次完成时收口交付。
  */
+import { attachBotBadge } from '../core/security.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
 import { messageNeedsInput } from './client.ts';
@@ -240,9 +241,9 @@ export function createTurnTracker(
     progressCount += 1;
     const elapsed = Math.max(1, Math.round((now - startedAt) / 1000));
     const who = bridge.botPrefix(botId, botName, { isGroup });
-    const head = who ? `${who} ` : '';
+    const progressText = `${latestActivity}（已 ${elapsed}秒）`;
     const targetChatId = chatCtx?.replyChatId || bridge.selfChat;
-    await enqueueEmit(() => bridge.say(`${head}${latestActivity}（已 ${elapsed}秒）`, {
+    await enqueueEmit(() => bridge.say(who ? attachBotBadge(who, progressText) : progressText, {
       botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(targetChatId ? { targetChatId } : {}),
     }));
   };
@@ -503,7 +504,8 @@ export function createTurnTracker(
             speakerName: isGroup ? (failed.from?.name || '') : '',
             speakerBotId: isGroup ? (failed.from?.botId || null) : null,
           });
-          await bridge.say(`${ctrlBanner}${who ? `${who} ` : ''}❌ ${failed.error || '本轮执行失败'}`, {
+          const failMsg = `❌ ${failed.error || '本轮执行失败'}`;
+          await bridge.say(`${ctrlBanner}${who ? attachBotBadge(who, failMsg) : failMsg}`, {
             botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}),
           });
         } else {

@@ -1,18 +1,21 @@
+import { attachBotBadge } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatMultiQuestionAnswers, formatOmbError, formatQuestionStepPrompt } from './cards.ts';
 import { formatOriginBanner } from './command-helpers.ts';
 import type { BridgeChatContext, MsgRoute, OmbHttpError, PendingCard } from './types.ts';
 
+function withBadge(who: string, body: string): string {
+  return who ? attachBotBadge(who, body) : body;
+}
+
 function buildCardReplyContext(bridge: OpenMausBotBridge, card: PendingCard): {
   ctrlChatId: string;
   who: string;
-  head: string;
   route: MsgRoute;
 } {
   const ctrlChatId = bridge.resolveControlChatId(card.chatCtx);
   const who = bridge.botPrefix(card.botId, card.botName, { isGroup: Boolean(card.isGroup) });
-  const head = who ? `${who} ` : '';
   const route: MsgRoute = {
     botId: card.botId,
     botName: card.botName,
@@ -21,7 +24,7 @@ function buildCardReplyContext(bridge: OpenMausBotBridge, card: PendingCard): {
     ...(card.isGroup ? { isGroup: true } : {}),
     ...(ctrlChatId ? { targetChatId: ctrlChatId } : {}),
   };
-  return { ctrlChatId, who, head, route };
+  return { ctrlChatId, who, route };
 }
 
 /** 清理与当前响应关联的 pendingCards 条目并持久化状态。 */
@@ -47,13 +50,12 @@ function cleanupIfStaleCardError(bridge: OpenMausBotBridge, card: PendingCard, e
 /** 当有多张待处理卡片且用户裸回复快捷词时，提示引用对应消息回复以免误批。 */
 export async function replyMultiCardHint(bridge: OpenMausBotBridge): Promise<void> {
   const who = bridge.botPrefix('', bridge.botName);
-  const head = who ? `${who} ` : '';
   const items = [...bridge.pendingCards.values()].map((c) => {
     const name = bridge.displayBotName(c.botId, c.botName, { isGroup: Boolean(c.isGroup) });
     return `- **${name}**：${clip(c.title || '待确认操作', 48)}`;
   });
   await bridge.say(
-    `${head}⚠️ 当前有 **${bridge.pendingCards.size}** 条待确认请求，请**引用对应气泡**回复（如 \`1\` / \`0\` 或 \`ok\` / \`no\`）：\n${items.join('\n')}`,
+    withBadge(who, `⚠️ 当前有 **${bridge.pendingCards.size}** 条待确认请求，请**引用对应气泡**回复（如 \`1\` / \`0\` 或 \`ok\` / \`no\`）：\n${items.join('\n')}`),
   );
 }
 
@@ -63,13 +65,13 @@ export async function advanceQuestionCard(bridge: OpenMausBotBridge, card: Pendi
   const nextAnswers = [...(card.collectedAnswers ?? []), stepAnswer];
   const nextIndex = (card.questionIndex ?? 0) + 1;
   if (nextIndex < questions.length) {
-    const { ctrlChatId, who, head, route } = buildCardReplyContext(bridge, card);
+    const { ctrlChatId, who, route } = buildCardReplyContext(bridge, card);
     const multiCard = bridge.pendingCards.size > 1;
     const step = formatQuestionStepPrompt(who, card.title || '需要你做个决定', questions, nextIndex, { multiCard });
     const originBanner = formatOriginBanner(card.chatCtx, ctrlChatId, bridge.selfChat, '的审批 / 确认');
     const nextSentId = await bridge.say(`${originBanner}${step.text}`, route, null, null, { noBuffer: true });
     if (!nextSentId) {
-      await bridge.say(`${head}⚠️ 下一题发送失败，请稍后重试当前回复。`, route);
+      await bridge.say(withBadge(who, '⚠️ 下一题发送失败，请稍后重试当前回复。'), route);
       return undefined;
     }
     bridge.pendingCards.delete(card.imMsgId);
@@ -98,7 +100,7 @@ export async function handleBurstCardAction(
     deleteCard(bridge, card);
     return;
   }
-  const { head, route } = buildCardReplyContext(bridge, card);
+  const { who, route } = buildCardReplyContext(bridge, card);
   try {
     try {
       if (action === 'run') await bridge.client.runBurst(card.burstId);
@@ -122,19 +124,19 @@ export async function handleBurstCardAction(
         chatCtx: card.chatCtx ?? null,
         startedAt: bridge.now(),
       });
-      await bridge.say(`${head}✅ 已启动并发拆分任务，完成后会自动汇总回复。`, route);
+      await bridge.say(withBadge(who, '✅ 已启动并发拆分任务，完成后会自动汇总回复。'), route);
     } else {
-      await bridge.say(`${head}❎ 已取消该并发拆分任务。`, route);
+      await bridge.say(withBadge(who, '❎ 已取消该并发拆分任务。'), route);
     }
   } catch (e) {
-    await bridge.say(`${head}⚠️ 并发任务操作失败：${formatOmbError(e)}`, route);
+    await bridge.say(withBadge(who, `⚠️ 并发任务操作失败：${formatOmbError(e)}`), route);
   }
 }
 
 /** 跳过阻塞类卡片（凭据 / 连接器 / 登录验证）。 */
 export async function dismissBlockCard(bridge: OpenMausBotBridge, card: PendingCard): Promise<void> {
   const cardBotId = card.cardBotId || card.botId;
-  const { head, route } = buildCardReplyContext(bridge, card);
+  const { who, route } = buildCardReplyContext(bridge, card);
   try {
     try {
       const ombId = card.ombMsgId ?? '';
@@ -152,9 +154,9 @@ export async function dismissBlockCard(bridge: OpenMausBotBridge, card: PendingC
     deleteCard(bridge, card);
     bridge.emitTelemetry('card_dismiss', { botName: card.botName, kind: card.cardKind });
     if (!card.chatCtx?.isExternal) bridge.lastBotReplyAt = bridge.now();
-    await bridge.say(`${head}⏭ 已跳过该步骤，继续执行。`, route);
+    await bridge.say(withBadge(who, '⏭ 已跳过该步骤，继续执行。'), route);
   } catch (e) {
-    await bridge.say(`${head}⚠️ 跳过操作失败：${formatOmbError(e)}`, route);
+    await bridge.say(withBadge(who, `⚠️ 跳过操作失败：${formatOmbError(e)}`), route);
   }
 }
 
@@ -166,7 +168,7 @@ export async function answerCard(
   message?: string,
   opts: { always?: boolean; rememberCommand?: boolean } = {},
 ): Promise<unknown> {
-  const { head, route } = buildCardReplyContext(bridge, card);
+  const { who, route } = buildCardReplyContext(bridge, card);
   try {
     if (!card.requestId) {
       deleteCard(bridge, card);
@@ -233,9 +235,9 @@ export async function answerCard(
       : behavior === 'deny'
         ? '已拒绝该操作'
         : (message ? `已选择「${clip(message, 40)}」，继续执行` : '已提交回复，继续执行');
-    await bridge.say(`${head}✅ ${label}`, route);
+    await bridge.say(withBadge(who, `✅ ${label}`), route);
   } catch (e) {
-    await bridge.say(`${head}⚠️ 审批提交失败：${formatOmbError(e)}`, route);
+    await bridge.say(withBadge(who, `⚠️ 审批提交失败：${formatOmbError(e)}`), route);
   }
   return undefined;
 }

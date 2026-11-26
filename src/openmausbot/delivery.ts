@@ -474,7 +474,7 @@ export async function deliverBotReply(
   } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
     let chunks: string[];
     if (badge) {
-      const splitOverhead = fixedPrefix.length + badgeEffLen + 8 + tailSuffix.length;
+      const splitOverhead = fixedPrefix.length + badgeEffLen + 12 + tailSuffix.length;
       const splitCap = Math.max(20, effResult - splitOverhead);
       const rawChunks = mdSplit(bodyCore, splitCap);
       chunks = rawChunks.map((part, idx) => composeMessage(part, {
@@ -506,7 +506,7 @@ export async function deliverBotReply(
     let out: string;
     let wasCut: boolean;
     if (badge) {
-      const clipOverhead = fixedPrefix.length + badgeEffLen + 1 + tailSuffix.length;
+      const clipOverhead = fixedPrefix.length + badgeEffLen + 5 + tailSuffix.length;
       const clipCap = Math.max(16, effResult - clipOverhead);
       const clipped = mdClip(bodyCore, clipCap);
       wasCut = clipped.cut;

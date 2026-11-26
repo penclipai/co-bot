@@ -4,6 +4,7 @@ import { assemblePromptContext } from '../core/chat-context.ts';
 import { formatForwardedFull, formatForwardedSummary } from '../core/context-pull.ts';
 import { formatReadonlyGuardBlock } from '../core/inbound-policy.ts';
 import { formatProjectContextBlock, resolveProjectBinding } from '../core/projects.ts';
+import { attachBotBadge } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { ChatContextMessage, ChatType, InboundEvent } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
@@ -674,10 +675,10 @@ export async function dispatchToBot(
     : prepareSlashOutbound(text, contextBlock);
   if (prepared.emptyGoal) {
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
-    const head = who ? `${who} ` : '';
+    const goalHint = `🎯 请在 \`/goal\` 后写明要达成的目标，例如：\`${bridge.trigger} /goal 梳理本周发布风险并给出检查清单\``;
     const replyChat = ctxInfo.replyChatId || bridge.selfChat;
     await bridge.say(
-      `${head}🎯 请在 \`/goal\` 后写明要达成的目标，例如：\`${bridge.trigger} /goal 梳理本周发布风险并给出检查清单\``,
+      who ? attachBotBadge(who, goalHint) : goalHint,
       replyChat ? { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: replyChat } : null,
     );
     return null;
@@ -783,8 +784,9 @@ export async function dispatchToBot(
     bridge.queuedByThread.set(threadId, list);
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
     const cmdTarget = botCommandTarget(bridge, bot.id, bot.name, { isGroup });
+    const queueNotice = `📥 已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`;
     await bridge.say(
-      `${ctrlBanner}${who ? `${who} ` : ''}📥 已排队，等当前任务完成后自动继续。\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`,
+      `${ctrlBanner}${who ? attachBotBadge(who, queueNotice) : queueNotice}`,
       { ...route, ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
     );
     return receipt;

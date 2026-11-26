@@ -383,7 +383,7 @@ test('UX QA fixes: sub-bot bye clears focus/sticky, inline [cobot:req], C2C cont
       sender: { id: 'me', name: 'Me', isSelf: true },
       text: '@Page 自我介绍',
     });
-    await until(() => sent.some((m) => m.text.includes('🤖 **[Page]** 来自机器人正文')));
+    await until(() => sent.some((m) => m.text.includes('🤖 **[Page]**\n---\n来自机器人正文')));
     assert.equal(bridge.isStickyActive(), true);
     assert.equal(bridge.focus?.botId, 'b2');
 
@@ -427,7 +427,7 @@ test('UX QA fixes: sub-bot bye clears focus/sticky, inline [cobot:req], C2C cont
     await until(() => sent.length > beforeC2cCount && sent.some((m) => m.chatId === 'dm_alice' && m.text.includes('[cobot:res re=qa_ok]')));
     const c2cReply = sent.find((m) => m.chatId === 'dm_alice' && m.text.includes('[cobot:res re=qa_ok]'))!;
     assert.equal(c2cReply.text.includes('🤖 协作答复'), false, 'must not duplicate 🤖 when Style A badge is prepended');
-    assert.match(c2cReply.text, /^🤖 \*\*\[co-bot\]\*\*\s+协作答复：/);
+    assert.match(c2cReply.text, /^🤖 \*\*\[co-bot\]\*\*\n---\n协作答复：/);
 
     // 3. @bot! unedited sendback uses 🤖 attribution and preview labels it clearly
     const beforePriv = sent.length;
@@ -456,7 +456,7 @@ test('UX QA fixes: sub-bot bye clears focus/sticky, inline [cobot:req], C2C cont
       text: '确认发送',
     });
     const grpSent = sent.filter((m) => m.chatId === 'grp_dev').at(-1)!;
-    assert.equal(grpSent.text.startsWith('🤖 **[co-bot]** '), true);
+    assert.equal(grpSent.text.startsWith('🤖 **[co-bot]**\n---\n'), true);
   } finally {
     await bridge.stop();
     await omb.close();
