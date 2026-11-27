@@ -353,7 +353,7 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
 
     <section id="context">
       <h2>面向团队的统一上下文系统</h2>
-      <p>每位成员在自聊中拥有私密 1:1 空间与连续对话窗口（${followUpSec} 秒内免 @ 直接续聊，以 <code>#</code> 或 <code>备忘</code> 开头的私人笔记会自动忽略）；在外部群聊中，每个群与不同助手自动隔离会话，互不串台。</p>
+      <p>每位成员在自聊中拥有私密 1:1 空间与连续对话窗口（${followUpSec} 秒内免 @ 直接续聊，以 <code>#</code>、<code>备忘</code>、<code>记一下</code>、<code>笔记</code>、<code>便签</code>、<code>todo</code>、<code>待办</code>、<code>清单</code> 开头的私人笔记会自动忽略）；在外部群聊中，每个群与不同助手自动隔离会话，互不串台。</p>
       <div class="note-grid">
         <div class="flat-card">
           <h3>转发记录与历史回溯</h3>
@@ -385,26 +385,29 @@ export function buildHelpHtml(bridge: HelpHtmlBridge): string {
       <h2>常用指令速查</h2>
       <div class="cmd-group">
         <div class="cmd-title">通用（${trigger} / @Bot名 / @群名 均可用）</div>
-        <div class="cmd-row"><div><code>${trigger} &lt;问题&gt;</code> / <code>${trigger}!</code></div><div class="cmd-desc">向主助手或指定对象提问；外群加 <code>!</code> 先私密起草回自聊</div></div>
+        <div class="cmd-row"><div><code>${trigger} &lt;问题&gt;</code> / <code>${trigger}!</code> / <code>-p</code></div><div class="cmd-desc">向主助手或指定对象提问；外群加 <code>!</code> 或 <code>-p</code> 先私密起草回自聊</div></div>
+        <div class="cmd-row"><div><code>${trigger} /goal &lt;目标&gt;</code> / <code>/learn</code></div><div class="cmd-desc">开启多步自主推进目标，或将流程沉淀为可复用技能</div></div>
         <div class="cmd-row"><div><code>${trigger} new [话题]</code> / <code>task [号]</code></div><div class="cmd-desc">新建会话，或列出并切换最近会话</div></div>
         <div class="cmd-row"><div><code>${trigger} stop</code></div><div class="cmd-desc">停止当前任务并清空该会话排队</div></div>
-        <div class="cmd-row"><div><code>${trigger} status [群]</code><span class="tag">仅单Bot</span></div><div class="cmd-desc">查看在线状态、成员与上下文占用（不含 @群名）</div></div>
+        <div class="cmd-row"><div><code>${trigger} status [群]</code><span class="tag">仅单Bot</span></div><div class="cmd-desc">查看收件箱待办、在线状态、成员与上下文占用（不含 @群名）</div></div>
         <div class="cmd-row"><div><code>${trigger} compact [群]</code><span class="tag">仅单Bot</span></div><div class="cmd-desc">压缩当前或指定外群的对话上下文（不含 @群名）</div></div>
         <div class="cmd-row"><div><code>${trigger} bye</code></div><div class="cmd-desc">结束自聊 ${followUpSec} 秒免 @ 连续对话</div></div>${extRowHtml}
       </div>
 
       <div class="cmd-group">
         <div class="cmd-title">仅主入口 ${trigger} 可用</div>
-        <div class="cmd-row"><div><code>${trigger} sendback [ID]</code></div><div class="cmd-desc">在自聊预览并确认将草稿发回原群（确认发送 / 改：… / 取消）</div></div>
+        <div class="cmd-row"><div><code>${trigger} sendback [#编号|ID]</code></div><div class="cmd-desc">在自聊预览或直接回复 <code>#编号 确认/取消/改：…</code> 将草稿发回原群</div></div>
         <div class="cmd-row"><div><code>${trigger} chats [self|all|reset]</code></div><div class="cmd-desc">查看外群开关状态，一键切换仅自聊或恢复全部</div></div>
         <div class="cmd-row"><div><code>${trigger} mute|unmute [群]</code></div><div class="cmd-desc">静音或恢复指定外部群（自聊受保护不可静音）</div></div>
+        <div class="cmd-row"><div><code>${trigger} quiet [on|off|flush]</code></div><div class="cmd-desc">查看、开关免打扰时段，或立即汇总积攒的主动通知</div></div>
         <div class="cmd-row"><div><code>${trigger} summary &lt;群&gt; [条数]</code></div><div class="cmd-desc">在自聊悄悄生成外部群近况纪要</div></div>
         <div class="cmd-row"><div><code>${trigger} bind [项目|unbind]</code></div><div class="cmd-desc">绑定或解绑当前会话对应的项目范围</div></div>
         <div class="cmd-row"><div><code>${trigger} delegate &lt;私聊&gt; &lt;问题&gt;</code></div><div class="cmd-desc">向同事的 ${brand} 发起异步协作委托</div></div>
       </div>
 
       <div class="cmd-group">
-        <div class="cmd-title">审批与提问卡片快捷回复</div>
+        <div class="cmd-title">收件箱与卡片快捷回复</div>
+        <div class="cmd-row"><div><code>#编号 1/0/确认/取消</code></div><div class="cmd-desc">按统一收件箱编号精确消项（卡片、草稿、追问、委托均适用）</div></div>
         <div class="cmd-row"><div><code>1</code> / <code>2</code> / <code>0</code> 或 <code>ok/always/no/skip</code></div><div class="cmd-desc">允许本次 / 总是允许 / 拒绝 / 跳过；多选支持 <code>1,2</code></div></div>
       </div>
     </section>

@@ -306,11 +306,39 @@ export function createTurnTracker(
 
   const ensureStallWatchdog = (): void => {
     const threshold = Number(bridge.turnStallMs) || 0;
-    if (!(threshold > 0) || stallTimer) return;
-    const pollMs = Math.min(Math.max(40, Math.floor(threshold / 3)), 15_000);
+    const hardTimeout = Number(bridge.turnTimeoutMs) || 0;
+    if (!(threshold > 0) && !(hardTimeout > 0)) return;
+    if (stallTimer) return;
+    const baseWindow = threshold > 0 && hardTimeout > 0
+      ? Math.min(threshold, hardTimeout)
+      : (threshold > 0 ? threshold : hardTimeout);
+    const pollMs = Math.min(Math.max(40, Math.floor(baseWindow / 3)), 15_000);
     stallTimer = setInterval(() => {
-      if (settled || ac.signal.aborted || waitingForInput || stallNotified) return;
-      if ((bridge.now() - lastActivityAt) < threshold) return;
+      if (settled || ac.signal.aborted || waitingForInput) return;
+      const inactiveMs = bridge.now() - lastActivityAt;
+      if (hardTimeout > 0 && inactiveMs >= hardTimeout) {
+        const elapsedSec = Math.max(1, Math.round((bridge.now() - startedAt) / 1000));
+        const ctrlChat = bridge.resolveControlChatId(chatCtx);
+        const ctrlBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat);
+        const shownName = bridge.displayBotName(botId, botName, { isGroup });
+        teardownTurn(true);
+        if (isGroup && typeof bridge.client?.interruptGroup === 'function') {
+          bridge.client.interruptGroup(botId, threadId).catch(() => {});
+        } else {
+          bridge.client?.interrupt?.(botId, threadId).catch(() => {});
+        }
+        bridge.emitTelemetry?.('turn_timeout', {
+          botName: shownName,
+          chatId: ctrlChat || null,
+          summary: `elapsed=${elapsedSec}s thread=${threadId}`,
+        });
+        bridge.say(
+          `${ctrlBanner}⏱️ **${shownName}** 处理超时（${elapsedSec} 秒），已自动终止本轮次，可重发问题继续。`,
+          { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(ctrlChat ? { targetChatId: ctrlChat } : {}) },
+        ).catch(() => {});
+        return;
+      }
+      if (!(threshold > 0) || stallNotified || inactiveMs < threshold) return;
       stallNotified = true;
       const elapsedSec = Math.max(1, Math.round((bridge.now() - startedAt) / 1000));
       const ctrlChat = bridge.resolveControlChatId(chatCtx);
@@ -340,6 +368,7 @@ export function createTurnTracker(
       let since: unknown;
       let version: unknown;
       let prevState: string | undefined;
+      let errCount = 0;
       while (!settled && !ac.signal.aborted && !watchAc.signal.aborted) {
         try {
           const job = await bridge.client.getJob(threadId, {
@@ -349,6 +378,7 @@ export function createTurnTracker(
             version,
             signal: watchAc.signal,
           });
+          errCount = 0;
           if (job?.version !== version || job?.state !== prevState) {
             touchActivity();
           }
@@ -383,7 +413,20 @@ export function createTurnTracker(
         } catch (e) {
           const err = e as Error | null | undefined;
           if (settled || watchAc.signal.aborted || err?.name === 'AbortError') return;
-          await new Promise((r) => setTimeout(r, 800));
+          errCount += 1;
+          if (errCount >= 60) {
+            const ctrlChat = bridge.resolveControlChatId(chatCtx);
+            const ctrlBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat);
+            const shownName = bridge.displayBotName(botId, botName, { isGroup });
+            teardownTurn(true);
+            bridge.say(
+              `${ctrlBanner}⚠️ 监听 **${shownName}** 状态连续失败，已结束追踪：${formatOmbError(e)}`,
+              ctrlChat ? { targetChatId: ctrlChat } : null,
+            ).catch(() => {});
+            return;
+          }
+          const delayMs = Math.min(5000, 800 * (2 ** Math.min(3, errCount - 1)));
+          await new Promise((r) => setTimeout(r, delayMs));
         }
       }
     })().catch(() => {});

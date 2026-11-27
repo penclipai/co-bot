@@ -19,8 +19,13 @@ import { hasBotBadgePrefix, scanAndRedactOutbound } from './security.ts';
 type AnyRecord = Record<string, unknown>;
 
 const MAX_FORWARDED_ITEMS = 50;
-const ARTIFACT_REF_RE = /(图|截图|图片|照片|日志|文档|文件|附件|报错|表格|pdf|docx?|xlsx?|pptx?|csv|md|txt|log|png|jpg|webp|screenshot|image|file|上面|这几张|这几个|刚发|以上|前面|前文|刚才|刚刚|转发|聊天记录|这几条|这些)/i;
+const ARTIFACT_REF_RE = /(?:截图|图片|照片|这张图|那张图|几张图|语音|录音|日志|文档|文件|附件|报错|表格|录屏|视频|\b(?:pdf|docx?|xlsx?|pptx?|csv|md|txt|log|png|jpg|webp|zip|json|ya?ml|screenshot|image|file|audio|voice|ocr)\b)/i;
 const TEXT_EXT_RE = /\.(?:txt|md|log|json|csv|tsv|ya?ml|xml|ini|conf|ts|tsx|js|jsx|mjs|cjs|py|sh|sql|html?|css)$/i;
+
+/** 判断消息文本是否显式提及近期文件、截图、语音或报错等实体产物（不含模糊指代词）。 */
+export function hasArtifactReference(text: unknown): boolean {
+  return ARTIFACT_REF_RE.test(String(text ?? ''));
+}
 const EXT_MIME: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
@@ -409,23 +414,9 @@ export function isAnyBotExchange(msg: ChatContextMessage, currentBotId: string |
   return Boolean(msg.isBotReply || isOtherBotMessage(msg, currentBotId));
 }
 
-const CROSS_CHAT_INTENT_RE = /(?:群|各群|跨群|其他群|私聊|聊天记录|进展|汇总|总结|纪要|对比|核对|同步|阻塞|待办|同事|谁说|提到|文档|附件|文件|发布|窗口)/i;
-
-/** 仅当自聊主协调者收到跨群、多人同步或外部文档相关提问时暴露跨群只读入口，避免无关闲聊注入额外提示。 */
-export function shouldExposeCrossChatInSelf(triggerText: unknown, externalChats: PullChatSummary[]): boolean {
-  if (!Array.isArray(externalChats) || !externalChats.length) return false;
-  const raw = String(triggerText ?? '').trim();
-  if (!raw) return false;
-  const stripped = raw.replace(/^@[^\s:：,，]+\s*/u, '').trim() || raw;
-  const low = stripped.toLowerCase();
-  for (const c of externalChats) {
-    const cid = String(c?.id || '').trim().toLowerCase();
-    const cname = String(c?.name || '').trim().toLowerCase();
-    if ((cid.length >= 2 && low.includes(cid)) || (cname.length >= 2 && low.includes(cname))) {
-      return true;
-    }
-  }
-  return CROSS_CHAT_INTENT_RE.test(stripped);
+/** 自聊主协调者在存在外部活跃会话时始终暴露轻量跨群坐标（仅 1 行索引），消除关键词漏判导致的跨群失明。 */
+export function shouldExposeCrossChatInSelf(_triggerText: unknown, externalChats: PullChatSummary[]): boolean {
+  return Array.isArray(externalChats) && externalChats.length > 0;
 }
 
 export interface PullChatSummary {
@@ -451,11 +442,19 @@ export interface ContextPullManagerOptions {
   searchCached?: (chatId: string, query: string, limit: number) => ChatContextMessage[];
   getChatType?: (chatId: string) => string;
   onTelemetry?: (data: Record<string, unknown>) => void;
+  onGrantsChanged?: (grants: PersistedPullGrant[]) => void;
   now?: () => number;
   maxPerMinute?: number;
 }
 
 export type PullGrantScope = 'single' | 'owner_all';
+
+export interface PersistedPullGrant {
+  chatId: string;
+  botId: string | null;
+  scope: PullGrantScope;
+  grant: string;
+}
 
 /** 本地只读上下文按需探索管理器：为单会话或主人自聊主协调者颁发句柄 `grant` 并服务全文、向前翻页、搜索与跨群只读列表。 */
 export class ContextPullManager {
@@ -469,6 +468,30 @@ export class ContextPullManager {
       now: opts.now ?? (() => Date.now()),
       maxPerMinute: Math.max(1, Number(opts.maxPerMinute) || 15),
     };
+  }
+
+  exportGrants(): PersistedPullGrant[] {
+    const out: PersistedPullGrant[] = [];
+    for (const [grant, meta] of this.#grantMeta) {
+      out.push({ chatId: meta.chatId, botId: meta.botId, scope: meta.scope, grant });
+    }
+    return out.slice(-200);
+  }
+
+  hydrateGrants(entries: unknown): void {
+    if (!Array.isArray(entries)) return;
+    for (const item of entries.slice(-200)) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Partial<PersistedPullGrant>;
+      const cid = String(rec.chatId || '').trim();
+      const grant = String(rec.grant || '').trim();
+      if (!cid || !/^g_[a-f0-9]{6,32}$/i.test(grant)) continue;
+      const bid = rec.botId ? String(rec.botId).trim() : '';
+      const effScope: PullGrantScope = rec.scope === 'owner_all' ? 'owner_all' : 'single';
+      const scopeKey = `${cid}\0${bid}\0${effScope}`;
+      this.#grantsByChat.set(scopeKey, grant);
+      this.#grantMeta.set(grant, { chatId: cid, botId: bid || null, scope: effScope, hits: [] });
+    }
   }
 
   /** 为指定会话、Bot 与权限域返回进程期可复用的短句柄（避免触发 `token=` 脱敏规则与重复审批）。 */
@@ -490,6 +513,7 @@ export class ContextPullManager {
     const grant = `g_${crypto.randomBytes(5).toString('hex')}`;
     this.#grantsByChat.set(scopeKey, grant);
     this.#grantMeta.set(grant, { chatId: cid, botId: bid || null, scope: effScope, hits: [] });
+    this.#opts.onGrantsChanged?.(this.exportGrants());
     return grant;
   }
 

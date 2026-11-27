@@ -218,18 +218,22 @@ export async function ensureChatThread(
 
   const task = (async (): Promise<OmbTargetBot> => {
     const title = clip(`${chatType === 'group' ? '群聊' : '私聊'} · ${chatName || chatId}`, 40);
+    const createFn = targetBot.isGroup && typeof bridge.client.createGroupTask === 'function'
+      ? () => bridge.client.createGroupTask!(targetBot.id, { title })
+      : (typeof bridge.client.createTask === 'function'
+        ? () => bridge.client.createTask!(targetBot.id, { title, select: false })
+        : null);
+    if (!createFn) return targetBot;
     let created;
     try {
-      created = targetBot.isGroup && typeof bridge.client.createGroupTask === 'function'
-        ? await bridge.client.createGroupTask(targetBot.id, { title })
-        : (typeof bridge.client.createTask === 'function'
-          ? await bridge.client.createTask(targetBot.id, { title, select: false })
-          : null);
-    } catch {
-      return targetBot;
+      created = await createFn();
+    } catch (e) {
+      throw new Error(`创建外部会话「${chatName || chatId}」隔离上下文失败：${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
     const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
-    if (!newTid) return targetBot;
+    if (!newTid) {
+      throw new Error(`创建外部会话「${chatName || chatId}」隔离上下文失败：未返回 threadId`);
+    }
     registerThreadTarget(bridge, targetBot, newTid);
     const nextTarget = { ...targetBot, threadId: newTid };
     setChatThread(bridge, chatId, nextTarget);

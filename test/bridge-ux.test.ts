@@ -449,6 +449,7 @@ test('P0 reliability: say() retry backoff, full state persistence (quietQueue/pe
       dataDir,
       imageBatchMs: 120,
       followUpWindowMs: 60_000,
+      now: () => quietNow + 1000,
     });
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
       setTimeout(() => {

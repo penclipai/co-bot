@@ -20,6 +20,7 @@ import {
   formatClock,
   formatForwardedFull,
   formatForwardedSummary,
+  hasArtifactReference,
   redactSecrets,
 } from './context-pull.ts';
 
@@ -186,7 +187,7 @@ function entryCharSize(entry: ChatContextMessage): number {
 }
 
 export const SELF_NOTE_PREFIX_RE = /^(#|备忘|记一下|笔记|便签|todo\b|待办|清单)/i;
-const SELF_PRIOR_REF_RE = /(以上|上面|上述|前面|前文|刚才|刚刚|转发|聊天记录|这几条|这些内容|这些消息|上下文|above|previous|forwarded)/i;
+const SELF_PRIOR_REF_RE = /(以上(?:内容|消息|几条)|上面(?:那|几|说)|上述|前文|前面(?:那|几)|刚才(?:发|说)|刚刚发|转发|聊天记录|这几条|这些内容|这些消息|上下文|帮我整理|整理一下|总结一下|总结下|翻译一下|翻译成|提取待办|above|previous|forwarded|summarize this)/i;
 
 export class ChatContextStore {
   maxPerChat: number;
@@ -393,6 +394,23 @@ export class ChatContextStore {
     }
     bucket.updatedAt = this.now();
     return { ok: true, removed: existed };
+  }
+
+  exportRecalled(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [cid, bucket] of this.chats) {
+      if (bucket.recalled.size) out[cid] = [...bucket.recalled].slice(-200);
+    }
+    return out;
+  }
+
+  hydrateRecalled(raw: Record<string, string[]> | null | undefined): void {
+    if (!raw || typeof raw !== 'object') return;
+    for (const [cid, ids] of Object.entries(raw)) {
+      if (!cid || !Array.isArray(ids)) continue;
+      const bucket = this.#getOrCreateBucket(cid);
+      for (const id of ids.slice(-200)) if (id) addBoundedSet(bucket.recalled, id, 200);
+    }
   }
 
   recordOutbound(chatId: string, {
@@ -745,21 +763,7 @@ function formatMsgLine(entry: ChatContextMessage, maxChars = 280): string {
   return formatMsgLineWithMeta(entry, maxChars).line;
 }
 
-/**
- * 构造注入给 OpenMausBot 的 `<im-context>` 提示头（或自聊引用/转发前文前缀）。
- */
-export function formatImContextBlock({
-  triggerEvent,
-  chatMeta,
-  quotedMsg = null,
-  recentMsgs = [],
-  bundledAttachments = [],
-  privateReply = false,
-  maxQuotedChars = 800,
-  maxRecentChars = 280,
-  historyPullHint = '',
-  allowAskColleagueHint = false,
-}: {
+export interface FormatImContextOptions {
   triggerEvent?: Partial<InboundEvent> | null;
   chatMeta?: { type?: ChatType; name?: string } | null;
   quotedMsg?: ChatContextMessage | null;
@@ -769,8 +773,13 @@ export function formatImContextBlock({
   maxQuotedChars?: number;
   maxRecentChars?: number;
   historyPullHint?: string;
-  allowAskColleagueHint?: boolean;
-} = {}): string {
+}
+
+/** 构造注入给 OpenMausBot 的 `<im-context>` 提示头（或自聊引用/转发前文前缀）。 */
+export function formatImContextBlock({
+  triggerEvent, chatMeta, quotedMsg = null, recentMsgs = [], bundledAttachments = [],
+  privateReply = false, maxQuotedChars = 800, maxRecentChars = 280, historyPullHint = '',
+}: FormatImContextOptions = {}): string {
   const chatType = chatMeta?.type || triggerEvent?.chat?.type || 'direct';
   const chatName = chatMeta?.name || triggerEvent?.chat?.name || triggerEvent?.chat?.id || 'unknown';
   const isSelfChat = chatType === 'self';
@@ -815,7 +824,6 @@ export function formatImContextBlock({
   if (historyPullHint) {
     lines.push(historyPullHint);
   }
-  void allowAskColleagueHint;
 
   lines.push('</im-context>');
   return `${lines.join('\n')}\n\n`;
@@ -843,23 +851,7 @@ export function buildQuoteFallbackMessage(ev: Partial<InboundEvent> | null | und
   };
 }
 
-/** 统一装配入站提示上下文：记录入站消息、拉取引用与最近历史、合批同批多附件并格式化 `<im-context>`。 */
-export async function assemblePromptContext({
-  ev,
-  store,
-  resolveMessage,
-  getHistory,
-  privateReply = false,
-  contextWindow = 15,
-  injectRecent = false,
-  maxQuotedChars = 800,
-  maxRecentChars = 280,
-  skipSelfQuote = false,
-  recentAttachmentWindowMs = 120_000,
-  maxAutoAttachments = 4,
-  resolvePullHint,
-  allowAskColleagueHint = false,
-}: {
+export interface AssemblePromptContextOptions {
   ev: InboundEvent;
   store: ChatContextStore;
   resolveMessage: (chatId: string, msgId: string) => Promise<ChatContextMessage | null>;
@@ -880,27 +872,19 @@ export async function assemblePromptContext({
     availableFiles: number;
     pullOnly: boolean;
   }) => string;
-  allowAskColleagueHint?: boolean;
-}): Promise<{
-  header: string;
-  quotedMsg: ChatContextMessage | null;
-  recentMsgs: ChatContextMessage[];
-  quotedAttachments: InboundAttachment[];
-  contextAttachments: InboundAttachment[];
-  consumedSelfMsgIds: string[];
-  hasTruncated: boolean;
-  oldestMsgId: string | null;
-}> {
+}
+
+/** 统一装配入站提示上下文：记录入站消息、拉取引用与最近历史、合批同批多附件并格式化 `<im-context>`。 */
+export async function assemblePromptContext({
+  ev, store, resolveMessage, getHistory, privateReply = false, contextWindow = 15, injectRecent = false,
+  maxQuotedChars = 800, maxRecentChars = 280, skipSelfQuote = false, recentAttachmentWindowMs = 120_000,
+  maxAutoAttachments = 4, resolvePullHint,
+}: AssemblePromptContextOptions) {
   if (!ev?.chat?.id) {
     return {
-      header: '',
-      quotedMsg: null,
-      recentMsgs: [],
-      quotedAttachments: [],
-      contextAttachments: [],
-      consumedSelfMsgIds: [],
-      hasTruncated: false,
-      oldestMsgId: null,
+      header: '', quotedMsg: null as ChatContextMessage | null, recentMsgs: [] as ChatContextMessage[],
+      quotedAttachments: [] as InboundAttachment[], contextAttachments: [] as InboundAttachment[],
+      consumedSelfMsgIds: [] as string[], hasTruncated: false, oldestMsgId: null as string | null,
     };
   }
   store.recordInbound(ev);
@@ -923,12 +907,14 @@ export async function assemblePromptContext({
     : [];
   const recentMsgs = isExternal
     ? ((injectRecent && contextWindow > 0) ? await getHistory(chatId, { limit: contextWindow, excludeMsgId: ev.id }) : [])
-    : (injectRecent ? pendingSelf : []);
-  const attRecentMsgs = injectRecent
-    ? recentMsgs
-    : ((isExternal && quotedMsg && collectAllMsgAttachments(quotedMsg).length > 0)
-      ? store.getRecent(chatId, { limit: 10, excludeMsgId: ev.id })
-      : []);
+    : pendingSelf;
+  const attRecentMsgs = !isExternal
+    ? pendingSelf
+    : (injectRecent
+      ? recentMsgs
+      : ((quotedMsg && collectAllMsgAttachments(quotedMsg).length > 0)
+        ? store.getRecent(chatId, { limit: 10, excludeMsgId: ev.id })
+        : (hasArtifactReference(ev.text) ? store.getRecent(chatId, { limit: 6, excludeMsgId: ev.id }) : [])));
   const bundled = collectContextAttachments({
     triggerEvent: ev,
     quotedMsg,
@@ -980,7 +966,6 @@ export async function assemblePromptContext({
     maxQuotedChars,
     maxRecentChars,
     historyPullHint,
-    allowAskColleagueHint,
   });
   return {
     header,

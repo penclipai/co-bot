@@ -135,6 +135,7 @@ test('WebSimTransport /events wraps history replay in history_start and history_
 test('bridge enforces draft_first on @bot new, respects reply priority, checks collaborator projects, and cleans up resumed turns', async () => {
   const omb = await startMockOmb([{ id: 'b1', name: 'MausBot', threadId: 't1', chiefOfStaff: true }]);
   const sent: SentImItem[] = [];
+  const sentByChat: Array<{ chatId: string; text: string }> = [];
   const baseTransport = makeIm(sent);
   let online = true;
   let inboundFn: ((ev: InboundEvent) => unknown) | null = null;
@@ -146,6 +147,7 @@ test('bridge enforces draft_first on @bot new, respects reply priority, checks c
     },
     async send(chatId: string, text: string, opts?: Parameters<typeof baseTransport.send>[2]) {
       if (!online) throw new Error('offline');
+      sentByChat.push({ chatId, text });
       return baseTransport.send(chatId, text, opts);
     },
     status: () => ({ connected: online }),
@@ -233,8 +235,11 @@ test('bridge enforces draft_first on @bot new, respects reply priority, checks c
       canRememberCommand: false,
     });
     bridge.pendingSendBack = {
+      id: 'draft_1',
+      inboxRef: 7,
       draft: {
         id: 'draft_1',
+        inboxRef: 7,
         imMsgId: 'd_1',
         originChatId: 'grp_ext',
         originChatName: '研发群',
@@ -244,13 +249,19 @@ test('bridge enforces draft_first on @bot new, respects reply priority, checks c
         addBotPrefix: true,
         createdAt: Date.now(),
       },
-      text: '🤖 **[co-bot]** 草稿正文',
+      text: '草稿正文',
       expiresAt: Date.now() + 60_000,
     };
     const respondsBeforeSendBack = omb.responds.length;
     await baseTransport.emitUser('ok');
-    await until(() => sent.some((m) => m.text.includes('已发回') || m.text.includes('确认')));
-    assert.equal(omb.responds.length, respondsBeforeSendBack, 'sendback confirm must not trigger pending card approval');
+    await until(() => sent.some((m) => m.text.includes('待发回草稿') && m.text.includes('待处理审批卡')));
+    assert.equal(omb.responds.length, respondsBeforeSendBack, 'bare reply under collision must not trigger pending card approval');
+    assert.equal(sentByChat.some((m) => m.chatId === 'grp_ext' && m.text.includes('草稿正文')), false, 'bare reply under collision must not send draft externally');
+    assert.equal(bridge.pendingCards.has('card_msg_1'), true);
+
+    await baseTransport.emitUser('#7 ok');
+    await until(() => sentByChat.some((m) => m.chatId === 'grp_ext' && m.text.includes('草稿正文')));
+    assert.equal(omb.responds.length, respondsBeforeSendBack, 'sendback confirm by #ref must not trigger pending card approval');
     assert.equal(bridge.pendingCards.has('card_msg_1'), true);
 
     // Quote-reply to card still answers card even when taskPick is active

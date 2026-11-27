@@ -78,6 +78,9 @@ async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: str
     if (mid && bridge.deliveredOmbIds.has(mid)) return true;
     if (mid) rememberBounded(bridge.deliveredOmbIds, mid);
     if (msg.turnTerminal !== false || watch.doneSeen) watch.deliveredText = true;
+    if (watch.doneSeen && watch.deliveredText) {
+      bridge.activeBursts.delete(watch.burstId);
+    }
     await deliverBotReply(bridge, {
       botId: watch.botId,
       botName: watch.botName,
@@ -90,9 +93,6 @@ async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: str
       speakerName: watch.isGroup ? (msg.from?.name || '') : '',
       chatCtx: watch.chatCtx ?? null,
     });
-    if (watch.doneSeen && watch.deliveredText) {
-      bridge.activeBursts.delete(watch.burstId);
-    }
     return true;
   }
 
@@ -167,8 +167,9 @@ async function buildPromptContext(
   {
     skipSelfQuote = false,
     injectRecent = bridge.chats.injectRecentContext === true,
+    contextWindow,
     botId = '',
-  }: { skipSelfQuote?: boolean; injectRecent?: boolean; botId?: string } = {},
+  }: { skipSelfQuote?: boolean; injectRecent?: boolean; contextWindow?: number; botId?: string } = {},
 ) {
   if (!ev?.chat?.id) {
     return {
@@ -183,14 +184,13 @@ async function buildPromptContext(
   const common = {
     ev,
     privateReply: Boolean(chatCtx?.privateReply),
-    contextWindow: bridge.chats.contextWindow,
+    contextWindow: contextWindow ?? bridge.chats.contextWindow,
     injectRecent,
     maxQuotedChars: bridge.chats.maxQuotedSnippetChars,
     maxRecentChars: bridge.chats.maxRecentMessageChars,
     skipSelfQuote,
     recentAttachmentWindowMs: bridge.chats.recentAttachmentWindowMs,
     maxAutoAttachments: bridge.chats.maxAutoAttachments,
-    allowAskColleagueHint: !chatCtx?.readonly,
     resolvePullHint: bridge.imContext?.getContextPullHint
       ? (info: {
           oldestMsgId: string | null;
@@ -532,6 +532,12 @@ export async function cancelLatestQueue(
     removeQueued(bridge, q.threadId, q.queueId);
     await bridge.say(`${banner}🗑 已取消排队消息：「${clip(q.text, 50)}」`, route);
   } catch (e) {
+    const status = (e as OmbHttpError | null | undefined)?.status;
+    if (status === 404 || status === 409 || status === 410) {
+      removeQueued(bridge, q.threadId, q.queueId);
+      await bridge.say(`${banner}🗑 队列消息已不在待办队列，已清理本地记录。`, route);
+      return;
+    }
     await bridge.say(`${banner}❌ 取消排队失败：${formatOmbError(e)}`, outChatId ? { targetChatId: outChatId } : null);
   }
 }
@@ -638,11 +644,19 @@ export async function dispatchToBot(
   const isGroup = Boolean(bot.isGroup);
   let threadId = bot.threadId;
 
+  const noLoopbackPull = Boolean(
+    isExternal
+    && !ctxInfo.delegationReq
+    && bridge.chats.injectRecentContext !== true
+    && typeof bridge.imContext?.hasLoopbackPull === 'function'
+    && !bridge.imContext.hasLoopbackPull(),
+  );
   const promptCtx = ctxInfo.preformattedHeader !== undefined
     ? { header: ctxInfo.preformattedHeader, quotedMsg: null, recentMsgs: [], quotedAttachments: [], contextAttachments: [] }
     : await buildPromptContext(bridge, ctxInfo.ev, ctxInfo, {
         skipSelfQuote: Boolean(!isExternal && replyToOmbId),
-        injectRecent: bridge.chats.injectRecentContext === true && !ctxInfo.delegationReq,
+        injectRecent: !ctxInfo.delegationReq && (bridge.chats.injectRecentContext === true || noLoopbackPull),
+        contextWindow: noLoopbackPull ? Math.min(6, Number(bridge.chats.contextWindow) || 6) : bridge.chats.contextWindow,
         botId: bot.id,
       });
   const { uploads, transcripts } = await claimUploads(

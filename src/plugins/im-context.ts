@@ -7,7 +7,7 @@ import { isLoopbackUrl, probeHostOf } from '../../scripts/omb.ts';
 import { assemblePromptContext, ChatContextStore } from '../core/chat-context.ts';
 import { ContextPullManager } from '../core/context-pull.ts';
 import type { ManagedChannel } from '../core/channel-contract.ts';
-import { fileSafe, safeAttachmentName } from '../format.ts';
+import { fileSafe, safeAttachmentName, writeJsonAtomic } from '../format.ts';
 import type { ImContextService } from '../openmausbot/types.ts';
 import type { ChatContextMessage, ChatsConfig, InboundEvent, KernelPlugin } from '../types.ts';
 import type { WebServer } from '../web/server.ts';
@@ -129,6 +129,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
     };
 
     const pullCacheDir = path.resolve(cfg?.dataDir || './data', 'in', 'pull');
+    const pullGrantsFile = cfg?.dataDir ? path.resolve(cfg.dataDir, 'pull-grants.json') : null;
     const downloadAttachment: NonNullable<ConstructorParameters<typeof ContextPullManager>[0]['downloadAttachment']> | undefined =
       typeof channel?.download === 'function'
         ? async (cid, msg, att) => {
@@ -159,7 +160,19 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       searchCached: (cid, query, lim) => store.searchMessages(cid, query, lim),
       getChatType: (cid) => store.getChatMeta(cid)?.type ?? 'direct',
       onTelemetry: (data) => ctx.emit('bridge:event', { type: 'context_pull', ts: Date.now(), ...data }),
+      onGrantsChanged: pullGrantsFile
+        ? (grants) => {
+            try { writeJsonAtomic(pullGrantsFile, grants); } catch { /* ignore */ }
+          }
+        : undefined,
     });
+    if (pullGrantsFile) {
+      try {
+        if (fs.existsSync(pullGrantsFile)) {
+          pullManager.hydrateGrants(JSON.parse(fs.readFileSync(pullGrantsFile, 'utf8')));
+        }
+      } catch { /* ignore */ }
+    }
 
     if (web) {
       web.route('GET', '/api/context/chats', ({ req, url }) => pullManager.handleChatsRequest(url, req.socket?.remoteAddress));
@@ -216,12 +229,18 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       pullManager,
       recordInbound: (ev) => store.recordInbound(ev),
       recordOutbound: (chatId, info) => store.recordOutbound(chatId, info),
-      recallMessage: (chatId, msgId) => store.recallMessage(chatId, msgId),
+      recallMessage: (chatId, msgId) => {
+        try {
+          fs.rmSync(path.join(pullCacheDir, fileSafe(chatId) || 'chat', fileSafe(msgId) || 'msg'), { recursive: true, force: true });
+        } catch { /* ignore */ }
+        return store.recallMessage(chatId, msgId);
+      },
       resolveMessage,
       getHistory,
       listChats: () => store.listChats(),
       getContextPullHint,
       buildPromptContext,
+      hasLoopbackPull: () => Boolean(resolveLoopbackWebUrl()),
       stats: () => ({
         ...store.stats(),
         channelHistory: Boolean(channel?.capabilities?.history),

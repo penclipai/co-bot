@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isAudioAttachment } from '../core/channel-contract.ts';
-import { sanitizeExternalMentions } from '../core/chat-context.ts';
+import { sanitizeExternalMentions, SELF_NOTE_PREFIX_RE } from '../core/chat-context.ts';
 import { attachBotBadge, detectInternalOpsLeak, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
 import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
@@ -10,6 +10,7 @@ import { extractWidgetActions, fmtTokens, formatCardPrompt, formatOmbError } fro
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { formatDelegationResponse } from './delegation.ts';
 import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
+import { allocateInboxRef } from './inbox.ts';
 import { compactChatCtx, rememberBounded, trimMapCap, unscopeMsgKey } from './mentions.ts';
 import type { BridgeChatContext, CompactChatContext, MsgRoute, OmbMessage, PrivateDraft } from './types.ts';
 
@@ -122,9 +123,16 @@ export async function claimUploads(
   pushResolved(quotedId);
   if (allowPendingFileMsgs && !entries.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
     const now = bridge.now();
+    const winMs = Math.max(0, Number(bridge.chats.recentAttachmentWindowMs) || 120_000);
+    const ctxStore = bridge.imContext?.store ?? bridge.localContextStore;
     for (const [k, entry] of bridge.fileMsgs) {
-      if (!entry.used && now - entry.at < 10 * 60 * 1000 && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
-        entries.push({ msgId: unscopeMsgKey(k).msgId, entry });
+      if (!entry.used && now - entry.at <= winMs && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
+        const msgId = unscopeMsgKey(k).msgId;
+        const storedMsg = ctxStore?.getMessage(entry.chatId || originChatId || '', msgId);
+        if (storedMsg && !storedMsg.isForwarded && !storedMsg.forwarded && SELF_NOTE_PREFIX_RE.test(String(storedMsg.text || '').trim())) {
+          continue;
+        }
+        entries.push({ msgId, entry });
       }
     }
   }
@@ -297,7 +305,8 @@ export async function emitCard(
   };
   const who = bridge.botPrefix(botId, botName, { isGroup, speakerName, speakerBotId });
   const multiCard = bridge.pendingCards.size >= 1;
-  const prompt = formatCardPrompt(shownName, msg, who, { multiCard });
+  const inboxRef = cardKind ? allocateInboxRef(bridge) : undefined;
+  const prompt = formatCardPrompt(shownName, msg, who, { multiCard, inboxRef });
   const originBanner = formatOriginBanner(chatCtx, ctrlChat, bridge.selfChat, '的审批 / 确认');
   const sentId = await bridge.say(`${originBanner}${prompt.text}`, route, null, null, { noBuffer: true });
   if (!sentId) {
@@ -314,6 +323,7 @@ export async function emitCard(
       ? prompt.info.title
       : (msg.burst?.task || msg.secret?.label || msg.connector?.label || (msg.signIn ? '登录验证' : '待确认操作'));
     bridge.pendingCards.set(sentId, {
+      inboxRef,
       imMsgId: sentId,
       chatId: ctrlChat,
       cardKind,
@@ -333,6 +343,7 @@ export async function emitCard(
         ? { questions: prompt.info.questions, questionIndex: 0, collectedAnswers: [] }
         : {}),
       canRememberCommand: Boolean(prompt.info && 'canRememberCommand' in prompt.info && prompt.info.canRememberCommand),
+      createdAt: bridge.now(),
       ...(compacted ? { chatCtx: compacted } : {}),
     });
     bridge.saveState();
@@ -403,20 +414,24 @@ export async function deliverBotReply(
           addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
           forceBotPrefix: Boolean(chatCtx.polishDraft.forceBotPrefix),
           delegationRe: chatCtx.polishDraft.delegationRe || null,
+          mentions: chatCtx.polishDraft.mentions,
+          allowMentionNames: chatCtx.polishDraft.allowMentionNames,
+          followUp: chatCtx.polishDraft.followUp,
         }
       : null);
   const draftKey = draftMeta ? `draft_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : null;
+  const draftRef = draftMeta ? allocateInboxRef(bridge) : undefined;
   let privHead = '';
   if (isPrivDraft && draftKey) {
     if (chatCtx?.collaborator) {
       const tagNote = chatCtx?.delegationReq ? `（委托 \`${chatCtx.delegationReq.id}\`）` : '';
       const senderSuffix = originName && originName === chatCtx.collaborator.name ? '' : `的 ${chatCtx.collaborator.name}`;
-      privHead = `📩 **同事协作草稿 · 来自「${originName}」${senderSuffix}**${tagNote}（\`${draftKey}\`）\n`;
+      privHead = `📩 **同事协作草稿 · 来自「${originName}」${senderSuffix}**${tagNote}（\`#${draftRef}\` · \`${draftKey}\`）\n`;
     } else {
-      privHead = `📩 **私密回复 · 来自「${originName}」**（\`${draftKey}\`）\n`;
+      privHead = `📩 **私密回复 · 来自「${originName}」**（\`#${draftRef}\` · \`${draftKey}\`）\n`;
     }
   } else if (isPolishDraft && draftMeta && draftKey) {
-    privHead = `📩 **私密回复（润色） · 来自「${draftMeta.originName}」**（\`${draftKey}\`）\n`;
+    privHead = `📩 **私密回复（润色） · 来自「${draftMeta.originName}」**（\`#${draftRef}\` · \`${draftKey}\`）\n`;
   }
   const originNote = proactive && isExternal ? `（来自「${originName}」）` : '';
   const proLabel = isGroup && shownSpeaker ? `${shownName} · ${shownSpeaker}` : shownName;
@@ -427,7 +442,7 @@ export async function deliverBotReply(
   const isDirectExternalReply = Boolean(isExternal && !chatCtx?.privateReply && !proactive && targetChatId && targetChatId !== bridge.selfChat);
   const isDirectDelegationRes = Boolean(isDirectExternalReply && chatCtx?.delegationReq?.id);
   let externalSafeBody = safeBody;
-  if (isDirectExternalReply && !isDirectDelegationRes) {
+  if (isDirectExternalReply) {
     const leak = detectInternalOpsLeak(safeBody);
     if (leak.matched) {
       bridge.emitTelemetry('internal_leak_intercepted', {
@@ -467,7 +482,7 @@ export async function deliverBotReply(
   }
 
   const draftFooter = draftKey && draftMeta
-    ? `\n\n---\n👉 回复 \`${bridge.trigger} sendback ${draftKey}\` 发回「${clip(draftMeta.originName, 16)}」，或引用本条回 \`确认发送\` / \`取消\` / 继续润色`
+    ? `\n\n---\n👉 回复 \`#${draftRef} 确认\` 或 \`${bridge.trigger} sendback ${draftKey}\` 发回「${clip(draftMeta.originName, 16)}」，或引用本条回 \`确认发送\` / \`取消\` / 继续润色`
     : '';
   const tailSuffix = `${draftFooter}${delegationTagSuffix}`;
   const fixedPrefix = privHead + proHead;
@@ -534,7 +549,8 @@ export async function deliverBotReply(
     ? widgetActions
     : (draftActions.length ? draftActions : null);
 
-  const safeFull = scanAndRedactOutbound(full).text;
+  const fullScan = scanAndRedactOutbound(full);
+  const safeFull = fullScan.text;
   const sentIds: string[] = [];
   if (full.length <= effResult) {
     const sid = await bridge.say(full, route, quoteReplyId, outActions);
@@ -591,21 +607,24 @@ export async function deliverBotReply(
     if (sid) sentIds.push(sid);
 
     if (wasCut && canAttach) {
-      let mdPath = '';
       try {
         fs.mkdirSync(bridge.inDir, { recursive: true });
-        mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
-        fs.writeFileSync(mdPath, `${full}\n`);
-        await sendOutboundFile(bridge, mdPath, `${fileSafe(shownName) || 'reply'}.md`, {
+        const mdName = `${fileSafe(shownName) || 'reply'}.md`;
+        const mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
+        if (fullScan.redacted) {
+          bridge.securityRedactions += fullScan.totalHits;
+          bridge.emitTelemetry('security_redacted', {
+            chatId: targetChatId || bridge.selfChat,
+            kind: 'file',
+            summary: `${mdName} count=${fullScan.totalHits} types=${fullScan.hits.map((h) => h.type).join(',')}`,
+          });
+        }
+        fs.writeFileSync(mdPath, `${fullScan.text}\n`);
+        await sendOutboundFile(bridge, mdPath, mdName, {
           chatId: targetChatId,
           ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
         });
       } catch { /* 附件失败不影响正文 */ }
-      finally {
-        if (mdPath && safeFull !== full) {
-          try { fs.writeFileSync(mdPath, `${safeFull}\n`); } catch { /* ignore */ }
-        }
-      }
     }
   }
   const firstSentId = sentIds[0] ?? null;
@@ -622,7 +641,9 @@ export async function deliverBotReply(
   if (draftMeta && draftKey) {
     const draftObj: PrivateDraft = {
       id: draftKey,
+      inboxRef: draftRef,
       imMsgId: firstSentId || draftKey,
+      ...(sentIds.length ? { imMsgIds: [...sentIds] } : {}),
       originChatId: draftMeta.originChatId,
       originChatName: draftMeta.originName,
       originChatType: draftMeta.originChatType,
@@ -631,6 +652,9 @@ export async function deliverBotReply(
       addBotPrefix: draftMeta.addBotPrefix,
       ...('forceBotPrefix' in draftMeta && draftMeta.forceBotPrefix ? { forceBotPrefix: true } : {}),
       ...(draftMeta.delegationRe ? { delegationRe: draftMeta.delegationRe } : {}),
+      ...('mentions' in draftMeta && draftMeta.mentions?.length ? { mentions: draftMeta.mentions } : {}),
+      ...('allowMentionNames' in draftMeta && draftMeta.allowMentionNames?.length ? { allowMentionNames: draftMeta.allowMentionNames } : {}),
+      ...('followUp' in draftMeta && draftMeta.followUp ? { followUp: draftMeta.followUp } : {}),
       createdAt: bridge.now(),
     };
     bridge.privateDrafts.set(draftKey, draftObj);
@@ -657,7 +681,7 @@ export async function deliverBotReply(
     summary: safeTextSummary,
   });
 
-  if (!proactive && !isExternal && (turnStartedAt === undefined || turnStartedAt >= bridge.lastByeAt)) {
+  if (!proactive && !isExternal && !isPolishDraft && (turnStartedAt === undefined || turnStartedAt >= bridge.lastByeAt)) {
     bridge.lastBotReplyAt = bridge.now();
     bridge.focus = { botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}) };
   }
@@ -684,15 +708,14 @@ export async function deliverBotReply(
 /** 将静默时段积攒的主动通知汇总发送至自聊并附带媒体。 */
 export async function flushQuietDigest(bridge: OpenMausBotBridge): Promise<number> {
   if (!bridge.quietQueue.length) return 0;
-  const items = bridge.quietQueue.splice(0);
-  bridge.saveState();
+  const items = bridge.quietQueue.slice();
   const lines = items.map((it) => {
     const itemBot = bridge.displayBotName(it.botId, it.botName, { isGroup: Boolean(it.isGroup) });
     const itemSpeaker = it.speakerName ? bridge.displayBotName(it.speakerBotId, it.speakerName) : '';
     return `- **${itemSpeaker ? `${itemBot} · ${itemSpeaker}` : itemBot}**：${clip(it.text.replace(/\s+/g, ' '), 180)}`;
   });
   const last = items[items.length - 1];
-  await bridge.say(
+  const sentId = await bridge.say(
     `🌙 **免打扰期间汇总（${items.length} 条）**\n${lines.join('\n')}`,
     {
       botId: last.botId,
@@ -702,6 +725,9 @@ export async function flushQuietDigest(bridge: OpenMausBotBridge): Promise<numbe
       ombMsgId: last.finalMsg?.id ?? null,
     },
   );
+  if (!sentId) return 0;
+  bridge.quietQueue.splice(0, items.length);
+  bridge.saveState();
   for (const it of items) {
     if (it.finalMsg) await forwardBotMedia(bridge, it.threadId, [it.finalMsg]);
   }

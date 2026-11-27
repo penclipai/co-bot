@@ -48,7 +48,17 @@ export const defaults: AppConfig = {
     intermediateCoalesceMs: 700,
     maxIntermediateBubbles: 2,
     turnStallMs: 180_000,
+    turnTimeoutMs: 600_000,
     stateSaveDebounceMs: 150,
+    draftTtlMs: 30 * 60_000,
+    cardTtlMs: 30 * 60_000,
+    followUpRemindMs: 15 * 60_000,
+    delegationRemindMs: 30 * 60_000,
+    mutedHintCooldownMs: 10 * 60_000,
+    outboundBufferMax: 30,
+    outboundBufferTtlMs: 5 * 60_000,
+    sendRetryDelayMs: 400,
+    autoHealCooldownMs: 30_000,
     outPrefix: '',
     botName: 'co-bot',
   },
@@ -78,6 +88,8 @@ export const defaults: AppConfig = {
     autoCompactThreshold: 0.75,
     maxQuotedSnippetChars: 800,
     maxRecentMessageChars: 280,
+    passiveMentionAlert: false,
+    collaboratorBot: '',
   },
   projects: [],
   sharedContextDir: '',
@@ -204,6 +216,18 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
       errors.push(`selfChat.turnStallMs 必须为非负数字，当前为「${String(ms)}」`);
     }
   }
+  if (selfChat?.turnTimeoutMs !== undefined) {
+    const ms = selfChat.turnTimeoutMs;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      errors.push(`selfChat.turnTimeoutMs 必须为非负数字，当前为「${String(ms)}」`);
+    }
+  }
+  if (selfChat?.cardTtlMs !== undefined) {
+    const ms = selfChat.cardTtlMs;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      errors.push(`selfChat.cardTtlMs 必须为非负数字，当前为「${String(ms)}」`);
+    }
+  }
 
   if (ch) {
     if (ch.mode !== undefined && ch.mode !== 'owner_everywhere' && ch.mode !== 'self_only') {
@@ -232,6 +256,12 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
     }
     if (ch.collaboratorConfirmAck !== undefined && typeof ch.collaboratorConfirmAck !== 'boolean') {
       errors.push('chats.collaboratorConfirmAck 必须为布尔值');
+    }
+    if (ch.passiveMentionAlert !== undefined && typeof ch.passiveMentionAlert !== 'boolean') {
+      errors.push('chats.passiveMentionAlert 必须为布尔值');
+    }
+    if (ch.collaboratorBot !== undefined && typeof ch.collaboratorBot !== 'string') {
+      errors.push('chats.collaboratorBot 必须为字符串');
     }
     if (ch.externalSanitizeMentions !== undefined && !['all', 'dangerous', 'none'].includes(String(ch.externalSanitizeMentions))) {
       errors.push(`chats.externalSanitizeMentions 必须为 all / dangerous / none，当前为「${String(ch.externalSanitizeMentions)}」`);

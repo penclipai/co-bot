@@ -18,6 +18,9 @@ export function compactChatCtx(chatCtx: BridgeChatContext | CompactChatContext |
           addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
           ...(chatCtx.polishDraft.forceBotPrefix ? { forceBotPrefix: true } : {}),
           ...(chatCtx.polishDraft.delegationRe ? { delegationRe: chatCtx.polishDraft.delegationRe } : {}),
+          ...(chatCtx.polishDraft.mentions?.length ? { mentions: chatCtx.polishDraft.mentions.map((m) => ({ ...m })) } : {}),
+          ...(chatCtx.polishDraft.allowMentionNames?.length ? { allowMentionNames: [...chatCtx.polishDraft.allowMentionNames] } : {}),
+          ...(chatCtx.polishDraft.followUp ? { followUp: { ...chatCtx.polishDraft.followUp } } : {}),
         },
       };
     }
@@ -80,7 +83,7 @@ export function buildMentionMatcher(
   );
   const isDefaultName = (name: unknown): boolean => {
     const low = String(name ?? '').trim().toLowerCase();
-    return /^(bot|ai|主bot|co-bot|cobot)$/i.test(low) || Boolean(bareTrigger && low === bareTrigger) || aliasSet.has(low);
+    return /^(bot|ai|主bot|co-bot|cobot|default|chief)$/i.test(low) || Boolean(bareTrigger && low === bareTrigger) || aliasSet.has(low);
   };
   const isKnownBotOrGroup = (name: unknown): boolean => {
     const low = String(name ?? '').trim().toLowerCase();

@@ -166,6 +166,39 @@ export class DelegationTracker {
     return hit;
   }
 
+  cancelOutbound(idOrRef: string | number): PendingOutboundDelegation | null {
+    const raw = String(idOrRef ?? '').trim().replace(/^#/, '');
+    if (!raw) return null;
+    const direct = this.pendingOutbound.get(raw);
+    if (direct) {
+      this.pendingOutbound.delete(raw);
+      return direct;
+    }
+    const refNum = /^\d+$/.test(raw) ? Number(raw) : null;
+    if (refNum !== null) {
+      for (const [k, item] of this.pendingOutbound) {
+        if (item.inboxRef === refNum) {
+          this.pendingOutbound.delete(k);
+          return item;
+        }
+      }
+    }
+    return null;
+  }
+
+  pruneExpired(ttlMs = 24 * 60 * 60_000): number {
+    if (!(ttlMs > 0)) return 0;
+    const cutoff = this.now() - ttlMs;
+    let removed = 0;
+    for (const [k, item] of this.pendingOutbound) {
+      if (item.createdAt && item.createdAt < cutoff) {
+        this.pendingOutbound.delete(k);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   hydrate(raw: unknown): void {
     if (!raw || typeof raw !== 'object') return;
     const r = raw as Partial<DelegationSnapshot>;

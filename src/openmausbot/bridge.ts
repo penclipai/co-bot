@@ -34,6 +34,7 @@ import {
   isTransportDisconnected, sendBridgeText, type SendTextExtra,
 } from './outbound-queue.ts';
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
+import { reconcilePendingCards } from './inbox.ts';
 import {
   ensureChatThread, getChatThread, refreshMultiBot,
   resolveOwnerByThread, resolveSelfBotThread, setChatThread, setSelfThread, syncChiefBotIdentity,
@@ -78,8 +79,10 @@ export class OpenMausBotBridge {
   intermediateCoalesceMs: number;
   maxIntermediateBubbles: number;
   turnStallMs: number;
+  turnTimeoutMs: number;
   stateSaveDebounceMs: number;
   draftTtlMs: number;
+  cardTtlMs: number;
   followUpRemindMs: number;
   delegationRemindMs: number;
   mutedHintCooldownMs: number;
@@ -140,6 +143,10 @@ export class OpenMausBotBridge {
   privateDrafts = new Map<string, PrivateDraft>();
   lastPrivateDraftId: string | null = null;
   pendingSendBacks = new Map<string, PendingSendBack>();
+  inboxSeq = 0;
+  recentClosedInboxRefs = new Map<number, { label: string; at: number }>();
+  expiredSendBackIds = new Map<string, number>();
+  lastExpiredSendBackAt = 0;
   lastMutedHintAt = new Map<string, number>();
   pendingFollowUps = new Map<string, PendingFollowUp>();
   inFlightTurns = new Map<string, InFlightTurnMeta>();
@@ -198,8 +205,10 @@ export class OpenMausBotBridge {
     intermediateCoalesceMs = 700,
     maxIntermediateBubbles = 2,
     turnStallMs = 180_000,
+    turnTimeoutMs = 600_000,
     stateSaveDebounceMs = 150,
     draftTtlMs = 30 * 60_000,
+    cardTtlMs = 30 * 60_000,
     followUpRemindMs = 15 * 60_000,
     delegationRemindMs = 30 * 60_000,
     mutedHintCooldownMs = 10 * 60_000,
@@ -243,8 +252,10 @@ export class OpenMausBotBridge {
     this.intermediateCoalesceMs = intermediateCoalesceMs;
     this.maxIntermediateBubbles = maxIntermediateBubbles;
     this.turnStallMs = turnStallMs;
+    this.turnTimeoutMs = turnTimeoutMs;
     this.stateSaveDebounceMs = stateSaveDebounceMs;
     this.draftTtlMs = draftTtlMs;
+    this.cardTtlMs = cardTtlMs;
     this.followUpRemindMs = followUpRemindMs;
     this.delegationRemindMs = delegationRemindMs;
     this.mutedHintCooldownMs = mutedHintCooldownMs;
@@ -321,6 +332,13 @@ export class OpenMausBotBridge {
   saveState(opts?: { immediate?: boolean }): void { saveBridgeState(this, opts); }
   flushState(): void { flushBridgeState(this); }
   pruneMemoryCaches(): void { pruneBridgeMemoryCaches(this); }
+
+  syncQuietTimer(): void {
+    this.#syncQuietTimer();
+    if (!this.quietHours?.enabled && this.quietQueue.length) {
+      this.flushQuietDigest().catch(() => {});
+    }
+  }
 
   #syncQuietTimer(): void {
     if (this.quietTimer) {
@@ -466,7 +484,6 @@ export class OpenMausBotBridge {
 
   clearPickers(): void {
     this.pendingTaskPick = null;
-    this.pendingSendBacks.clear();
   }
 
   clearPendingMedia(): void {
@@ -612,9 +629,16 @@ export class OpenMausBotBridge {
 
   async start(): Promise<void> {
     const ttlMs = this.fileRetentionDays > 0 ? this.fileRetentionDays * DAY_MS : 0;
-    if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+    const pullCacheDir = this.dataDir ? path.join(this.dataDir, 'in', 'pull') : '';
+    if (ttlMs > 0) {
+      pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+      if (pullCacheDir) pruneExpiredFiles(pullCacheDir, ttlMs, { now: this.now() });
+    }
     this.cleanupTimer = setInterval(() => {
-      if (ttlMs > 0) pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+      if (ttlMs > 0) {
+        pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
+        if (pullCacheDir) pruneExpiredFiles(pullCacheDir, ttlMs, { now: this.now() });
+      }
       this.pruneMemoryCaches();
     }, DAY_MS);
     this.cleanupTimer.unref?.();
@@ -655,6 +679,7 @@ export class OpenMausBotBridge {
     }).catch((e) => { if (!this.sseAc?.signal.aborted) console.error('[omb-sse]', e); });
     this.#syncQuietTimer();
     await this.refreshMultiBot();
+    reconcilePendingCards(this).catch(() => {});
     this.#resumeInFlightTurns();
     if (!this.isTransportDisconnected() && this.disconnectedBuffer.length) {
       this.flushOutboundBuffer().catch(() => {});

@@ -462,9 +462,10 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     });
     await until(() => omb.prompts.length > promptCountBeforeSelfFwd);
     const selfFwdPrompt = omb.prompts.at(-1)!.text;
-    assert.equal(selfFwdPrompt.includes('订单导出报错 504'), false, 'L3 默认 pull-only 不在自聊 prompt 预注入前文正文');
+    assert.equal(selfFwdPrompt.includes('订单导出报错 504'), true, '自聊显式转发前文应直接内联打包注入');
+    assert.equal(selfFwdPrompt.includes('网关超时配置只有 5s'), true, '自聊合并转发也应直接内联打包注入');
     assert.equal(selfFwdPrompt.includes('个人银行卡密码笔记'), false, '自聊私人笔记绝不能混入转发上下文');
-    assert.match(selfFwdPrompt, /context_pull: http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=g_[a-z0-9_]+ \(available=2\)/);
+    assert.match(selfFwdPrompt, /context_pull: http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=g_[a-z0-9_]+/);
 
     const selfPullM = selfFwdPrompt.match(/grant=(g_[a-z0-9_]+)/)!;
     assert.ok(selfPullM);
@@ -474,7 +475,7 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     assert.equal(selfHistAllowed.messages.some((m) => m.id === 'self_fwd_1'), true);
     assert.equal(selfHistAllowed.messages.some((m) => m.id === 'self_fwd_2'), true);
 
-    // Next unrelated self-chat query must NOT emit context_pull or re-inject anything
+    // Next unrelated self-chat query must NOT re-inject consumed forwards or report available=2
     await pushInbound!({
       msgId: 'self_unrelated',
       chatId: 'chat_self',
@@ -487,7 +488,7 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     await until(() => omb.prompts.length > promptCountBeforeSelfFwd + 1);
     const unrelatedPrompt = omb.prompts.at(-1)!.text;
     assert.equal(unrelatedPrompt.includes('订单导出报错 504'), false, '已消费转发消息不得重复注入后续无关提问');
-    assert.equal(unrelatedPrompt.includes('context_pull:'), false, '日常无关自聊提问不应附带 context_pull 头');
+    assert.equal(unrelatedPrompt.includes('available=2'), false, '已消费自聊转发不得在后续提问再次计入 available');
 
     // Self-chat context_pull grant must still refuse reading # 备忘 personal note (history & attachment)!
     const noteDetail = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&msgId=self_note_1`);

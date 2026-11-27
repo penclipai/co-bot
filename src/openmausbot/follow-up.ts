@@ -7,6 +7,7 @@ import type { OpenMausBotBridge } from './bridge.ts';
 import { requestSendBack } from './chat-manager.ts';
 import { dispatchToBot } from './dispatch.ts';
 import { buildExternalChatCtx } from './inbound-router.ts';
+import { allocateInboxRef, recordClosedInboxRef } from './inbox.ts';
 import { trimMapCap } from './mentions.ts';
 import type { BridgeChatContext, CompactChatContext, PrivateDraft } from './types.ts';
 
@@ -92,6 +93,7 @@ export async function createAskDraftAndConfirm(
   const draftId = `draft_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const draft: PrivateDraft = {
     id: draftId,
+    inboxRef: allocateInboxRef(bridge),
     imMsgId: draftId,
     originChatId: targetChat.id,
     originChatName: targetChat.name || targetChat.id,
@@ -142,6 +144,8 @@ export async function handleFollowUpReply(bridge: OpenMausBotBridge, ev: Inbound
   let matched: typeof bridge.pendingFollowUps extends Map<string, infer V> ? V | null : null = null;
   for (const fp of bridge.pendingFollowUps.values()) {
     if (fp.chatId !== chatId) continue;
+    // 若对方明确引用了其他无关消息，不应误触发本条追问回流
+    if (replyTo && fp.askMsgId && replyTo !== fp.askMsgId) continue;
     const hitQuote = Boolean(replyTo && replyTo === fp.askMsgId);
     const hitId = Boolean(fp.targetUserId && senderId && fp.targetUserId === senderId);
     const hitName = Boolean(!fp.targetUserId && fp.targetName && senderName && senderName === fp.targetName.toLowerCase());
@@ -154,6 +158,10 @@ export async function handleFollowUpReply(bridge: OpenMausBotBridge, ev: Inbound
 
   // 一次性消费：防止后续普通对话再次触发回流或死循环
   bridge.pendingFollowUps.delete(matched.id);
+  recordClosedInboxRef(bridge, matched.inboxRef, `追问 @${matched.targetName}`);
+  if (Array.isArray(ev.attachments) && ev.attachments.length) {
+    bridge.setFileMsg(chatId, String(ev.id), ev.attachments);
+  }
   bridge.saveState();
   const who = ev.sender?.name || ev.sender?.id || matched.targetName;
   const replyText = String(ev.text ?? '').trim();

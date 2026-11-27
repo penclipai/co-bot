@@ -60,7 +60,17 @@ export interface SelfChatConfig {
   intermediateCoalesceMs: number;
   maxIntermediateBubbles: number;
   turnStallMs: number;
+  turnTimeoutMs: number;
   stateSaveDebounceMs: number;
+  draftTtlMs: number;
+  cardTtlMs: number;
+  followUpRemindMs: number;
+  delegationRemindMs: number;
+  mutedHintCooldownMs: number;
+  outboundBufferMax: number;
+  outboundBufferTtlMs: number;
+  sendRetryDelayMs: number;
+  autoHealCooldownMs: number;
   outPrefix: string;
   botName: string;
 }
@@ -99,6 +109,8 @@ export interface ChatsConfig {
   autoCompactThreshold: number;
   maxQuotedSnippetChars: number;
   maxRecentMessageChars: number;
+  passiveMentionAlert: boolean;
+  collaboratorBot: string;
 }
 
 export interface ProjectConfig {

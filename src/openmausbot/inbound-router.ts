@@ -2,25 +2,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SELF_NOTE_PREFIX_RE } from '../core/chat-context.ts';
 import { evaluateInboundPolicy } from '../core/inbound-policy.ts';
-import { findUnauthorizedProjectMention, isProjectAuthorized, resolveProjectBinding } from '../core/projects.ts';
+import {
+  findUnauthorizedPathMention,
+  findUnauthorizedProjectMention,
+  isProjectAuthorized,
+} from '../core/projects.ts';
 import { clip, fileSafe } from '../format.ts';
 import type { ChatType, InboundEvent } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import {
-  advanceQuestionCard,
-  answerCard,
-  dismissBlockCard,
-  handleBurstCardAction,
-  replyMultiCardHint,
-} from './card-actions.ts';
-import { parseChoiceIndex, parseMultiChoiceAnswer } from './cards.ts';
+import { handleCardReplyText, replyMultiCardHint } from './card-actions.ts';
+import { parseChoiceIndex } from './cards.ts';
 import { confirmDraftDirect, discardPrivateDraft, isExternalChatAllowed } from './chat-manager.ts';
+import { makeCommandSink } from './command-helpers.ts';
 import { buildHelpText, handleCommand } from './commands.ts';
 import { formatDelegationRequest, generateDelegationId, parseDelegationTag } from './delegation.ts';
 import { handleFollowUpReply } from './follow-up.ts';
 import {
+  handleInboxRefAction,
+  pruneExpiredInboxItems,
+  recordClosedInboxRef,
+  replyDisambiguationHint,
+} from './inbox.ts';
+import {
   buildMentionMatcher,
   hasNonBotMention,
+  inQuietHours,
   parseInlineTriggerMention,
   parseStartMention,
   parseStructuredBotMention,
@@ -38,7 +44,7 @@ const ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都
 const DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$/i;
 const SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
 const BYE_RE = /^(bye|退下|结束对话|退出对话)$/i;
-const OWNER_COMMAND_RE = /^(?:help|帮助|status|状态|stop|停止|bye|退下|steer|插队|cancel|取消排队|chats|mute|静音|unmute|解除静音|summary|汇总|纪要|sendback|发回|bind|绑定|delegate|委托|new|新会话|task|会话|compact|压缩|\/(?:goal|learn|burst|setup))(?:[\s:：]|$)/i;
+const OWNER_COMMAND_RE = /^(?:help|帮助|\?|？|status|状态|stop|停止|bye|退下|结束对话|退出对话|quiet|免打扰|steer|插队|cancel|取消|取消排队|chats|会话列表|mute|静音|unmute|解除静音|取消静音|恢复通知|summary|汇总|纪要|sendback|发回|bind|绑定|delegate|委托|new|新会话|task|会话|compact|压缩|\/(?:goal|learn|burst|setup))(?:[\s:：]|$)/i;
 
 function extractPrivateFlag(text: string): { privateFlag: boolean; body: string } {
   const m = text.match(/^(?:-p|--private)(?:\s+([\s\S]*))?$/i);
@@ -111,13 +117,27 @@ export async function sendDelegation(
 }
 
 async function handleDelegationResponse(bridge: OpenMausBotBridge, ev: InboundEvent, parsedRes: DelegationResponseParsed): Promise<void> {
+  const chatId = String(ev.chat.id);
+  const chatType = ev.chat.type || 'direct';
+  if (chatType !== 'direct') {
+    bridge.policyDenials += 1;
+    bridge.emitTelemetry('policy_denied', { chatId, chatType, summary: `reason=delegation_res_requires_direct re=${parsedRes.re}` });
+    return;
+  }
+  const existing = bridge.delegations.pendingOutbound.get(parsedRes.re);
+  if (existing && String(existing.targetChatId) !== chatId) {
+    bridge.policyDenials += 1;
+    bridge.emitTelemetry('policy_denied', { chatId, chatType, summary: `reason=delegation_res_origin_mismatch re=${parsedRes.re}` });
+    return;
+  }
   const pending = bridge.delegations.completeOutbound(parsedRes.re);
   bridge.emitTelemetry('delegation_res', {
-    chatId: String(ev.chat.id),
-    chatType: ev.chat.type || 'direct',
+    chatId,
+    chatType,
     summary: `inbound re=${parsedRes.re}${pending ? ' matched' : ' unmatched'}`,
   });
   if (!pending) return;
+  recordClosedInboxRef(bridge, pending.inboxRef, `C2C 委托「${pending.targetChatName || chatId}」`);
   bridge.saveState();
   if (!bridge.selfChat) return;
   const fromName = ev.sender?.name || pending.targetChatName || ev.chat?.name || ev.chat?.id;
@@ -216,6 +236,38 @@ async function handleCollaboratorEvent(
       chatType,
       summary: `sender=${ev.sender?.id || '?'} reason=${decision.reason}`,
     });
+    if (
+      decision.reason === 'not_in_whitelist'
+      && ev.mentionsMe
+      && bridge.chats.passiveMentionAlert === true
+      && bridge.selfChat
+      && isExternalChatAllowed(bridge, chatId, chatType)
+    ) {
+      const senderLabel = ev.sender?.name || ev.sender?.id || '同事';
+      const chatLabel = ev.chat?.name || chatId;
+      const alertText = `📣 **「${chatLabel}」${senderLabel} 提到了你**\n> ${clip(rawText || '[附件消息]', 240)}\n\n回复 \`${bridge.trigger} summary ${chatId}\` 查看前文。`;
+      bridge.emitTelemetry('passive_mention_triage', {
+        chatId,
+        chatType,
+        summary: `from=${senderLabel}`,
+      });
+      if (inQuietHours(bridge.now(), bridge.quietHours)) {
+        bridge.quietQueue.push({
+          botId: bridge.chiefBotId || 'chief',
+          botName: bridge.botName,
+          threadId: chatId,
+          isGroup: false,
+          speakerName: chatLabel,
+          speakerBotId: null,
+          text: alertText,
+          finalMsg: { id: String(ev.id), role: 'bot', kind: 'text', text: alertText },
+        });
+        bridge.saveState();
+      } else {
+        await bridge.say(alertText, { targetChatId: bridge.selfChat });
+        bridge.notifySelf({ title: `「${chatLabel}」@了你`, body: rawText || '[附件消息]', chatId: bridge.selfChat });
+      }
+    }
     return;
   }
   if (decision.role !== 'collaborator') return;
@@ -287,16 +339,7 @@ async function handleCollaboratorEvent(
   }
   if (decision.allowedProjects?.length) {
     const unauth = findUnauthorizedProjectMention(question, bridge.projects, decision.allowedProjects);
-    const authMention = unauth
-      ? resolveProjectBinding({
-          text: question,
-          chatId,
-          chatProjects: new Map(),
-          projects: bridge.projects,
-          allowedProjects: decision.allowedProjects,
-        }).source === 'explicit'
-      : false;
-    if (unauth && !authMention) {
+    if (unauth) {
       bridge.policyDenials += 1;
       bridge.emitTelemetry('policy_denied', {
         chatId,
@@ -305,14 +348,50 @@ async function handleCollaboratorEvent(
       });
       return;
     }
+    const unauthPath = findUnauthorizedPathMention(question, bridge.projects, decision.allowedProjects);
+    if (unauthPath) {
+      bridge.policyDenials += 1;
+      bridge.emitTelemetry('policy_denied', {
+        chatId,
+        chatType,
+        summary: `sender=${ev.sender?.id || '?'} reason=unauthorized_path:${unauthPath}`,
+      });
+      return;
+    }
   }
   if (Array.isArray(ev.attachments) && ev.attachments.length) {
     bridge.setFileMsg(chatId, String(ev.id), ev.attachments);
   }
 
-  const resolvedChief = await bridge.client.resolveBot('');
-  if (!resolvedChief) return;
-  const chief = await bridge.ensureChatThread(chatId, chatType, ev.chat?.name || chatId, resolvedChief);
+  const collabBotRef = String(bridge.chats.collaboratorBot ?? '').trim();
+  const resolvedChief = collabBotRef
+    ? await bridge.client.resolveBot(collabBotRef)
+    : await bridge.client.resolveBot('');
+  if (!resolvedChief) {
+    if (collabBotRef) {
+      bridge.policyDenials += 1;
+      bridge.emitTelemetry('policy_denied', {
+        chatId,
+        chatType,
+        summary: `sender=${ev.sender?.id || '?'} reason=collaborator_bot_unavailable:${collabBotRef}`,
+      });
+    }
+    return;
+  }
+  let chief: OmbTargetBot;
+  try {
+    chief = await bridge.ensureChatThread(chatId, chatType, ev.chat?.name || chatId, resolvedChief);
+  } catch (e) {
+    bridge.emitTelemetry('policy_denied', {
+      chatId,
+      chatType,
+      summary: `sender=${ev.sender?.id || '?'} reason=thread_isolation_error`,
+    });
+    if (bridge.selfChat) {
+      await bridge.say(`⚠️ 无法为「${ev.chat?.name || chatId}」建立协作者隔离会话，已中止处理：${e instanceof Error ? e.message : e}`);
+    }
+    return;
+  }
 
   const chatCtx = buildExternalChatCtx(bridge, {
     isSelfChat: false,
@@ -370,6 +449,9 @@ function tryDispatchDraftPolish(
     addBotPrefix: Boolean(polishSource.addBotPrefix),
     ...(polishSource.forceBotPrefix ? { forceBotPrefix: true } : {}),
     ...(polishSource.delegationRe ? { delegationRe: polishSource.delegationRe } : {}),
+    ...(polishSource.mentions?.length ? { mentions: polishSource.mentions.map((m) => ({ ...m })) } : {}),
+    ...(polishSource.allowMentionNames?.length ? { allowMentionNames: [...polishSource.allowMentionNames] } : {}),
+    ...(polishSource.followUp ? { followUp: { ...polishSource.followUp } } : {}),
   };
   const ask = bodyText || '请进一步精简润色这版草稿，保持意思准确。';
   const promptForDraft = `[待润色草稿 · 原目标会话「${chatCtx.polishDraft.originChatName}」]\n${polishSource.rawText}\n\n[改写要求]\n${ask}`;
@@ -399,17 +481,39 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
   if (bridge.hasSeenMsg(chatId, mid)) return;
   bridge.markSeenMsg(chatId, mid);
 
-  // 撤回事件：同步从内存上下文窗口、待用附件队列、消息路由和磁盘缓存擦除
+  // 撤回事件：同步从内存上下文窗口、待用附件队列、消息路由、拉取缓存与衍生在途待办擦除
   if (ev.kind === 'recall' && ev.recalledMsgId) {
     const recalledId = String(ev.recalledMsgId);
     if (bridge.imContext?.recallMessage) bridge.imContext.recallMessage(chatId, recalledId);
     else bridge.localContextStore.recallMessage(chatId, recalledId);
     bridge.deleteFileMsg(chatId, recalledId);
     bridge.deleteMsgRoute(chatId, recalledId);
+    let stateChanged = false;
+    for (const [k, d] of bridge.privateDrafts) {
+      if (d?.originChatId === chatId && d?.replyToImMsgId === recalledId) {
+        recordClosedInboxRef(bridge, d.inboxRef, `已撤回草稿`);
+        bridge.privateDrafts.delete(k);
+        for (const [sbk, sb] of bridge.pendingSendBacks) {
+          if (sb?.draft?.id === d.id) bridge.pendingSendBacks.delete(sbk);
+        }
+        stateChanged = true;
+      }
+    }
+    for (const [k, fp] of bridge.pendingFollowUps) {
+      if (fp?.chatId === chatId && fp?.askMsgId === recalledId) {
+        recordClosedInboxRef(bridge, fp.inboxRef, `已撤回追问`);
+        bridge.pendingFollowUps.delete(k);
+        stateChanged = true;
+      }
+    }
     try {
       fs.rmSync(path.join(bridge.inDir, fileSafe(chatId) || 'chat', fileSafe(recalledId) || 'f'), { recursive: true, force: true });
       fs.rmSync(path.join(bridge.inDir, fileSafe(recalledId) || 'f'), { recursive: true, force: true });
+      if (bridge.dataDir) {
+        fs.rmSync(path.join(bridge.dataDir, 'in', 'pull', fileSafe(chatId) || 'chat', fileSafe(recalledId) || 'msg'), { recursive: true, force: true });
+      }
     } catch { /* ignore */ }
+    if (stateChanged) bridge.saveState();
     bridge.emitTelemetry('recall', { chatId, chatType, summary: `recall:${recalledId}` });
     return;
   }
@@ -562,36 +666,17 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
 
   if (isSelfChat) bridge.clearPendingMedia();
 
-  const handleCardReply = (card: NonNullable<typeof quotedCard>, isQuoted: boolean): Promise<unknown> | null => {
-    if (card.cardKind === 'burst') {
-      if (APPROVE_RE.test(rawText) || /^1$/.test(rawText)) return handleBurstCardAction(bridge, card, 'run');
-      if (DENY_RE.test(rawText) || SKIP_RE.test(rawText) || /^0$/.test(rawText)) return handleBurstCardAction(bridge, card, 'cancel');
-      return null;
+  const handleCardReply = (card: NonNullable<typeof quotedCard>, isQuoted: boolean, input = rawText): Promise<unknown> | null => (
+    handleCardReplyText(bridge, card, isQuoted, input)
+  );
+
+  // 0. 统一收件箱短编号快捷消项（`#N 1/0/确认/取消/改：...`）
+  if (isSelfChat) {
+    pruneExpiredInboxItems(bridge);
+    if (!rawText.startsWith('@') && await handleInboxRefAction(bridge, rawText, { handleCardReply })) {
+      return;
     }
-    if (card.cardKind && card.cardKind !== 'card') {
-      return (SKIP_RE.test(rawText) || /^0$/.test(rawText)) ? dismissBlockCard(bridge, card) : null;
-    }
-    if (card.isQuestion) {
-      if (DENY_RE.test(rawText) || /^0$/.test(rawText)) return answerCard(bridge, card, 'deny');
-      const curQ = card.questions?.[card.questionIndex ?? 0];
-      const curOpts = curQ?.options ?? card.options ?? [];
-      const curMulti = Boolean(curQ?.multiSelect);
-      const pickedAnswer = parseMultiChoiceAnswer(rawText, curOpts, curMulti);
-      const stepAnswer = pickedAnswer ?? ((isQuoted || !SELF_NOTE_PREFIX_RE.test(rawText)) ? rawText : null);
-      if (stepAnswer) {
-        if (card.questions && card.questions.length > 1) return advanceQuestionCard(bridge, card, stepAnswer);
-        return answerCard(bridge, card, 'answer', stepAnswer);
-      }
-      return null;
-    }
-    if (!card.isReviewProposal && (ALWAYS_RE.test(rawText) || /^2$/.test(rawText))) {
-      return answerCard(bridge, card, 'allow', undefined, { always: true, rememberCommand: card.canRememberCommand });
-    }
-    if (APPROVE_RE.test(rawText) || /^1$/.test(rawText)) return answerCard(bridge, card, 'allow');
-    if (DENY_RE.test(rawText) || /^0$/.test(rawText)) return answerCard(bridge, card, 'deny');
-    if (isQuoted) return answerCard(bridge, card, 'answer', rawText);
-    return null;
-  };
+  }
 
   // 1a. 显式引用卡片气泡回复优先
   if (quotedCard && !rawText.startsWith('@')) {
@@ -599,37 +684,61 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     if (res) return res;
   }
 
-  // 1b. 自聊私密草稿确认回发（支持引用确认/直发/取消/改写，及无引用时对最新预览的确认）
+  // 1b. 自聊私密草稿确认回发（支持引用确认/直发/取消/改写，及无引用时的碰撞安全与过期提示）
+  const sbConfirmRe = /^(?:确认发送|确认|发送|send|ok|yes|y|okay|好|好的|1)$/i;
+  const sbCancelRe = /^(?:取消|算了|不要|忽略|cancel|no|n|0)$/i;
+  const sbEditRe = /^(?:改|修改|替换)[:：\s]+([\s\S]+)$/;
   if (isSelfChat && !rawText.startsWith('@') && quotedId) {
     const quotedSb = [...bridge.pendingSendBacks.values()].find((p) => p.imMsgId === quotedId && bridge.now() < p.expiresAt);
     if (quotedSb) {
-      if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return bridge.confirmSendBack(quotedSb.id);
-      if (/^(?:取消|算了|不要|cancel|no)$/i.test(rawText)) return bridge.cancelSendBack(quotedSb.id);
-      const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
+      if (sbConfirmRe.test(rawText)) return bridge.confirmSendBack(quotedSb.id);
+      if (sbCancelRe.test(rawText)) return bridge.cancelSendBack(quotedSb.id);
+      const editM = rawText.match(sbEditRe);
       if (editM && editM[1].trim()) return bridge.requestSendBack(quotedSb.draft, editM[1].trim());
     }
+    if (bridge.expiredSendBackIds.has(quotedId) && (sbConfirmRe.test(rawText) || sbCancelRe.test(rawText) || sbEditRe.test(rawText))) {
+      bridge.expiredSendBackIds.delete(quotedId);
+      return bridge.say(`⌛ 该待发回预览已超时，请引用原草稿回复 \`${bridge.trigger} sendback\` 或 \`确认发送\`。`);
+    }
     const quotedDraft = bridge.resolvePrivateDraft({ quotedId });
-    if (quotedDraft && (quotedDraft.imMsgId === quotedId || bridge.privateDrafts.get(quotedId)?.id === quotedDraft.id)) {
-      if (/^(?:确认发送|直接发|直接发送)$/i.test(rawText)) return confirmDraftDirect(bridge, quotedDraft);
+    if (quotedDraft && (quotedDraft.imMsgId === quotedId || quotedDraft.imMsgIds?.includes(quotedId) || bridge.privateDrafts.get(quotedId)?.id === quotedDraft.id)) {
+      if (/^(?:确认发送|确认|直接发|直接发送|ok|yes|y|okay|好|好的|1)$/i.test(rawText)) return confirmDraftDirect(bridge, quotedDraft);
       if (/^(?:发回|发送|send|sendback)$/i.test(rawText)) return bridge.requestSendBack(quotedDraft);
-      if (/^(?:取消|忽略|算了|不要|cancel)$/i.test(rawText)) return discardPrivateDraft(bridge, quotedDraft);
-      const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
+      if (/^(?:取消|忽略|算了|不要|cancel|no|n|0)$/i.test(rawText)) return discardPrivateDraft(bridge, quotedDraft);
+      const editM = rawText.match(sbEditRe);
       if (editM && editM[1].trim()) return bridge.requestSendBack(quotedDraft, editM[1].trim());
     }
   }
   const pendingSendBack = bridge.pendingSendBack;
   if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && pendingSendBack && bridge.now() < pendingSendBack.expiresAt) {
-    if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return bridge.confirmSendBack(pendingSendBack.id);
-    if (/^(?:取消|算了|不要|cancel|no)$/i.test(rawText)) {
-      return bridge.cancelSendBack(pendingSendBack.id);
+    const isSbAction = sbConfirmRe.test(rawText) || sbCancelRe.test(rawText) || sbEditRe.test(rawText);
+    if (isSbAction) {
+      if (bridge.pendingSendBacks.size > 1) {
+        return replyDisambiguationHint(bridge, 'multi_sendback');
+      }
+      if (bridge.pendingCards.size >= 1) {
+        return replyDisambiguationHint(bridge, 'sendback_card_collision');
+      }
+      if (sbConfirmRe.test(rawText)) return bridge.confirmSendBack(pendingSendBack.id);
+      if (sbCancelRe.test(rawText)) return bridge.cancelSendBack(pendingSendBack.id);
+      const editM = rawText.match(sbEditRe);
+      if (editM && editM[1].trim()) return bridge.requestSendBack(pendingSendBack.draft, editM[1].trim());
     }
-    const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
-    if (editM && editM[1].trim()) {
-      return bridge.requestSendBack(pendingSendBack.draft, editM[1].trim());
-    }
+  } else if (
+    isSelfChat
+    && !rawText.startsWith('@')
+    && !quotedRoute
+    && !bridge.pendingSendBacks.size
+    && !bridge.pendingCards.size
+    && bridge.lastExpiredSendBackAt > 0
+    && (bridge.now() - bridge.lastExpiredSendBackAt) <= 10 * 60_000
+    && /^(?:确认发送|发送|sendback)$/i.test(rawText)
+  ) {
+    bridge.lastExpiredSendBackAt = 0;
+    return bridge.say(`⌛ 待发回草稿已超时，请引用私密草稿重新发送 \`${bridge.trigger} sendback\`。`);
   }
 
-  // 1c. @bot task 列表待选择序号（仅自聊，支持直接回复或引用列表气泡回复）
+  // 1c. @bot task 列表待选择序号（仅自聊，支持 0/取消 及与 pendingCards 的碰撞保护）
   const taskPick = bridge.pendingTaskPick;
   if (
     isSelfChat
@@ -638,9 +747,17 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     && taskPick
     && bridge.now() < taskPick.expiresAt
   ) {
-    const choice = parseChoiceIndex(rawText);
-    if (choice) {
-      const picked = taskPick.tasks[choice - 1];
+    if (/^(?:0|取消|算了|不要|cancel|no|n)$/i.test(rawText)) {
+      bridge.pendingTaskPick = null;
+      return bridge.say('❎ 已取消切换会话。');
+    }
+    const rawInt = /^\d+$/.test(rawText) ? Number(rawText) : null;
+    const choice = parseChoiceIndex(rawText) ?? rawInt;
+    if (choice !== null) {
+      if (!quotedCard && !(taskPick.imMsgId && quotedId === taskPick.imMsgId) && bridge.pendingCards.size >= 1) {
+        return replyDisambiguationHint(bridge, 'task_card_collision');
+      }
+      const picked = choice >= 1 ? taskPick.tasks[choice - 1] : undefined;
       if (picked) {
         return bridge.switchTask(
           taskPick.botId,
@@ -655,12 +772,16 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
           },
         );
       }
+      if (rawInt !== null) {
+        return bridge.say(`请输入 \`1\`～\`${taskPick.tasks.length}\` 的序号，或回复 \`0\` 取消。`);
+      }
     }
   }
 
-  // 1d. 裸回复待处理 OpenMausBot 审批/提问/阻塞卡（多卡提示引用，单卡直接作答）
+  // 1d. 裸回复待处理 OpenMausBot 审批/提问/阻塞卡（多卡提示编号或引用，单卡直接作答）
   if (isSelfChat && !quotedCard && bridge.pendingCards.size > 1 && !rawText.startsWith('@')) {
     const looksLikeMultiSelect = /^\d+(?:\s*[,，、\s]\s*\d+)+$/.test(rawText);
+    const hasQuestionCard = [...bridge.pendingCards.values()].some((c) => c.isQuestion);
     if (
       APPROVE_RE.test(rawText)
       || ALWAYS_RE.test(rawText)
@@ -669,6 +790,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
       || /^[0-9]$/.test(rawText)
       || looksLikeMultiSelect
       || parseChoiceIndex(rawText) !== null
+      || (hasQuestionCard && !SELF_NOTE_PREFIX_RE.test(rawText))
     ) {
       return replyMultiCardHint(bridge);
     }
@@ -679,10 +801,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     if (res) return res;
   }
 
-  // 1e. 有排队中消息时，允许在自聊裸回复 steer/插队 或 取消排队
+  // 1e. 有排队中消息时，允许在自聊裸回复 steer/插队 或 cancel/取消排队
   if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && bridge.queuedByThread.size > 0) {
     if (/^(steer|插队)$/i.test(rawText)) return bridge.steerLatestQueue(bridge.focus?.threadId);
-    if (/^(取消排队)$/i.test(rawText)) return bridge.cancelLatestQueue(bridge.focus?.threadId);
+    if (/^(cancel|取消排队)$/i.test(rawText)) return bridge.cancelLatestQueue(bridge.focus?.threadId);
   }
 
   // 2. 解析 @bot / @bot! / 句中 @bot / 结构化 mentions / @<BotName> / @<GroupName>、引用气泡、或自聊连续对话粘性窗口
@@ -749,7 +871,12 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     })) {
       return;
     }
-    targetBot = !isSelfChat ? await bridge.ensureChatThread(chatId, chatType, chatCtx.chatName || '', targetBot) : scopedTarget;
+    try {
+      targetBot = !isSelfChat ? await bridge.ensureChatThread(chatId, chatType, chatCtx.chatName || '', targetBot) : scopedTarget;
+    } catch (e) {
+      const ctrl = makeCommandSink(bridge, chatCtx, { sensitive: true });
+      return ctrl.say(`❌ 无法为当前外部会话建立隔离上下文，已中止发往底层：${e instanceof Error ? e.message : e}`);
+    }
     if (quotedRoute && quotedRoute.botId === targetBot.id && quotedRoute.threadId === targetBot.threadId) {
       replyToOmbId = quotedRoute.ombMsgId ?? null;
     }

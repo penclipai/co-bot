@@ -277,6 +277,9 @@ export interface PolishDraftInfo {
   addBotPrefix: boolean;
   forceBotPrefix?: boolean;
   delegationRe?: string;
+  mentions?: OutboundMention[];
+  allowMentionNames?: string[];
+  followUp?: PrivateDraft['followUp'];
 }
 
 export interface DelegationRequestParsed {
@@ -298,6 +301,7 @@ export type ParsedDelegationTag = DelegationRequestParsed | DelegationResponsePa
 
 export interface PendingOutboundDelegation {
   id: string;
+  inboxRef?: number;
   targetChatId: string;
   targetChatName?: string;
   project?: string;
@@ -351,7 +355,9 @@ export interface CompactChatContext {
 
 export interface PrivateDraft {
   id: string;
+  inboxRef?: number;
   imMsgId: string;
+  imMsgIds?: string[];
   originChatId: string;
   originChatName: string;
   originChatType: ChatType;
@@ -376,6 +382,7 @@ export interface PrivateDraft {
 
 export interface PendingFollowUp {
   id: string;
+  inboxRef?: number;
   chatId: string;
   chatName: string;
   chatType: ChatType;
@@ -394,6 +401,7 @@ export interface PendingFollowUp {
 
 export interface PendingSendBack {
   id?: string;
+  inboxRef?: number;
   imMsgId?: string | null;
   draft: PrivateDraft;
   text: string;
@@ -402,15 +410,16 @@ export interface PendingSendBack {
 }
 
 export interface CoordinatorInboxSummary {
-  cards: Array<{ imMsgId: string; title: string; botName: string; kind: string }>;
-  sendBacks: Array<{ id: string; imMsgId?: string | null; originName: string; preview: string; isFollowUp: boolean; expiresAt: number }>;
-  drafts: Array<{ id: string; imMsgId?: string | null; originName: string; preview: string; createdAt: number }>;
-  followUps: Array<{ id: string; chatName: string; targetName: string; question: string; createdAt: number; expiresAt: number }>;
-  delegations: Array<{ id: string; chatName: string; project?: string; question: string; createdAt: number }>;
+  cards: Array<{ ref?: number; imMsgId: string; title: string; botName: string; kind: string }>;
+  sendBacks: Array<{ ref?: number; id: string; imMsgId?: string | null; originName: string; preview: string; isFollowUp: boolean; expiresAt: number }>;
+  drafts: Array<{ ref?: number; id: string; imMsgId?: string | null; originName: string; preview: string; createdAt: number }>;
+  followUps: Array<{ ref?: number; id: string; chatName: string; targetName: string; question: string; createdAt: number; expiresAt: number }>;
+  delegations: Array<{ ref?: number; id: string; chatName: string; project?: string; question: string; createdAt: number }>;
   total: number;
 }
 
 export interface PendingCard {
+  inboxRef?: number;
   imMsgId: string;
   chatId?: string;
   cardKind: 'card' | 'secret' | 'connector' | 'signIn' | 'burst';
@@ -430,6 +439,7 @@ export interface PendingCard {
   questionIndex?: number;
   collectedAnswers?: string[];
   canRememberCommand: boolean;
+  createdAt?: number;
   chatCtx?: CompactChatContext | null;
 }
 
@@ -597,7 +607,6 @@ export interface ImContextService {
       availableFiles: number;
       pullOnly: boolean;
     }) => string;
-    allowAskColleagueHint?: boolean;
   }) => Promise<{
     header: string;
     quotedMsg: ChatContextMessage | null;
@@ -608,6 +617,7 @@ export interface ImContextService {
     hasTruncated?: boolean;
     oldestMsgId?: string | null;
   }>;
+  hasLoopbackPull?: () => boolean;
 }
 
 export interface MentionParseResult {
@@ -634,8 +644,10 @@ export interface BridgeOptions {
   intermediateCoalesceMs?: number;
   maxIntermediateBubbles?: number;
   turnStallMs?: number;
+  turnTimeoutMs?: number;
   stateSaveDebounceMs?: number;
   draftTtlMs?: number;
+  cardTtlMs?: number;
   followUpRemindMs?: number;
   delegationRemindMs?: number;
   mutedHintCooldownMs?: number;

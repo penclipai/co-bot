@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { writeJsonAtomic } from '../format.ts';
 import type { ProjectRef } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
+import { ensureInboxRefs, pruneExpiredInboxItems } from './inbox.ts';
 import { rememberBounded } from './mentions.ts';
 import type {
   BridgeFocus,
@@ -13,6 +14,7 @@ import type {
   MsgRoute,
   PendingCard,
   PendingFollowUp,
+  PendingSendBack,
   PrivateDraft,
   QuietQueueItem,
 } from './types.ts';
@@ -23,9 +25,12 @@ const ECHO_TTL = 3 * 60 * 1000;
 interface BridgeStateFile {
   selfChatId?: string;
   focus?: BridgeFocus | null;
+  lastBotReplyAt?: number;
+  inboxSeq?: number;
   msgRoute?: Array<[string, MsgRoute]>;
   quietQueue?: QuietQueueItem[];
   pendingCards?: Array<[string, PendingCard]>;
+  pendingSendBacks?: Array<[string, PendingSendBack]>;
   deliveredOmbIds?: string[];
   externalThreadIds?: string[];
   chatThreads?: Array<[string, ChatThreadEntry]>;
@@ -36,6 +41,7 @@ interface BridgeStateFile {
   lastPrivateDraftId?: string | null;
   pendingFollowUps?: PendingFollowUp[];
   chatProjects?: Array<[string, ProjectRef]>;
+  recalledMsgIds?: Record<string, string[]>;
   delegations?: unknown;
 }
 
@@ -66,6 +72,12 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       if (bridge.transport && !bridge.transport.selfChatId) bridge.transport.selfChatId = raw.selfChatId;
     }
     if (raw?.focus?.botId) bridge.focus = raw.focus;
+    if (typeof raw?.lastBotReplyAt === 'number' && raw.lastBotReplyAt > 0) {
+      bridge.lastBotReplyAt = raw.lastBotReplyAt;
+    }
+    if (typeof raw?.inboxSeq === 'number' && raw.inboxSeq > 0) {
+      bridge.inboxSeq = raw.inboxSeq;
+    }
     if (Array.isArray(raw?.msgRoute)) {
       for (const [k, v] of raw.msgRoute.slice(-500)) if (k && v?.botId) bridge.msgRoute.set(String(k), v);
     }
@@ -122,10 +134,21 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
         if (d?.id && d?.originChatId && (!d.createdAt || d.createdAt >= draftCutoff)) {
           bridge.privateDrafts.set(d.id, d);
           if (d.imMsgId) bridge.privateDrafts.set(d.imMsgId, d);
+          if (Array.isArray(d.imMsgIds)) {
+            for (const sid of d.imMsgIds) if (sid) bridge.privateDrafts.set(String(sid), d);
+          }
         }
       }
       if (raw.lastPrivateDraftId && bridge.privateDrafts.has(String(raw.lastPrivateDraftId))) {
         bridge.lastPrivateDraftId = String(raw.lastPrivateDraftId);
+      }
+    }
+    if (Array.isArray(raw?.pendingSendBacks)) {
+      const now = bridge.now();
+      for (const [k, sb] of raw.pendingSendBacks.slice(-10)) {
+        if (k && sb?.draft?.originChatId && Number(sb.expiresAt) > now) {
+          bridge.pendingSendBacks.set(String(k), sb);
+        }
       }
     }
     if (Array.isArray(raw?.pendingFollowUps)) {
@@ -151,6 +174,10 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
         }
       }
     }
+    if (raw?.recalledMsgIds && typeof raw.recalledMsgIds === 'object') {
+      const storeRef = bridge.imContext?.store ?? bridge.localContextStore;
+      storeRef?.hydrateRecalled(raw.recalledMsgIds);
+    }
     if (raw?.delegations && bridge.delegations) {
       bridge.delegations.hydrate(raw.delegations);
     }
@@ -159,6 +186,7 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       const recovered = bridge.selfThreads.get(String(bridge.focus.botId));
       bridge.focus = recovered ? { ...recovered } : null;
     }
+    ensureInboxRefs(bridge);
   } catch { /* 状态恢复兼容降级 */ }
 }
 
@@ -178,12 +206,19 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
       seenDrafts.add(d.id);
       uniqueDrafts.push(d);
     }
+    const now = bridge.now();
+    const storeRef = bridge.imContext?.store ?? bridge.localContextStore;
     writeJsonAtomic(bridge.stateFile, {
       selfChatId: bridge.selfChat,
       focus: bridge.focus,
+      lastBotReplyAt: bridge.lastBotReplyAt || 0,
+      inboxSeq: bridge.inboxSeq || 0,
       msgRoute: [...bridge.msgRoute.entries()].slice(-500),
       quietQueue: bridge.quietQueue.slice(-100),
       pendingCards: [...bridge.pendingCards.entries()].slice(-20),
+      pendingSendBacks: [...bridge.pendingSendBacks.entries()]
+        .filter(([, sb]) => sb && Number(sb.expiresAt) > now)
+        .slice(-10),
       deliveredOmbIds: [...bridge.deliveredOmbIds].slice(-200),
       chatThreads: [...bridge.chatThreads.entries()].slice(-200),
       selfThreads: [...bridge.selfThreads.entries()].slice(-100),
@@ -197,9 +232,10 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
       privateDrafts: uniqueDrafts.slice(-40),
       lastPrivateDraftId: bridge.lastPrivateDraftId || null,
       pendingFollowUps: [...bridge.pendingFollowUps.values()]
-        .filter((fp) => fp?.id && Number(fp.expiresAt) > bridge.now())
+        .filter((fp) => fp?.id && Number(fp.expiresAt) > now)
         .slice(-40),
       chatProjects: bridge.chatProjects ? [...bridge.chatProjects.entries()].slice(-200) : [],
+      recalledMsgIds: storeRef ? storeRef.exportRecalled() : undefined,
       delegations: bridge.delegations ? bridge.delegations.snapshot() : undefined,
     });
   } catch (e) {
@@ -237,14 +273,5 @@ export function pruneBridgeMemoryCaches(bridge: OpenMausBotBridge): void {
   for (const [k, at] of bridge.recent) {
     if (now - at > ECHO_TTL) bridge.recent.delete(k);
   }
-  const draftCutoff = now - (Number(bridge.draftTtlMs) || 30 * 60_000);
-  for (const [k, v] of bridge.privateDrafts) {
-    if ((v?.createdAt || 0) < draftCutoff) bridge.privateDrafts.delete(k);
-  }
-  for (const [k, v] of bridge.pendingFollowUps) {
-    if (!v || (v.expiresAt || 0) <= now) bridge.pendingFollowUps.delete(k);
-  }
-  for (const [k, v] of bridge.pendingSendBacks) {
-    if (!v || (v.expiresAt || 0) <= now) bridge.pendingSendBacks.delete(k);
-  }
+  pruneExpiredInboxItems(bridge);
 }

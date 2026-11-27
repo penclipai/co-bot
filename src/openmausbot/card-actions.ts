@@ -1,9 +1,16 @@
+import { SELF_NOTE_PREFIX_RE } from '../core/chat-context.ts';
 import { attachBotBadge } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import { formatMultiQuestionAnswers, formatOmbError, formatQuestionStepPrompt } from './cards.ts';
+import { formatMultiQuestionAnswers, formatOmbError, formatQuestionStepPrompt, parseMultiChoiceAnswer } from './cards.ts';
 import { formatOriginBanner } from './command-helpers.ts';
+import { recordClosedInboxRef } from './inbox.ts';
 import type { BridgeChatContext, MsgRoute, OmbHttpError, PendingCard } from './types.ts';
+
+const CARD_APPROVE_RE = /^(ok|okay|yes|y|好|好的|可以|允许|同意|通过|执行|批准)$/i;
+const CARD_ALWAYS_RE = /^(always|all|总是允许|始终允许|永久允许|以后都允许)$/i;
+const CARD_DENY_RE = /^(no|n|cancel|拒绝|不允许|不同意|取消|算了|不要)$/i;
+const CARD_SKIP_RE = /^(skip|pass|ignore|跳过|先跳过|略过|忽略|稍后再说|稍后|取消)$/i;
 
 function withBadge(who: string, body: string): string {
   return who ? attachBotBadge(who, body) : body;
@@ -29,11 +36,13 @@ function buildCardReplyContext(bridge: OpenMausBotBridge, card: PendingCard): {
 
 /** 清理与当前响应关联的 pendingCards 条目并持久化状态。 */
 function deleteCard(bridge: OpenMausBotBridge, card: PendingCard): void {
+  recordClosedInboxRef(bridge, card.inboxRef, card.title || '审批卡');
   for (const [k, v] of bridge.pendingCards) {
     const sameReq = Boolean(card.requestId && v.requestId === card.requestId);
     const sameBurst = Boolean(card.burstId && v.burstId === card.burstId);
     const sameMsg = Boolean(card.ombMsgId && v.ombMsgId && v.ombMsgId === card.ombMsgId);
     if (sameReq || sameBurst || sameMsg || k === card.imMsgId) {
+      recordClosedInboxRef(bridge, v.inboxRef, v.title || '审批卡');
       bridge.pendingCards.delete(k);
     }
   }
@@ -52,10 +61,11 @@ export async function replyMultiCardHint(bridge: OpenMausBotBridge): Promise<voi
   const who = bridge.botPrefix('', bridge.botName);
   const items = [...bridge.pendingCards.values()].map((c) => {
     const name = bridge.displayBotName(c.botId, c.botName, { isGroup: Boolean(c.isGroup) });
-    return `- **${name}**：${clip(c.title || '待确认操作', 48)}`;
+    const refTag = c.inboxRef ? `\`#${c.inboxRef}\` ` : '';
+    return `- ${refTag}**${name}**：${clip(c.title || '待确认操作', 48)}`;
   });
   await bridge.say(
-    withBadge(who, `⚠️ 当前有 **${bridge.pendingCards.size}** 条待确认请求，请**引用对应气泡**回复（如 \`1\` / \`0\` 或 \`ok\` / \`no\`）：\n${items.join('\n')}`),
+    withBadge(who, `⚠️ 当前有 **${bridge.pendingCards.size}** 条待确认请求，请回复 \`#编号 1/0\` 或**引用对应气泡**回复：\n${items.join('\n')}`),
   );
 }
 
@@ -67,7 +77,10 @@ export async function advanceQuestionCard(bridge: OpenMausBotBridge, card: Pendi
   if (nextIndex < questions.length) {
     const { ctrlChatId, who, route } = buildCardReplyContext(bridge, card);
     const multiCard = bridge.pendingCards.size > 1;
-    const step = formatQuestionStepPrompt(who, card.title || '需要你做个决定', questions, nextIndex, { multiCard });
+    const step = formatQuestionStepPrompt(who, card.title || '需要你做个决定', questions, nextIndex, {
+      multiCard,
+      inboxRef: card.inboxRef,
+    });
     const originBanner = formatOriginBanner(card.chatCtx, ctrlChatId, bridge.selfChat, '的审批 / 确认');
     const nextSentId = await bridge.say(`${originBanner}${step.text}`, route, null, null, { noBuffer: true });
     if (!nextSentId) {
@@ -222,7 +235,12 @@ export async function answerCard(
       const err = e as OmbHttpError;
       if (opts.rememberCommand && err?.status === 403) {
         delete payload.rememberCommand;
-        await bridge.client.respond(card.threadId, payload);
+        try {
+          await bridge.client.respond(card.threadId, payload);
+        } catch (e2) {
+          cleanupIfStaleCardError(bridge, card, e2);
+          throw e2;
+        }
       } else {
         cleanupIfStaleCardError(bridge, card, err);
         throw e;
@@ -241,4 +259,43 @@ export async function answerCard(
     await bridge.say(withBadge(who, `⚠️ 审批提交失败：${formatOmbError(e)}`), route);
   }
   return undefined;
+}
+
+/** 根据用户输入响应指定待处理卡片（支持审批卡、提问卡、并发预览卡与阻塞提示卡）。 */
+export function handleCardReplyText(
+  bridge: OpenMausBotBridge,
+  card: PendingCard,
+  isQuoted: boolean,
+  inputText: string,
+): Promise<unknown> | null {
+  const rawText = String(inputText ?? '').trim();
+  if (!rawText) return null;
+  if (card.cardKind === 'burst') {
+    if (CARD_APPROVE_RE.test(rawText) || /^1$/.test(rawText)) return handleBurstCardAction(bridge, card, 'run');
+    if (CARD_DENY_RE.test(rawText) || CARD_SKIP_RE.test(rawText) || /^0$/.test(rawText)) return handleBurstCardAction(bridge, card, 'cancel');
+    return null;
+  }
+  if (card.cardKind && card.cardKind !== 'card') {
+    return (CARD_SKIP_RE.test(rawText) || /^0$/.test(rawText)) ? dismissBlockCard(bridge, card) : null;
+  }
+  if (card.isQuestion) {
+    if (CARD_DENY_RE.test(rawText) || /^0$/.test(rawText)) return answerCard(bridge, card, 'deny');
+    const curQ = card.questions?.[card.questionIndex ?? 0];
+    const curOpts = curQ?.options ?? card.options ?? [];
+    const curMulti = Boolean(curQ?.multiSelect);
+    const pickedAnswer = parseMultiChoiceAnswer(rawText, curOpts, curMulti);
+    const stepAnswer = pickedAnswer ?? ((isQuoted || !SELF_NOTE_PREFIX_RE.test(rawText)) ? rawText : null);
+    if (stepAnswer) {
+      if (card.questions && card.questions.length > 1) return advanceQuestionCard(bridge, card, stepAnswer);
+      return answerCard(bridge, card, 'answer', stepAnswer);
+    }
+    return null;
+  }
+  if (!card.isReviewProposal && (CARD_ALWAYS_RE.test(rawText) || /^2$/.test(rawText))) {
+    return answerCard(bridge, card, 'allow', undefined, { always: true, rememberCommand: card.canRememberCommand });
+  }
+  if (CARD_APPROVE_RE.test(rawText) || /^1$/.test(rawText)) return answerCard(bridge, card, 'allow');
+  if (CARD_DENY_RE.test(rawText) || /^0$/.test(rawText)) return answerCard(bridge, card, 'deny');
+  if (isQuoted) return answerCard(bridge, card, 'answer', rawText);
+  return null;
 }

@@ -17,6 +17,8 @@ import {
   stopTarget,
 } from './command-helpers.ts';
 import { buildHelpHtml, sendHelpHtmlAttachment } from './help-html.ts';
+import { handleCardReplyText } from './card-actions.ts';
+import { handleInboxRefAction, resolveInboxDraftOrSendBackRef } from './inbox.ts';
 import type { BridgeChatContext, MsgRoute, OmbBot, OmbTargetBot } from './types.ts';
 
 export { botCommandTarget, buildHelpHtml, buildHelpText };
@@ -108,6 +110,9 @@ async function handleStatusCommand(
   if (doc?.problems?.length) headerParts.push(`⚠️ Doctor ${doc.problems.length} 项异常`);
   if (h.box && h.box !== 'off') headerParts.push(`隔离:${h.box}`);
   if (bridge.activeTurns.size > 0) headerParts.push(`${bridge.activeTurns.size} 任务中`);
+  let queuedTotal = 0;
+  for (const arr of bridge.queuedByThread.values()) queuedTotal += arr.length;
+  if (queuedTotal > 0) headerParts.push(`排队 ${queuedTotal}`);
   if (bridge.isStickyActive()) headerParts.push('续聊中');
   if (bridge.quietQueue.length > 0) headerParts.push(`待汇总 ${bridge.quietQueue.length}`);
   const headerLine = headerParts.join(' · ');
@@ -237,7 +242,7 @@ async function handleDefaultCommand(
     } : null;
     const rawTarget = extCtx
       ? (quotedRoute ?? [...bridge.activeTurns.values()].find((t) => t.chatCtx?.originChatId === extCtx.originChatId) ?? scoped)
-      : (quotedRoute ?? [...bridge.activeTurns.values()].at(-1) ?? bridge.focus);
+      : (quotedRoute ?? [...bridge.activeTurns.values()].filter((t) => !t.chatCtx?.isExternal).at(-1) ?? bridge.focus ?? scoped);
     const target = rawTarget && extCtx && !('originChatId' in rawTarget && rawTarget.originChatId)
       ? { ...rawTarget, originChatId: extCtx.originChatId }
       : rawTarget;
@@ -263,8 +268,52 @@ async function handleDefaultCommand(
     return true;
   }
 
-  // 静音 / 解除静音：@bot mute|静音 [群] / @bot unmute|解除静音 [群]
-  const muteM = raw.match(/^(mute|静音|unmute|解除静音)(?:\s+([\s\S]+))?$/i);
+  if (!isExternal && /^#\d+/.test(raw)) {
+    const handled = await handleInboxRefAction(bridge, raw, {
+      handleCardReply: (card, isQ, txt) => handleCardReplyText(bridge, card, isQ, txt),
+      explicitCommand: true,
+    });
+    if (handled) return true;
+  }
+
+  // 免打扰快捷管理：@bot quiet|免打扰 [on|off|flush|status]
+  const quietM = raw.match(/^(?:quiet|免打扰)(?:\s+([\s\S]+))?$/i);
+  if (quietM) {
+    const sub = (quietM[1] ?? '').trim().toLowerCase();
+    const qh = bridge.quietHours;
+    if (!sub || sub === 'status' || sub === '查看') {
+      const stateLabel = qh.enabled ? `已开启（${qh.start} ~ ${qh.end}）` : `已关闭（预设时段 ${qh.start} ~ ${qh.end}）`;
+      await sensSink.say(`🌙 **免打扰状态**：${stateLabel}，当前待汇总通知 ${bridge.quietQueue.length} 条。\n用法：\`${bridge.trigger} quiet on|off|flush\``);
+      return true;
+    }
+    if (/^(?:on|开|开启|enable)$/i.test(sub)) {
+      qh.enabled = true;
+      bridge.syncQuietTimer();
+      await sensSink.say(`🌙 已开启免打扰模式（时段 ${qh.start} ~ ${qh.end}），普通主动推送将在窗口结束后自动汇总。`);
+      return true;
+    }
+    if (/^(?:off|关|关闭|disable)$/i.test(sub)) {
+      qh.enabled = false;
+      const queuedBefore = bridge.quietQueue.length;
+      bridge.syncQuietTimer();
+      await sensSink.say(
+        queuedBefore > 0
+          ? `🔔 已关闭免打扰模式，正在为你汇总发送积攒的 ${queuedBefore} 条通知。`
+          : '🔔 已关闭免打扰模式，恢复即时通知。',
+      );
+      return true;
+    }
+    if (/^(?:flush|汇总|立即汇总|清空)$/i.test(sub)) {
+      const count = await bridge.flushQuietDigest();
+      if (!count) await sensSink.say('当前没有待汇总的免打扰通知。');
+      return true;
+    }
+    await sensSink.say(`用法：\`${bridge.trigger} quiet [on|off|flush|status]\``);
+    return true;
+  }
+
+  // 静音 / 解除静音：@bot mute|静音 [群] / @bot unmute|解除静音|取消静音|恢复通知 [群]
+  const muteM = raw.match(/^(mute|静音|unmute|解除静音|取消静音|恢复通知)(?:\s+([\s\S]+))?$/i);
   if (muteM) {
     const isMute = /^(?:mute|静音)$/i.test(muteM[1]);
     const arg = (muteM[2] ?? '').trim();
@@ -283,16 +332,16 @@ async function handleDefaultCommand(
         return true;
       }
       bridge.setChatMuted(target.id, true);
-      await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`@bot\` 将不再触发，发 \`${bridge.trigger} unmute ${target.id}\` 可恢复。`);
+      await sensSink.say(`🔇 已静音「${target.name}」（\`${target.id}\`），此后在该会话发 \`${bridge.trigger}\` 将不再触发，发 \`${bridge.trigger} unmute ${target.id}\` 可恢复。`);
     } else {
       bridge.setChatAllowed(target.id);
-      await sensSink.say(`✅ 已解除「${target.name}」（\`${target.id}\`）的静音，可正常使用 \`@bot\`。`);
+      await sensSink.say(`✅ 已解除「${target.name}」（\`${target.id}\`）的静音，可正常使用 \`${bridge.trigger}\`。`);
     }
     return true;
   }
 
-  // 多会话查看与模式切换：@bot chats [self|all|reset]
-  const chatsCmdM = raw.match(/^chats(?:\s+([\s\S]+))?$/i);
+  // 多会话查看与模式切换：@bot chats|会话列表 [self|all|reset]
+  const chatsCmdM = raw.match(/^(?:chats|会话列表)(?:\s+([\s\S]+))?$/i);
   if (chatsCmdM) {
     const sub = (chatsCmdM[1] ?? '').trim().toLowerCase();
     if (!sub) {
@@ -323,7 +372,7 @@ async function handleDefaultCommand(
     }
     if (sub === 'self') {
       bridge.setChatMode('self_only');
-      await sensSink.say('🔒 已切换为**仅自聊模式**（外部群/私聊仍保留内存上下文但暂停响应 `@bot`，发 `chats all` 恢复）。');
+      await sensSink.say(`🔒 已切换为**仅自聊模式**（外部群/私聊仍保留内存上下文但暂停响应 \`${bridge.trigger}\`，发 \`${bridge.trigger} chats all\` 恢复）。`);
       return true;
     }
     if (sub === 'all') {
@@ -427,7 +476,7 @@ async function handleDefaultCommand(
     return true;
   }
 
-  // 自聊私密草稿确认回发：@bot sendback [draftId | 改写内容 | confirm]
+  // 自聊私密草稿确认回发：@bot sendback [#N | draftId | 改写内容 | confirm]
   const sendbackM = raw.match(/^(?:sendback|发回)(?:\s+([\s\S]+))?$/i);
   if (sendbackM) {
     if (isExternal) {
@@ -437,7 +486,9 @@ async function handleDefaultCommand(
     const arg = (sendbackM[1] ?? '').trim();
     const confirmM = arg.match(/^(?:confirm|确认|发送|send)(?:\s+(\S+))?$/i);
     if (confirmM) {
-      const targetRef = (confirmM[1] ?? '').trim() || null;
+      const rawRef = (confirmM[1] ?? '').trim() || null;
+      const mapped = rawRef ? resolveInboxDraftOrSendBackRef(bridge, rawRef) : null;
+      const targetRef = mapped?.id ?? rawRef;
       if (targetRef && !bridge.pendingSendBacks.has(targetRef)) {
         const directDraft = bridge.resolvePrivateDraft({ draftId: targetRef });
         if (directDraft) {
@@ -455,7 +506,9 @@ async function handleDefaultCommand(
     }
     const cancelM = arg.match(/^(?:cancel|取消|忽略)(?:\s+(\S+))?$/i);
     if (cancelM) {
-      const targetRef = (cancelM[1] ?? '').trim() || null;
+      const rawRef = (cancelM[1] ?? '').trim() || null;
+      const mapped = rawRef ? resolveInboxDraftOrSendBackRef(bridge, rawRef) : null;
+      const targetRef = mapped?.id ?? rawRef;
       if (targetRef) {
         if (bridge.pendingSendBacks.has(targetRef)) {
           await bridge.cancelSendBack(targetRef);
@@ -475,10 +528,17 @@ async function handleDefaultCommand(
     const tokM = arg.match(/^(\S+)(?:\s+([\s\S]*))?$/);
     if (tokM) {
       const first = tokM[1];
-      if (bridge.privateDrafts.has(first)) {
-        draftId = first;
+      const mapped = resolveInboxDraftOrSendBackRef(bridge, first);
+      if (mapped?.kind === 'draft' || bridge.privateDrafts.has(first)) {
+        draftId = mapped?.id ?? first;
         overrideText = (tokM[2] ?? '').trim();
-      } else if (/^draft_[A-Za-z0-9_-]+$/i.test(first)) {
+      } else if (mapped?.kind === 'sendback') {
+        const sb = bridge.pendingSendBacks.get(mapped.id);
+        if (sb?.draft) {
+          await bridge.requestSendBack(sb.draft, (tokM[2] ?? '').trim());
+          return true;
+        }
+      } else if (/^(?:#\d+|draft_[A-Za-z0-9_-]+)$/i.test(first)) {
         await sensSink.say(`⚠️ 未找到或已过期的草稿 \`${first}\`，请引用最新草稿回复 \`${bridge.trigger} sendback\`。`);
         return true;
       }

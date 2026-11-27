@@ -1,6 +1,7 @@
 import type { ChannelAction, ChannelSendFileInput } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { fmtTokens, usageBar } from './cards.ts';
+import { recordClosedInboxRef } from './inbox.ts';
 import type { BridgeChatContext, KnownChatSummary, MsgRoute, OmbTargetBot, OmbTaskSummary } from './types.ts';
 
 export interface CommandSink {
@@ -128,9 +129,9 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
   const followUpSec = Math.round(bridge.followUpWindowMs / 1000);
   const generalLines = [
     `**通用（\`${t}\` / \`@Bot名\` / \`@群名\`）**`,
-    `- \`${t} <问题>\` / \`${t}!\`：提问 / 外群私密起草`,
+    `- \`${t} <问题>\` / \`${t}!\` / \`/goal\`：提问 / 外群私密起草 / 多步目标`,
     '- `new [话题]` / `task [号]` / `stop`：会话与停止',
-    '- `status [群]`：查看状态、上下文与待处理事项（仅单Bot）',
+    '- `status [群]`：查看收件箱、状态与上下文（仅单Bot）',
     '- `compact [群]`：压缩上下文（仅单Bot）',
     `- \`bye\`：退出自聊 ${followUpSec}s 免 \`@\` 续聊`,
   ];
@@ -141,8 +142,8 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
   }
   const ownerLines = [
     `**仅 \`${t}\` 可用**`,
-    '- `sendback [ID]`：草稿发回（或引用草稿回 `确认发送`）',
-    '- `chats` / `mute|unmute`：管群与静音',
+    '- `sendback [ID]`：草稿发回（或回 `#编号 确认/取消`）',
+    '- `chats` / `mute|unmute` / `quiet`：管群、静音与免打扰',
     '- `summary <群>`：跨群纪要',
     '- `bind [项目]`：绑定项目目录',
     '- `delegate <私聊> <问题>`：私聊委托',
@@ -153,7 +154,7 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
     '',
     ...ownerLines,
     '',
-    '💡 卡片回 `1/2/0` 或 `ok/always/no/skip`',
+    '💡 收件箱回 `#编号 1/0/确认/取消`，卡片回 `1/2/0` 或 `ok/always/no/skip`',
     `📄 发 \`${t} help\` 获取完整图文指南`,
   ].join('\n');
 }
@@ -205,13 +206,15 @@ export async function stopTarget(
 ): Promise<void> {
   const say = sink?.say ?? ((t: string, r?: MsgRoute | { targetChatId?: string | null } | null, rt?: string | null, a?: ChannelAction[] | null) => bridge.say(t, r, rt, a));
   const matches = [...bridge.activeTurns.values()].filter((t) => {
-    if (isExternal && target.originChatId && t.chatCtx?.originChatId && t.chatCtx.originChatId !== target.originChatId) {
-      return false;
+    if (isExternal) {
+      if (target.originChatId && t.chatCtx?.originChatId !== target.originChatId) return false;
+      return t.threadId === target.threadId;
     }
-    return t.threadId === target.threadId || (!isExternal && t.botId === target.botId);
+    if (t.chatCtx?.isExternal) return false;
+    return target.threadId ? t.threadId === target.threadId : t.botId === target.botId;
   });
   if (!matches.length && !isExternal) {
-    const fallback = [...bridge.activeTurns.values()].at(-1);
+    const fallback = [...bridge.activeTurns.values()].filter((t) => !t.chatCtx?.isExternal).at(-1);
     if (fallback) matches.push(fallback);
   }
   for (const active of matches) {
@@ -223,6 +226,15 @@ export async function stopTarget(
       bridge.saveState();
     }
   }
+  let removedCards = false;
+  for (const [k, c] of bridge.pendingCards) {
+    if (target.threadId && c.threadId === target.threadId) {
+      recordClosedInboxRef(bridge, c.inboxRef, c.title || '审批卡');
+      bridge.pendingCards.delete(k);
+      removedCards = true;
+    }
+  }
+  if (removedCards) bridge.saveState();
   const cancelledQ = target.threadId && typeof bridge.cancelThreadQueue === 'function'
     ? await bridge.cancelThreadQueue(target.threadId)
     : 0;
@@ -282,7 +294,7 @@ export async function runQueueAction(
     await bridge.steerLatestQueue(tid ?? null, sensSink.chatId, { banner: sensSink.banner });
     return true;
   }
-  if (/^(cancel|取消排队)$/i.test(raw)) {
+  if (/^(cancel|取消|取消排队)$/i.test(raw)) {
     const tid = quotedRoute?.threadId ?? target?.threadId ?? (chatCtx?.isExternal ? null : bridge.focus?.threadId);
     await bridge.cancelLatestQueue(tid ?? null, sensSink.chatId, { banner: sensSink.banner });
     return true;

@@ -163,6 +163,29 @@ export function findUnauthorizedProjectMention(
   return null;
 }
 
+const ABS_FS_PATH_RE = /[a-zA-Z]:[\\/][^\s"'`<>|*?]+|\/(?:srv|home|Users|var|etc|opt|tmp|root|mnt|Volumes)\/[^\s"'`]+/g;
+
+/** 检测文本中是否包含落在授权项目目录之外的本机绝对路径（防越界路径探测）。 */
+export function findUnauthorizedPathMention(
+  text: string,
+  projects: ProjectConfig[] = [],
+  allowedProjects: string[] | null = null,
+): string | null {
+  if (!text || !Array.isArray(allowedProjects) || !allowedProjects.length) return null;
+  const authorizedRoots = projects
+    .filter((p) => p?.path && isProjectAuthorized(p, allowedProjects))
+    .map((p) => p.path);
+  const matches = String(text).match(ABS_FS_PATH_RE);
+  if (!matches) return null;
+  for (const rawHit of matches) {
+    const clean = rawHit.replace(/[),.;:!?，。；：！？]+$/, '');
+    if (!clean) continue;
+    const insideAllowed = authorizedRoots.some((root) => isSameOrInsidePath(clean, root));
+    if (!insideAllowed) return clean;
+  }
+  return null;
+}
+
 /**
  * 解析当次提问的目标代码作用域（优先级：显式提及白名单项目 > 会话已绑定项目 > 无绑定）。
  */

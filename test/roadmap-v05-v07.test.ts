@@ -393,7 +393,12 @@ test('Step 2 (v0.6): SharedContextManager git pull --ff-only + 2-tier external c
     assert.equal(sentPrompts.length, 0);
     assert.equal(bridge.status().policyDenials, 1);
 
-    await transport.emit({ id: 'bob_1', ts: Date.now() + 1, chat: { id: 'grp_team', type: 'group', name: '研发群' }, sender: { id: 'u_bob', name: 'Bob', isSelf: false }, text: '@bot 查下 private-hr 和 order 超时原因' });
+    await transport.emit({ id: 'bob_denied_1', ts: Date.now() + 1, chat: { id: 'grp_team', type: 'group', name: '研发群' }, sender: { id: 'u_bob', name: 'Bob', isSelf: false }, text: '@bot 查下 private-hr 和 order 超时原因' });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(sentPrompts.length, 0);
+    assert.equal(bridge.status().policyDenials, 2);
+
+    await transport.emit({ id: 'bob_1', ts: Date.now() + 2, chat: { id: 'grp_team', type: 'group', name: '研发群' }, sender: { id: 'u_bob', name: 'Bob', isSelf: false }, text: '@bot 查下 order 超时原因' });
     await until(() => sent.some((s) => s.chatId === 'grp_team'));
     assert.match(String(sentPrompts[0].text), /<readonly-guard>[\s\S]*STRICT_READONLY/);
     assert.match(String(sentPrompts[0].text), /bound_project: order/);

@@ -175,6 +175,7 @@ function normalizeCardQuestions(raw: unknown): NormalizedCardQuestion[] {
 
 export interface CardRenderOpts {
   multiCard?: boolean;
+  inboxRef?: number;
 }
 
 function formatQuoteBlock(text: string, maxChars: number): string {
@@ -183,9 +184,15 @@ function formatQuoteBlock(text: string, maxChars: number): string {
   return clipped.split('\n').map((line) => (line.trim() ? `> ${line}` : '>')).join('\n');
 }
 
-const multiCardNotice = (multiCard?: boolean): string => (
-  multiCard ? '\n> 💡 当前有多条待确认，请**引用本条消息**回复' : ''
-);
+const cardFooterNote = (opts: CardRenderOpts = {}, skipOnly = false): string => {
+  const ref = opts.inboxRef;
+  if (opts.multiCard) {
+    return ref
+      ? `\n> 💡 当前有多条待确认，请**引用本条消息**回复（或直接回复 \`#${ref} ${skipOnly ? '0' : '1/0'}\`）`
+      : '\n> 💡 当前有多条待确认，请**引用本条消息**回复';
+  }
+  return ref ? ` · 编号 \`#${ref}\`` : '';
+};
 
 /** 渲染提问卡指定题号的 Markdown 伪卡片文案（无真卡片按钮，适配全 IM 客户端）。 */
 export function formatQuestionStepPrompt(
@@ -215,10 +222,10 @@ export function formatQuestionStepPrompt(
     const multiHint = q.multiSelect ? '（多选 **`1,2`**）' : '';
     lines.push(
       '---',
-      `👉 回复序号 **\`1\`**${multiHint}、直接打字自定义，或 **\`0\` 取消**${multiCardNotice(opts.multiCard)}`,
+      `👉 回复序号 **\`1\`**${multiHint}、直接打字自定义，或 **\`0\` 取消**${cardFooterNote(opts)}`,
     );
   } else {
-    lines.push('---', `👉 直接回复你的想法，或 **\`0\` 取消**${multiCardNotice(opts.multiCard)}`);
+    lines.push('---', `👉 直接回复你的想法，或 **\`0\` 取消**${cardFooterNote(opts)}`);
   }
   return { text: lines.join('\n'), actions: [] };
 }
@@ -266,7 +273,8 @@ export function formatCardPrompt(
   opts: CardRenderOpts = {},
 ): FormattedCardPrompt {
   const head = whoPrefix ? `${whoPrefix} ` : '';
-  const multiNote = multiCardNotice(opts.multiCard);
+  const footNote = cardFooterNote(opts);
+  const skipNote = cardFooterNote(opts, true);
   if (msg.card) {
     const info = extractCardInfo(msg)!;
     if (info.isQuestion) {
@@ -284,9 +292,9 @@ export function formatCardPrompt(
       lines.push('```sh', clip(cmdRaw, 200), '```');
     }
     if (info.isReviewProposal) {
-      lines.push('---', `👉 回复 **\`1\` 允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`no\`）${multiNote}`);
+      lines.push('---', `👉 回复 **\`1\` 允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`no\`）${footNote}`);
     } else {
-      lines.push('---', `👉 回复 **\`1\` 允许** · **\`2\` 总是允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`always\` / \`no\`）${multiNote}`);
+      lines.push('---', `👉 回复 **\`1\` 允许** · **\`2\` 总是允许** · **\`0\` 拒绝**（也支持 \`ok\` / \`always\` / \`no\`）${footNote}`);
     }
     return { text: lines.join('\n'), actions: [], info };
   }
@@ -306,7 +314,7 @@ export function formatCardPrompt(
     const lines = [`${head}⚡ **并发任务待确认 · ${clip(b.task || '并行任务', 120)}**`];
     if (metaParts.length) lines.push(`> ${metaParts.join(' · ')}`);
     if (sampleLines.length) lines.push(...sampleLines);
-    lines.push('---', `👉 回复 **\`1\` 开始执行** · **\`0\` 取消**（也支持 \`ok\` / \`no\`）${multiNote}`);
+    lines.push('---', `👉 回复 **\`1\` 开始执行** · **\`0\` 取消**（也支持 \`ok\` / \`no\`）${footNote}`);
     return {
       text: lines.join('\n'),
       actions: [],
@@ -315,21 +323,21 @@ export function formatCardPrompt(
   }
   if (msg.secret) {
     return {
-      text: `${head}🔐 **需要补充凭据 · 「${msg.secret.label || msg.secret.target || '密钥'}」**\n> 请到管理后台输入对应凭据。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      text: `${head}🔐 **需要补充凭据 · 「${msg.secret.label || msg.secret.target || '密钥'}」**\n> 请到管理后台输入对应凭据。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${skipNote}`,
       actions: [],
       info: { cardKind: 'secret' },
     };
   }
   if (msg.connector) {
     return {
-      text: `${head}🔌 **需要授权连接器 · 「${msg.connector.label || msg.connector.slug || ''}」**\n> 请到管理后台完成连接器授权。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      text: `${head}🔌 **需要授权连接器 · 「${msg.connector.label || msg.connector.slug || ''}」**\n> 请到管理后台完成连接器授权。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${skipNote}`,
       actions: [],
       info: { cardKind: 'connector' },
     };
   }
   if (msg.signIn) {
     return {
-      text: `${head}🔑 **需要完成登录验证**\n> 请到管理后台完成登录后继续。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${multiNote}`,
+      text: `${head}🔑 **需要完成登录验证**\n> 请到管理后台完成登录后继续。\n---\n👉 如需跳过，请回复 **\`0\` 跳过**（也支持 \`skip\` / \`跳过\`）${skipNote}`,
       actions: [],
       info: { cardKind: 'signIn' },
     };
