@@ -131,6 +131,7 @@ export class OpenMausBotBridge {
   pendingMediaTimer: ReturnType<typeof setTimeout> | null = null;
   pendingMediaTarget: OmbTargetBot | null = null;
   contextWarnedThreads = new Set<string>();
+  threadInjectedScope = new Map<string, string>();
   lastAutoCompactAt = new Map<string, number>();
   privateDrafts = new Map<string, PrivateDraft>();
   lastPrivateDraftId: string | null = null;
@@ -349,6 +350,15 @@ export class OpenMausBotBridge {
     return raw;
   }
 
+  /** 返回样式 A 徽章方括号内展示的短名（默认主 Bot `co-bot` 跟随触发词简化为 `bot`，自定义名与子 Bot 保留原名）。 */
+  badgeName(botId: string | null | undefined, rawName = '', { isGroup = false }: { isGroup?: boolean } = {}): string {
+    const shown = this.displayBotName(botId, rawName, { isGroup });
+    if (!isGroup && this.botName === 'co-bot' && shown === 'co-bot') {
+      return this.trigger.replace(/^@/, '').trim() || 'bot';
+    }
+    return shown;
+  }
+
   getEffectiveTriggerAliases(): string[] {
     const raw = Array.isArray(this.chats?.triggerAliases) ? this.chats.triggerAliases : [];
     const out: string[] = [];
@@ -374,8 +384,8 @@ export class OpenMausBotBridge {
       speakerBotId?: string | null;
     } = {},
   ): string {
-    const shown = this.displayBotName(botId, botName, { isGroup });
-    const shownSpeaker = speakerName ? this.displayBotName(speakerBotId, speakerName) : '';
+    const shown = this.badgeName(botId, botName, { isGroup });
+    const shownSpeaker = speakerName ? this.badgeName(speakerBotId, speakerName) : '';
     if (isGroup) {
       return shownSpeaker ? `🤖 **[${shown} · ${shownSpeaker}]**` : `🤖 **[${shown}]**`;
     }

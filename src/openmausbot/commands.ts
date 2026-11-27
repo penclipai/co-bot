@@ -784,6 +784,7 @@ export async function handleCommand(
     }
     const newThreadId = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId ?? activeTarget.threadId;
     bridge.contextWarnedThreads.delete(newThreadId);
+    bridge.threadInjectedScope.delete(newThreadId);
     const nextTarget: OmbTargetBot = { ...activeTarget, threadId: newThreadId, ...(isGroup ? { isGroup: true } : {}) };
     const shownNext = showBotName(bridge, nextTarget.id, nextTarget.name, isGroup);
     if (isGroup) {
@@ -844,6 +845,7 @@ export async function handleCommand(
       }
       await bridge.client.compact(activeTarget.id, activeTarget.threadId);
       bridge.contextWarnedThreads.delete(activeTarget.threadId);
+      bridge.threadInjectedScope.delete(activeTarget.threadId);
       await sensSink.say(`🗜️ 已触发 **${shownTargetName}** 压缩当前会话上下文。`, {
         botId: activeTarget.id, botName: shownTargetName, threadId: activeTarget.threadId,
       });

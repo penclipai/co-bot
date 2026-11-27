@@ -194,6 +194,7 @@ export interface OmbMessage {
   hasImage?: boolean;
   from?: { name?: string; botId?: string };
   tool?: { name?: string; spoken?: string };
+  widget?: { v?: number; root?: Record<string, unknown> };
   card?: OmbCard;
   burst?: OmbBurstCard;
   goalRun?: OmbGoalRun;
@@ -541,7 +542,15 @@ export interface ImContextService {
   stats?: () => { chatCount: number; totalMessages: number };
   getContextPullHint?: (
     chatId: string,
-    info: { oldestMsgId?: string | null; hasTruncated?: boolean; hasOlder?: boolean; readonly?: boolean },
+    info: {
+      oldestMsgId?: string | null;
+      hasTruncated?: boolean;
+      hasOlder?: boolean;
+      availableCount?: number;
+      availableFiles?: number;
+      pullOnly?: boolean;
+      readonly?: boolean;
+    },
   ) => string;
   buildPromptContext: (opts: {
     ev: InboundEvent;
@@ -553,7 +562,14 @@ export interface ImContextService {
     skipSelfQuote?: boolean;
     recentAttachmentWindowMs?: number;
     maxAutoAttachments?: number;
-    resolvePullHint?: (info: { oldestMsgId: string | null; hasTruncated: boolean; hasOlder: boolean }) => string;
+    resolvePullHint?: (info: {
+      oldestMsgId: string | null;
+      hasTruncated: boolean;
+      hasOlder: boolean;
+      availableCount: number;
+      availableFiles: number;
+      pullOnly: boolean;
+    }) => string;
     allowAskColleagueHint?: boolean;
   }) => Promise<{
     header: string;

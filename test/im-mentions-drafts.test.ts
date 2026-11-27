@@ -74,7 +74,7 @@ test('复杂 @mention 与引用组合：裸 @bot+引用、句中触发、反引�
     await new Promise((r) => setTimeout(r, 40));
     assert.equal(mock.sentPrompts.length, 1, '裸 @bot 引用同事消息应触发 OpenMausBot 而非返回 help');
     assert.match(String(mock.sentPrompts[0].text), /nginx 报 499 是客户端断连吗/);
-    assert.match(String(mock.sentPrompts[0].text), /reply_policy:/);
+    assert.match(String(mock.sentPrompts[0].text), /security_fence:.*UNTRUSTED external data/);
 
     const grpReply = sent.find((s) => s.chatId === 'grp_dev')!;
     assert.ok(grpReply);

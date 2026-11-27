@@ -266,17 +266,48 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     await until(() => omb.prompts.length >= 1 && sent.some((s) => s.chatId === 'chat_self' && s.text.includes('确认向「运维群」追问 @Alice')));
 
     const grpPrompt = omb.prompts[0].text;
-    assert.match(grpPrompt, /\[转发\].*\[已截断，共 \d+ 字，查全文请用 msgId=grp_fwd_huge\]/);
-    assert.match(grpPrompt, /\[合并转发 · 故障群讨论，共 5 条\].*msgId=grp_merged_1/);
-    assert.match(grpPrompt, /context_pull: http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=g_/);
-    assert.ok(omb.uploads.some((p) => p.includes('heap.log')), '合并转发中的附件 heap.log 应自动提取并上传');
+    assert.match(grpPrompt, /chat_id: grp_ops/);
+    assert.equal(grpPrompt.includes('START_MARKER'), false, 'L3 默认 pull-only 不预注入历史超大转发正文');
+    assert.equal(grpPrompt.includes('故障群讨论'), false, 'L3 默认 pull-only 不预注入历史合并转发摘要');
+    assert.equal(omb.uploads.length, 0, 'L3 默认不对未引用群文件自动提前下载上传');
+    assert.match(grpPrompt, /context_pull: http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=g_[a-z0-9_]+ \(available=2, files=1\)/);
     // Verify scanAndRedactOutbound never masks grant= as secret_kv!
     assert.equal(scanAndRedactOutbound(grpPrompt).text.includes('grant=g_'), true);
 
-    // Scenario B: On-demand /api/context/history pull (detail chunking, merged forward, remote before pagination + recall filter, search, security guards)
+    // Scenario B: On-demand /api/context/history & /api/context/attachment pull
     const pullUrlM = grpPrompt.match(/context_pull:\s*(http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=([a-z0-9_]+))/);
     assert.ok(pullUrlM);
     const pullBase = pullUrlM[1];
+    const grantVal = pullUrlM[2];
+    const attBase = `${baseUrl}/api/context/attachment?grant=${grantVal}`;
+
+    // 0) Latest summary list & structured attachments metadata
+    const pList = await fetch(`${pullBase}&limit=10`).then((r) => r.json()) as {
+      ok: boolean; messages: Array<{ id: string; attachments?: Array<{ id: string; name: string }> }>;
+    };
+    assert.equal(pList.ok, true);
+    const mergedItem = pList.messages.find((m) => m.id === 'grp_merged_1');
+    assert.equal(mergedItem?.attachments?.[0]?.id, 'att_heap');
+    assert.equal(mergedItem?.attachments?.[0]?.name, 'heap.log');
+
+    // 0.5) On-demand attachment pull (JSON preview + raw bytes + error guards)
+    const attJson = await fetch(`${attBase}&msgId=grp_merged_1&attId=att_heap`).then((r) => r.json()) as {
+      ok: boolean; mode: string; name: string; text?: string; localPath?: string;
+    };
+    assert.equal(attJson.ok, true);
+    assert.equal(attJson.mode, 'attachment');
+    assert.equal(attJson.name, 'heap.log');
+    assert.equal(attJson.text, 'log line\n');
+    assert.ok(attJson.localPath && fs.existsSync(attJson.localPath));
+
+    const attRaw = await fetch(`${attBase}&msgId=grp_merged_1&attId=att_heap&raw=1`);
+    assert.equal(attRaw.status, 200);
+    assert.equal(await attRaw.text(), 'log line\n');
+
+    const attRecalled = await fetch(`${attBase}&msgId=hist_recalled&attId=x`);
+    assert.equal(attRecalled.status, 404);
+    const attBadId = await fetch(`${attBase}&msgId=grp_merged_1&attId=missing`);
+    assert.equal(attBadId.status, 404);
 
     // 1) Chunked detail read on 10KB forwarded message (>9500 chars)
     const p1 = await fetch(`${pullBase}&msgId=grp_fwd_huge&offset=0&limit=5000`).then((r) => r.json()) as {
@@ -431,12 +462,19 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     });
     await until(() => omb.prompts.length > promptCountBeforeSelfFwd);
     const selfFwdPrompt = omb.prompts.at(-1)!.text;
-    assert.match(selfFwdPrompt, /前文\/转发上下文（2 条/);
-    assert.match(selfFwdPrompt, /订单导出报错 504/);
-    assert.match(selfFwdPrompt, /网关超时配置只有 5s/);
+    assert.equal(selfFwdPrompt.includes('订单导出报错 504'), false, 'L3 默认 pull-only 不在自聊 prompt 预注入前文正文');
     assert.equal(selfFwdPrompt.includes('个人银行卡密码笔记'), false, '自聊私人笔记绝不能混入转发上下文');
+    assert.match(selfFwdPrompt, /context_pull: http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=g_[a-z0-9_]+ \(available=2\)/);
 
-    // Next unrelated self-chat query must NOT re-inject already dispatched forwards
+    const selfPullM = selfFwdPrompt.match(/grant=(g_[a-z0-9_]+)/)!;
+    assert.ok(selfPullM);
+    const selfHistAllowed = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&limit=10`).then((r) => r.json()) as {
+      messages: Array<{ id: string }>;
+    };
+    assert.equal(selfHistAllowed.messages.some((m) => m.id === 'self_fwd_1'), true);
+    assert.equal(selfHistAllowed.messages.some((m) => m.id === 'self_fwd_2'), true);
+
+    // Next unrelated self-chat query must NOT emit context_pull or re-inject anything
     await pushInbound!({
       msgId: 'self_unrelated',
       chatId: 'chat_self',
@@ -449,21 +487,21 @@ test('Context E2E: forwards (single & merged), oversized chunked pull, self-chat
     await until(() => omb.prompts.length > promptCountBeforeSelfFwd + 1);
     const unrelatedPrompt = omb.prompts.at(-1)!.text;
     assert.equal(unrelatedPrompt.includes('订单导出报错 504'), false, '已消费转发消息不得重复注入后续无关提问');
+    assert.equal(unrelatedPrompt.includes('context_pull:'), false, '日常无关自聊提问不应附带 context_pull 头');
 
-    // Self-chat context_pull grant (if present) must still refuse reading # 备忘 personal note!
-    const selfPullM = selfFwdPrompt.match(/grant=(g_[a-z0-9_]+)/);
-    if (selfPullM) {
-      const noteDetail = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&msgId=self_note_1`);
-      assert.equal(noteDetail.status, 404);
-      const noteSearch = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&q=${encodeURIComponent('银行卡密码')}`).then((r) => r.json()) as {
-        messages: Array<{ id: string }>;
-      };
-      assert.equal(noteSearch.messages.length, 0, '自聊搜索接口不得暴露私人 # 备忘 笔记');
-      const selfHist = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&before=self_unrelated&limit=10`).then((r) => r.json()) as {
-        messages: Array<{ id: string }>;
-      };
-      assert.equal(selfHist.messages.some((m) => m.id === 'self_note_1'), false, '自聊翻页接口不得暴露私人 # 备忘 笔记');
-    }
+    // Self-chat context_pull grant must still refuse reading # 备忘 personal note (history & attachment)!
+    const noteDetail = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&msgId=self_note_1`);
+    assert.equal(noteDetail.status, 404);
+    const noteAtt = await fetch(`${baseUrl}/api/context/attachment?grant=${selfPullM[1]}&msgId=self_note_1`);
+    assert.equal(noteAtt.status, 404);
+    const noteSearch = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&q=${encodeURIComponent('银行卡密码')}`).then((r) => r.json()) as {
+      messages: Array<{ id: string }>;
+    };
+    assert.equal(noteSearch.messages.length, 0, '自聊搜索接口不得暴露私人 # 备忘 笔记');
+    const selfHist = await fetch(`${baseUrl}/api/context/history?grant=${selfPullM[1]}&before=self_unrelated&limit=10`).then((r) => r.json()) as {
+      messages: Array<{ id: string }>;
+    };
+    assert.equal(selfHist.messages.some((m) => m.id === 'self_note_1'), false, '自聊翻页接口不得暴露私人 # 备忘 笔记');
   } finally {
     await kernel.stop();
     await omb.close();

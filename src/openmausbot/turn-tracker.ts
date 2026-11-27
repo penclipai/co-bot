@@ -17,6 +17,8 @@ import type {
 const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
 
 /** 收集属于本轮次的全部 Bot 消息（包含缺少 requestMessageId 但通过 sentInTurn / 位置窗口关联的独立附件消息）。 */
+const isDeliverableTextKind = (kind: unknown): boolean => kind === 'text' || kind === 'widget';
+
 function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, sendId: string | null): OmbMessage[] {
   const uIdx = messages.findLastIndex(
     (m) => m.role === 'user' && Boolean((reqMsgId && m.id === reqMsgId) || (sendId && m.sendId === sendId)),
@@ -365,7 +367,7 @@ export function createTurnTracker(
             if (job.state === 'idle' && (bridge.now() - startedAt) < 2500) {
               const res = await bridge.client.getMessages(threadId, 10);
               const msgs = res.messages ?? [];
-              const hasReply = msgs.some((m) => m.role === 'bot' && m.kind === 'text' && (!reqMsgId || m.requestMessageId === reqMsgId));
+              const hasReply = msgs.some((m) => m.role === 'bot' && isDeliverableTextKind(m.kind) && (!reqMsgId || m.requestMessageId === reqMsgId));
               if (!hasReply) {
                 await new Promise((r) => setTimeout(r, 400));
                 continue;
@@ -408,7 +410,7 @@ export function createTurnTracker(
       const matched = collectTurnMessages(messages, reqMsgId, sendId);
 
       const pendingMsg = matched.find((m) => messageNeedsInput(m));
-      const earlyTexts = matched.filter((m) => m.kind === 'text');
+      const earlyTexts = matched.filter((m) => isDeliverableTextKind(m.kind));
       const hasEarlyContent = Boolean(
         pendingMsg
         || deliveredIntermediateIds.size > 0
@@ -452,7 +454,7 @@ export function createTurnTracker(
 
       const seenInMatched = new Set(matched.map((m) => m?.id).filter((x): x is string => Boolean(x)).map(String));
       const missingIntermediates = droppedIntermediates.filter((m) => !m?.id || !seenInMatched.has(String(m.id)));
-      const texts = matched.filter((m) => m.kind === 'text');
+      const texts = matched.filter((m) => isDeliverableTextKind(m.kind));
       const rawUndelivered = texts.filter((m) => {
         if (!m.id) return deliveredIntermediateIds.size === 0;
         const mid = String(m.id);
@@ -462,7 +464,7 @@ export function createTurnTracker(
         ? [...missingIntermediates, ...rawUndelivered]
         : rawUndelivered;
       if (silentProgress) {
-        const terminalOnly = undeliveredTexts.filter((m) => m.turnTerminal && String(m.text ?? '').trim());
+        const terminalOnly = undeliveredTexts.filter((m) => (m.turnTerminal || m.kind === 'widget') && String(m.text ?? '').trim());
         if (terminalOnly.length) undeliveredTexts = terminalOnly;
       }
       const hasAnyText = undeliveredTexts.some((m) => String(m.text ?? '').trim());
@@ -617,7 +619,7 @@ export function createTurnTracker(
         enqueueEmit(() => emitCard(botId, botName, threadId, msg, { isGroup, chatCtx })).catch(() => {});
         return;
       }
-      if (msg.kind === 'text' && !msg.turnTerminal) {
+      if (isDeliverableTextKind(msg.kind) && !msg.turnTerminal) {
         const trimmed = String(msg.text ?? '').trim();
         const mid = msg.id ? String(msg.id) : null;
         if (!trimmed || (mid && (bridge.deliveredOmbIds.has(mid) || deliveredIntermediateIds.has(mid)))) return;
@@ -627,7 +629,7 @@ export function createTurnTracker(
           clearTimeout(progressTimer);
           progressTimer = null;
         }
-        if (silentProgress || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles)) {
+        if ((silentProgress && msg.kind !== 'widget') || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles)) {
           heldIntermediates.push(msg);
           return;
         }

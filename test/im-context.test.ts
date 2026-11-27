@@ -107,6 +107,7 @@ test('任何群/私聊仅本人触发、携带引用+附件+历史并隔离 Thre
     resultChars: 1500,
     sendRetries: 0,
     followUpWindowMs: 120_000,
+    chats: { injectRecentContext: true },
   });
   await bridge.start();
 

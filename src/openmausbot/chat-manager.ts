@@ -140,6 +140,7 @@ export async function compactExternalChat(
   for (const entry of picked) {
     await bridge.client.compact(entry.botId, entry.threadId);
     bridge.contextWarnedThreads.delete(entry.threadId);
+    bridge.threadInjectedScope.delete(entry.threadId);
     const shownName = typeof bridge.displayBotName === 'function'
       ? bridge.displayBotName(entry.botId, entry.botName)
       : (entry.botName || bridge.botName || 'co-bot');
@@ -223,10 +224,11 @@ export async function requestSendBack(
       : `，未匹配到「${draft.followUp.targetName}」的用户 ID，将按纯文本提及发出`)
     : '';
   const extPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
+  const badgeLabel = bridge.badgeName(bridge.chiefBotId, bridge.botName);
   const attrLabel = draft.delegationRe
     ? '协作结果回传，带 🤖 协议标识'
     : (useBotPrefix && extPrefix
-      ? (extPrefix.trim() === '🤖' ? `以 🤖 **[${bridge.botName}]** 名义` : `以「${extPrefix.trim()}」前缀`)
+      ? (extPrefix.trim() === '🤖' ? `以 🤖 **[${badgeLabel}]** 名义` : `以「${extPrefix.trim()}」前缀`)
       : '以本人名义直接发出');
   const titleText = draft.followUp
     ? `**📤 确认向「${draft.originChatName || draft.originChatId}」追问 @${draft.followUp.targetName}**`
@@ -256,8 +258,9 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
   } else if (applyBotPrefix) {
     const extPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
     if (extPrefix) {
+      const badgeLabel = bridge.badgeName(bridge.chiefBotId, bridge.botName);
       safeBody = extPrefix.trim() === '🤖'
-        ? attachBotBadge(`🤖 **[${bridge.botName}]**`, safeBody)
+        ? attachBotBadge(`🤖 **[${badgeLabel}]**`, safeBody)
         : formatExternalBotPrefix(safeBody, extPrefix);
     }
   }

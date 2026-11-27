@@ -104,11 +104,12 @@ export async function claimUploads(
   originChatId: string | null = null,
   contextAttachments: InboundAttachment[] = [],
   errChatId: string | null = null,
+  { allowPendingFileMsgs = true }: { allowPendingFileMsgs?: boolean } = {},
 ): Promise<{ uploads: ClaimedUpload[]; transcripts: ClaimedTranscript[] }> {
   const ids: string[] = [];
   if (mid && bridge.fileMsgs.has(mid)) ids.push(mid);
   if (quotedId && bridge.fileMsgs.has(quotedId)) ids.push(quotedId);
-  if (!ids.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
+  if (allowPendingFileMsgs && !ids.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
     const now = bridge.now();
     for (const [id, entry] of bridge.fileMsgs) {
       if (!entry.used && now - entry.at < 10 * 60 * 1000 && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
@@ -357,6 +358,7 @@ export async function deliverBotReply(
   const quoteReplyId = (!isExternal || chatCtx?.privateReply) ? null : (chatCtx?.replyToImMsgId ?? null);
   const speakerBotId = isGroup ? (finalMsg?.from?.botId || null) : null;
   const shownName = bridge.displayBotName(botId, botName, { isGroup });
+  const badgeShown = bridge.badgeName(botId, botName, { isGroup });
   const shownSpeaker = speakerName ? bridge.displayBotName(speakerBotId, speakerName) : '';
   const who = bridge.botPrefix(botId, botName, { proactive: false, isGroup, speakerName, speakerBotId });
   const originName = chatCtx?.chatName || chatCtx?.originChatId || '';
@@ -411,7 +413,7 @@ export async function deliverBotReply(
   const badge = proactive
     ? ''
     : (isDirectExternalReply && !isDirectDelegationRes
-      ? (useDefaultExtBadge ? (who || `🤖 **[${shownName}]**`) : '')
+      ? (useDefaultExtBadge ? (who || `🤖 **[${badgeShown}]**`) : '')
       : who);
 
   let bodyCore = safeBody;
@@ -655,7 +657,7 @@ export async function maybeWarnHighContext(
     if (!ctx?.window || !ctx?.tokens) return;
     const ratio = ctx.tokens / ctx.window;
     const pct = Math.min(100, Math.round(ratio * 100));
-    const autoThresh = Number(bridge.chats.autoCompactThreshold ?? 0.92);
+    const autoThresh = Number(bridge.chats.autoCompactThreshold ?? 0.75);
 
     if (chatCtx?.isExternal && autoThresh > 0 && ratio >= autoThresh && typeof bridge.client.compact === 'function') {
       const lastAt = bridge.lastAutoCompactAt.get(threadId) || 0;
@@ -664,6 +666,7 @@ export async function maybeWarnHighContext(
         trimMapCap(bridge.lastAutoCompactAt, 200);
         await bridge.client.compact(botId, threadId);
         bridge.contextWarnedThreads.delete(threadId);
+        bridge.threadInjectedScope.delete(threadId);
         const originBanner = formatOriginBanner(chatCtx, bridge.selfChat, bridge.selfChat, '的会话维护');
         await bridge.say(
           `${originBanner}🗜️ 该群隔离上下文已达 ${pct}%（${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.window)}），已自动后台压缩，群内零打扰。`,

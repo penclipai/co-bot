@@ -186,20 +186,20 @@ test('Brand isolation: zero MausBot/OpenMausBot leaks across all user-facing rep
 
     await tr.emitUser('@co-bot 你好');
     await until(() => tr.sent.some((m) => m.text.includes('已处理：你好')));
-    assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/);
+    assert.match(tr.sent.at(-1)!.text, /^🤖 \[bot\] /);
 
     await tr.emitUser('@cobot 测试英文别名');
     await until(() => tr.sent.some((m) => m.text.includes('测试英文别名')));
-    assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/);
+    assert.match(tr.sent.at(-1)!.text, /^🤖 \[bot\] /);
 
     await tr.emitUser('@Plum 查一下构建');
     await until(() => tr.sent.some((m) => m.text.includes('Plum处理：查一下构建')));
-    assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[Plum\]\*\*/);
+    assert.match(tr.sent.at(-1)!.text, /^🤖 \[Plum\] /);
 
     await tr.emitUser('@项目组 对齐方案');
     await until(() => tr.sent.some((m) => m.text.includes('协调方案已对齐')) && tr.sent.some((m) => m.text.includes('接口已实现')));
-    assert.ok(tr.sent.some((m) => m.text.includes('🤖 **[项目组 · co-bot]**')));
-    assert.ok(tr.sent.some((m) => m.text.includes('🤖 **[项目组 · Plum]**')));
+    assert.ok(tr.sent.some((m) => m.text.includes('🤖 [项目组 · bot] ')));
+    assert.ok(tr.sent.some((m) => m.text.includes('🤖 [项目组 · Plum] ')));
 
     await tr.emitUser('@bot 超长正文输出测试');
     await until(() => tr.filesSent.length === 1);
@@ -281,7 +281,7 @@ test('Custom botName & client.resolveBot support co-bot/cobot/custom aliases sea
     await bridge.start();
     await tr.emitUser('@协调官 汇报进展');
     await until(() => tr.sent.some((m) => m.text.includes('已处理：汇报进展')));
-    assert.match(tr.sent.at(-1)!.text, /^🤖 \*\*\[协调官\]\*\*/);
+    assert.match(tr.sent.at(-1)!.text, /^🤖 \[协调官\] /);
 
     await tr.emitUser('@bot status');
     await until(() => tr.sent.some((m) => m.text.includes('**✅ 协调官 在线**')));

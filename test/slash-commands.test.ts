@@ -112,7 +112,7 @@ test('E2E: /goal mode, goal.run progress & completion across single bot and grou
     await transport.emitUser('@bot /goal 梳理本周发布风险');
     await until(() => sent.some((m) => m.text.includes('Goal完成：无高危阻断项')));
     assert.ok(sent.some((m) => m.text.includes('目标推进中（第 1/6 步）')));
-    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/);
+    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[bot\]\*\*/);
 
     // 3. 多 Bot 群组 @研发组 /goal：走 sendGroupMessage 且带 mode="goal"
     omb.setScenario(({ reqMsg, mode, threadId, messages, jobs, broadcast, nextId }) => {
@@ -313,7 +313,7 @@ test('E2E: /burst preview card -> IM ok/no dispatch, merged reply delivery (even
     assert.equal(bridge.activeBursts.size, 0, 'done 与汇总文本均到达后应立即清理 activeBursts');
     assert.deepEqual(omb.burstActions[0], { burstId: 'burst_1', action: 'run' });
     assert.ok(sent.some((m) => m.text.includes('已启动并发拆分任务')));
-    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/);
+    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[bot\]\*\*/);
 
     // Case B: 第二个 burst 提案 -> 用户回复 0 -> 调用 /cancel
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
@@ -575,7 +575,7 @@ test('E2E: nested card.questionRequest multi-question onboarding card & profileR
     await transport.emitUser('1');
     await until(() => omb.responds.length === 2);
     assert.equal(omb.responds[1].behavior, 'allow');
-    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*\n---\n✅ /);
+    assert.match(sent.at(-1)!.text, /^🤖 \[bot\] ✅ /);
   } finally {
     await bridge.stop();
     await omb.close();

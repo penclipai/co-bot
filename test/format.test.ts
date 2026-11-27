@@ -304,7 +304,8 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
   assert.equal(cfg.chats.externalSanitizeMentions, 'all');
   assert.equal(cfg.chats.recentAttachmentWindowMs, 120_000);
   assert.equal(cfg.chats.maxAutoAttachments, 4);
-  assert.equal(cfg.chats.autoCompactThreshold, 0.92);
+  assert.equal(cfg.chats.autoCompactThreshold, 0.75);
+  assert.equal(cfg.chats.injectRecentContext, false);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   assert.match(clipSummary('GET /api/im-context/messages?token=ctx_eyJjaGF0IjoiZ3JwXzEifQ.abc123def456'), /\[REDACTED\]/);
@@ -404,8 +405,13 @@ test('ChatContextStore, redact/clipSummary, and chats config defaults', () => {
 
 test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix order, hideChiefPrefix opt-out, and isEcho loop guard', () => {
   const badge = '🤖 **[co-bot]**';
-  // 统一在徽章后附加 --- 分隔线再接正文（含单行与多行/块语法）
-  assert.equal(attachBotBadge(badge, '一切正常'), '🤖 **[co-bot]**\n---\n一切正常');
+  // 少于 10 个等效中文字的单行纯文本去掉 ** 和 --- 分隔线；≥10 字或多行/块语法保留完整样式
+  assert.equal(attachBotBadge(badge, '一切正常'), '🤖 [co-bot] 一切正常');
+  assert.equal(attachBotBadge(badge, '✅ 九个中文字不加粗线。'), '🤖 [co-bot] ✅ 九个中文字不加粗线。');
+  assert.equal(attachBotBadge(badge, 'OK'), '🤖 [co-bot] OK');
+  assert.equal(attachBotBadge('🤖 **[项目组 · Dev]**', '已收到'), '🤖 [项目组 · Dev] 已收到');
+  assert.equal(attachBotBadge(badge, '十个中文字刚好触发线'), '🤖 **[co-bot]**\n---\n十个中文字刚好触发线');
+  assert.equal(attachBotBadge(badge, 'Everything is working properly now'), '🤖 **[co-bot]**\n---\nEverything is working properly now');
   assert.equal(attachBotBadge(badge, '第一行\n第二行'), '🤖 **[co-bot]**\n---\n第一行\n第二行');
   assert.equal(attachBotBadge(badge, '# 标题\n正文'), '🤖 **[co-bot]**\n---\n# 标题\n正文');
   assert.equal(attachBotBadge(badge, '```ts\nconst x = 1;\n```'), '🤖 **[co-bot]**\n---\n```ts\nconst x = 1;\n```');
@@ -418,8 +424,9 @@ test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix 
   assert.equal(attachBotBadge(badge, '第一段', { partIndex: 1, partTotal: 2 }), '🤖 **[co-bot]** (1/2)\n---\n第一段');
   assert.equal(attachBotBadge(badge, '第二段A\n第二段B', { partIndex: 2, partTotal: 2 }), '🤖 **[co-bot]** (2/2)\n---\n第二段A\n第二段B');
   assert.equal(attachBotBadge(badge, '🤖 **[co-bot]** 已有徽章'), '🤖 **[co-bot]** 已有徽章');
+  assert.equal(attachBotBadge(badge, '🤖 [co-bot] 已有短徽章'), '🤖 [co-bot] 已有短徽章');
   // 普通 🤖 开头人工文本仍应加徽章，不被误判
-  assert.equal(attachBotBadge(badge, '🤖 hello'), '🤖 **[co-bot]**\n---\n🤖 hello');
+  assert.equal(attachBotBadge(badge, '🤖 hello'), '🤖 [co-bot] 🤖 hello');
 
   assert.equal(hasBotBadgePrefix('🤖 **[co-bot]** 一切正常'), true);
   assert.equal(hasBotBadgePrefix('🤖 **[co-bot]**\n---\n一切正常'), true);
@@ -441,14 +448,20 @@ test('Style A bot badges: attachBotBadge layout, hasBotBadgePrefix, card prefix 
   try {
     const bDefault = new OpenMausBotBridge({ client: {} as never, transport: {} as never, dataDir: tmpDir });
     assert.equal(bDefault.hideChiefPrefix, false);
-    assert.equal(bDefault.botPrefix('b1', 'MausBot'), '🤖 **[co-bot]**');
-    assert.equal(bDefault.isEcho('🤖 **[co-bot]** 任意文本'), true);
-    assert.equal(bDefault.isEcho('🤖 [co-bot] 纯文本降级'), true);
+    assert.equal(bDefault.botPrefix('b1', 'MausBot'), '🤖 **[bot]**');
+    assert.equal(bDefault.badgeName('b1', 'MausBot'), 'bot');
+    assert.equal(bDefault.badgeName('b2', 'Plum'), 'Plum');
+    assert.equal(bDefault.isEcho('🤖 **[bot]** 任意文本'), true);
+    assert.equal(bDefault.isEcho('🤖 [bot] 纯文本降级'), true);
     assert.equal(bDefault.isEcho('🤖 我自己发的机器人表情'), false);
+
+    const bCustom = new OpenMausBotBridge({ client: {} as never, transport: {} as never, dataDir: tmpDir, botName: '协调官' });
+    assert.equal(bCustom.badgeName('b1', 'MausBot'), '协调官');
+    assert.equal(bCustom.botPrefix('b1', 'MausBot'), '🤖 **[协调官]**');
 
     const bHidden = new OpenMausBotBridge({ client: {} as never, transport: {} as never, dataDir: tmpDir, hideChiefPrefix: true });
     assert.equal(bHidden.botPrefix('b1', 'MausBot'), '');
-    assert.equal(bHidden.botPrefix('b1', 'MausBot', { proactive: true }), '🤖 **[co-bot]**');
+    assert.equal(bHidden.botPrefix('b1', 'MausBot', { proactive: true }), '🤖 **[bot]**');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -1,7 +1,10 @@
 /**
- * 转发消息归一化、摘要格式化与本地按需拉取上下文管理（`/api/context/history`）。
+ * 转发消息归一化、摘要格式化与本地按需拉取上下文管理（`/api/context/history`、`/api/context/attachment`）。
  */
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import type http from 'node:http';
+import path from 'node:path';
 import type {
   ChatContextMessage,
   ForwardedBundle,
@@ -15,7 +18,42 @@ import { scanAndRedactOutbound } from './security.ts';
 type AnyRecord = Record<string, unknown>;
 
 const MAX_FORWARDED_ITEMS = 50;
-const ARTIFACT_REF_RE = /(图|截图|图片|照片|日志|文件|附件|报错|表格|pdf|log|png|jpg|webp|screenshot|image|file|上面|这几张|这几个|刚发|以上|前面|前文|刚才|刚刚|转发|聊天记录|这几条|这些)/i;
+const ARTIFACT_REF_RE = /(图|截图|图片|照片|日志|文档|文件|附件|报错|表格|pdf|docx?|xlsx?|pptx?|csv|md|txt|log|png|jpg|webp|screenshot|image|file|上面|这几张|这几个|刚发|以上|前面|前文|刚才|刚刚|转发|聊天记录|这几条|这些)/i;
+const TEXT_EXT_RE = /\.(?:txt|md|log|json|csv|tsv|ya?ml|xml|ini|conf|ts|tsx|js|jsx|mjs|cjs|py|sh|sql|html?|css)$/i;
+const EXT_MIME: Record<string, string> = {
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.tsv': 'text/tab-separated-values; charset=utf-8',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.ts': 'text/plain; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+};
+
+function guessMimeFromName(name: string): string {
+  const ext = path.extname(name).toLowerCase();
+  return EXT_MIME[ext] || 'application/octet-stream';
+}
+
+function isTextLikeAttachment(name: string, mime: string): boolean {
+  const lowMime = String(mime || '').toLowerCase();
+  return lowMime.startsWith('text/')
+    || /^application\/(?:json|xml|javascript|x-sh|yaml)/i.test(lowMime)
+    || TEXT_EXT_RE.test(name);
+}
 
 function pushMsgAttachments(
   msg: ChatContextMessage,
@@ -47,6 +85,14 @@ function pushMsgAttachments(
       if (out.length >= cap) return;
     }
   }
+}
+
+/** 收集单条消息及其合并转发子树中的所有附件（自动去重）。 */
+export function collectAllMsgAttachments(msg: ChatContextMessage | null | undefined): InboundAttachment[] {
+  if (!msg) return [];
+  const out: InboundAttachment[] = [];
+  pushMsgAttachments(msg, out, new Set<string>(), new Set<string>(), Number.MAX_SAFE_INTEGER);
+  return out;
 }
 
 /** 收集会话上下文中待随提问提交的多附件（支持被引用消息、合并转发内附件、连发批次及最近转发消息）。 */
@@ -350,6 +396,11 @@ function makeHttpError(message: string, status: number): Error & { status: numbe
 export interface ContextPullManagerOptions {
   resolveMessage: (chatId: string, msgId: string) => Promise<ChatContextMessage | null>;
   getHistory: (chatId: string, opts: { limit: number; before?: string | null }) => Promise<ChatContextMessage[]>;
+  downloadAttachment?: (chatId: string, msg: ChatContextMessage, att: InboundAttachment) => Promise<{
+    localPath: string;
+    size?: number;
+    mime?: string;
+  }>;
   isSelfMessageReadable?: (chatId: string, msg: ChatContextMessage) => boolean;
   isRecalled?: (chatId: string, msgId: string) => boolean;
   searchCached?: (chatId: string, query: string, limit: number) => ChatContextMessage[];
@@ -417,58 +468,16 @@ export class ContextPullManager {
     return chunks.filter(Boolean).join('\n\n') || '[空消息]';
   }
 
-  #summarize(msg: ChatContextMessage, previewMax = 240): Record<string, unknown> {
-    const full = this.#composeFullText(msg);
-    const preview = full.length > previewMax ? `${full.slice(0, previewMax)}…` : full;
-    return {
-      id: msg.id,
-      ts: msg.ts,
-      time: formatClock(msg.ts),
-      sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
-      ...(msg.isBotReply ? { isBotReply: true } : {}),
-      ...(msg.isForwarded ? { isForwarded: true } : {}),
-      ...(msg.forwarded ? { forwardedCount: msg.forwarded.messages.length } : {}),
-      preview,
-      totalChars: full.length,
-      truncated: full.length > previewMax,
-      ...(msg.attachments?.length ? { attachments: msg.attachments.map((a) => a.name) } : {}),
-    };
+  #formatAttachmentsMeta(msg: ChatContextMessage): Array<{ id: string; name: string; size?: number; mime?: string }> {
+    return collectAllMsgAttachments(msg).map((a) => ({
+      id: a.id,
+      name: a.name,
+      ...(a.size ? { size: a.size } : {}),
+      ...(a.mime ? { mime: a.mime } : {}),
+    }));
   }
 
-  /** 生成注入 prompt 的按需拉取入口提示；非本机可达、协作者只读或无扩展历史时返回空字符串。 */
-  formatPullHint(
-    chatId: string,
-    {
-      baseUrl,
-      oldestMsgId,
-      hasTruncated = false,
-      hasOlder = false,
-      channelHasHistory = false,
-      readonly = false,
-    }: {
-      baseUrl?: string | null;
-      oldestMsgId?: string | null;
-      hasTruncated?: boolean;
-      hasOlder?: boolean;
-      channelHasHistory?: boolean;
-      readonly?: boolean;
-    },
-  ): string {
-    if (!baseUrl || readonly || (!hasTruncated && !hasOlder && !channelHasHistory)) return '';
-    const grant = this.getGrant(chatId);
-    const endpoint = `${baseUrl.replace(/\/+$/, '')}/api/context/history?grant=${grant}`;
-    const parts = [
-      `context_pull: ${endpoint}`,
-      '  - 查看超长消息或合并转发全文: 追加 &msgId=<id>&offset=0&limit=4000（支持按 offset 分片）',
-    ];
-    if (hasOlder || channelHasHistory) {
-      parts.push(`  - 向前翻看未引用的更早历史或搜索: 追加 &before=${oldestMsgId || '<最早msgId>'}&limit=20 或 &q=<关键词>`);
-    }
-    return parts.join('\n');
-  }
-
-  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要。 */
-  async handleRequest(url: URL, remoteAddress: string | undefined): Promise<Record<string, unknown>> {
+  #authenticate(url: URL, remoteAddress: string | undefined): string {
     if (!isLoopbackRemoteAddress(remoteAddress)) {
       throw makeHttpError('仅允许本机回环访问上下文探索接口', 403);
     }
@@ -486,8 +495,72 @@ export class ContextPullManager {
       throw makeHttpError('上下文拉取过于频繁，请稍后重试', 429);
     }
     meta.hits.push(nowTs);
+    return meta.chatId;
+  }
 
-    const chatId = meta.chatId;
+  #summarize(msg: ChatContextMessage, previewMax = 240): Record<string, unknown> {
+    const full = this.#composeFullText(msg);
+    const preview = full.length > previewMax ? `${full.slice(0, previewMax)}…` : full;
+    const attachments = this.#formatAttachmentsMeta(msg);
+    return {
+      id: msg.id,
+      ts: msg.ts,
+      time: formatClock(msg.ts),
+      sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
+      ...(msg.isBotReply ? { isBotReply: true } : {}),
+      ...(msg.isForwarded ? { isForwarded: true } : {}),
+      ...(msg.forwarded ? { forwardedCount: msg.forwarded.messages.length } : {}),
+      preview,
+      totalChars: full.length,
+      truncated: full.length > previewMax,
+      ...(attachments.length ? { attachments } : {}),
+    };
+  }
+
+  /** 生成注入 prompt 的单行按需拉取入口指针；非本机可达、协作者只读或无扩展历史时返回空字符串。 */
+  formatPullHint(
+    chatId: string,
+    {
+      baseUrl,
+      oldestMsgId,
+      hasTruncated = false,
+      hasOlder = false,
+      channelHasHistory = false,
+      availableCount = 0,
+      availableFiles = 0,
+      pullOnly = false,
+      readonly = false,
+    }: {
+      baseUrl?: string | null;
+      oldestMsgId?: string | null;
+      hasTruncated?: boolean;
+      hasOlder?: boolean;
+      channelHasHistory?: boolean;
+      availableCount?: number;
+      availableFiles?: number;
+      pullOnly?: boolean;
+      readonly?: boolean;
+    },
+  ): string {
+    if (!baseUrl || readonly) return '';
+    const hasPullable = pullOnly
+      ? (availableCount > 0 || hasTruncated || hasOlder || channelHasHistory)
+      : (hasTruncated || hasOlder || channelHasHistory);
+    if (!hasPullable) return '';
+    const grant = this.getGrant(chatId);
+    const endpoint = `${baseUrl.replace(/\/+$/, '')}/api/context/history?grant=${grant}`;
+    const meta: string[] = [];
+    if (availableCount > 0) meta.push(`available=${availableCount}`);
+    if (availableFiles > 0) meta.push(`files=${availableFiles}`);
+    if (hasTruncated) meta.push('truncated');
+    if (!pullOnly && hasOlder && oldestMsgId) meta.push(`before=${oldestMsgId}`);
+    if (availableCount === 0 && !hasOlder && channelHasHistory) meta.push('remote_history');
+    return meta.length ? `context_pull: ${endpoint} (${meta.join(', ')})` : `context_pull: ${endpoint}`;
+  }
+
+  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要。 */
+  async handleRequest(url: URL, remoteAddress: string | undefined): Promise<Record<string, unknown>> {
+    const chatId = this.#authenticate(url, remoteAddress);
     const msgId = String(url.searchParams.get('msgId') || '').trim();
     if (msgId) {
       const msg = await this.#opts.resolveMessage(chatId, msgId);
@@ -500,6 +573,7 @@ export class ContextPullManager {
       const limit = Math.max(200, Math.min(12_000, rawLim));
       const chunk = full.slice(offset, offset + limit);
       const nextOffset = (offset + chunk.length) < full.length ? (offset + chunk.length) : null;
+      const attachments = this.#formatAttachmentsMeta(msg);
       this.#opts.onTelemetry?.({ chatId, summary: `mode=detail msgId=${msgId} chars=${chunk.length}` });
       return {
         ok: true,
@@ -512,7 +586,7 @@ export class ContextPullManager {
         offset,
         hasMore: nextOffset !== null,
         nextOffset,
-        ...(msg.attachments?.length ? { attachments: msg.attachments.map((a) => ({ id: a.id, name: a.name })) } : {}),
+        ...(attachments.length ? { attachments } : {}),
       };
     }
 
@@ -544,5 +618,93 @@ export class ContextPullManager {
       hasMore,
       nextBefore,
     };
+  }
+
+  /** 处理 `GET /api/context/attachment` 请求，按需下载并缓存消息/合并转发内附件，返回本地路径与文本预览。 */
+  async handleAttachmentRequest(
+    url: URL,
+    remoteAddress: string | undefined,
+    res?: http.ServerResponse,
+  ): Promise<Record<string, unknown> | undefined> {
+    const chatId = this.#authenticate(url, remoteAddress);
+    const msgId = String(url.searchParams.get('msgId') || '').trim();
+    if (!msgId) throw makeHttpError('缺少 msgId 参数', 400);
+
+    const msg = await this.#opts.resolveMessage(chatId, msgId);
+    if (!msg || !this.#canRead(chatId, msg)) {
+      throw makeHttpError(`未找到消息「${msgId}」或无权限读取`, 404);
+    }
+    const allAtts = collectAllMsgAttachments(msg);
+    if (!allAtts.length) {
+      throw makeHttpError(`消息「${msgId}」不包含附件`, 404);
+    }
+
+    const attId = String(url.searchParams.get('attId') || '').trim();
+    let att: InboundAttachment | undefined;
+    if (attId) {
+      att = allAtts.find((a) => a.id === attId || a.name === attId);
+      if (!att) throw makeHttpError(`未找到附件「${attId}」`, 404);
+    } else if (allAtts.length === 1) {
+      att = allAtts[0];
+    } else {
+      throw makeHttpError('该消息包含多个附件，请指定 attId 参数', 400);
+    }
+
+    if (!this.#opts.downloadAttachment) {
+      throw makeHttpError('当前通道不支持按需下载附件', 501);
+    }
+    const dl = await this.#opts.downloadAttachment(chatId, msg, att);
+    const size = dl.size ?? fs.statSync(dl.localPath).size;
+    const mime = dl.mime || att.mime || guessMimeFromName(att.name);
+    this.#opts.onTelemetry?.({ chatId, summary: `mode=attachment msgId=${msg.id} attId=${att.id} name=${att.name}` });
+
+    const rawParam = url.searchParams.get('raw');
+    if ((rawParam === '1' || rawParam === 'true') && res) {
+      if (size > 50 * 1024 * 1024) {
+        throw makeHttpError('附件超过 50MB 限制', 413);
+      }
+      const buf = fs.readFileSync(dl.localPath);
+      const asciiName = att.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+      res.writeHead(200, {
+        'content-type': mime,
+        'content-length': buf.length,
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'content-disposition': `attachment; filename="${asciiName}"`,
+      });
+      res.end(buf);
+      return undefined;
+    }
+
+    const result: Record<string, unknown> = {
+      ok: true,
+      mode: 'attachment',
+      msgId: msg.id,
+      attId: att.id,
+      name: att.name,
+      size,
+      mime,
+      localPath: dl.localPath,
+      ...(att.transcript ? { transcript: redactSecrets(att.transcript) } : {}),
+    };
+
+    if (isTextLikeAttachment(att.name, mime) && size <= 512 * 1024) {
+      const buf = fs.readFileSync(dl.localPath);
+      const sample = buf.subarray(0, Math.min(buf.length, 4096));
+      if (!sample.includes(0)) {
+        const full = redactSecrets(buf.toString('utf8'));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        const rawLim = Number(url.searchParams.get('limit')) || 4000;
+        const limit = Math.max(200, Math.min(12_000, rawLim));
+        const chunk = full.slice(offset, offset + limit);
+        const nextOffset = (offset + chunk.length) < full.length ? (offset + chunk.length) : null;
+        result.text = chunk;
+        result.totalChars = full.length;
+        result.offset = offset;
+        result.hasMore = nextOffset !== null;
+        result.nextOffset = nextOffset;
+      }
+    }
+    return result;
   }
 }

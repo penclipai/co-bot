@@ -194,6 +194,23 @@ export function formatExternalBotPrefix(text: unknown, prefix = '🤖 '): string
 
 const BOT_BADGE_RE = /^🤖\s*(?:\*\*\[[^\]\r\n]{1,80}\]\*\*|\[[^\]\r\n]{1,80}\])(?=\s|$)/;
 const HR_LINE_START_RE = /^\s*([-*_])(?:\s*\1){2,}\s*(?:\n|$)/;
+const MARKDOWN_BLOCK_START_RE = /^(?:#{1,6}\s|```|~~~|>\s?|[-*+]\s|\d+\.\s|\||([-*_])(?:\s*\1){2,}\s*(?:\n|$))/;
+
+function bodyHanEquivalentLength(text: string): number {
+  let score = 0;
+  for (const ch of text) {
+    if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(ch)) {
+      score += 1;
+    } else if (/[A-Za-z0-9]/.test(ch)) {
+      score += 0.5;
+    }
+  }
+  return score;
+}
+
+function stripBadgeBold(badge: string): string {
+  return badge.replace(/\*\*(\[[^\]\r\n]{1,80}\])\*\*/, '$1');
+}
 
 /** 检测消息正文是否以样式 A 的 Bot 徽章开头（用于自发消息回声防环）。 */
 export function hasBotBadgePrefix(text: unknown): boolean {
@@ -202,9 +219,9 @@ export function hasBotBadgePrefix(text: unknown): boolean {
 }
 
 /**
- * 为机器人回复前置样式 A 徽章（如 `🤖 **[co-bot]**`）：
- * - 统一在徽章后附加独立 `---` 分隔行再接正文（含单行短答复），稳定触发 IM 的 Markdown 渲染；
- * - 若正文已以水平分隔线开头则直接换行衔接，避免重复分隔线；
+ * 为机器人回复前置样式 A 徽章（如 `🤖 **[bot]**`）：
+ * - 单行纯文本且等效中文字符数少于 10（无换行、无块级 Markdown、非分片消息）时去掉徽章 `**` 与 `---` 分隔符，输出 `🤖 [bot] <正文>`；
+ * - 其余情况统一在徽章后附加独立 `---` 分隔行再接正文，若正文已以水平分隔线开头则直接换行衔接；
  * - 拆分气泡传入 `partIndex`/`partTotal`（>1）时附加 `(i/n)` 标识。
  */
 export function attachBotBadge(
@@ -223,6 +240,13 @@ export function attachBotBadge(
   const trimmedStart = raw.trimStart();
   if (!partTag && (trimmedStart.startsWith(b) || hasBotBadgePrefix(trimmedStart))) return raw;
   const cleanBody = raw.startsWith('\n') ? raw.replace(/^\n+/, '') : raw;
+  const isShortPlain = !partTag
+    && !cleanBody.includes('\n')
+    && !MARKDOWN_BLOCK_START_RE.test(cleanBody.trimStart())
+    && bodyHanEquivalentLength(cleanBody) < 10;
+  if (isShortPlain) {
+    return `${stripBadgeBold(b)} ${cleanBody}`;
+  }
   const sep = HR_LINE_START_RE.test(cleanBody) ? '\n' : '\n---\n';
   return `${head}${sep}${cleanBody}`;
 }

@@ -65,7 +65,27 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
     const progMsgs = sent.filter((m) => m.text.includes('正在执行命令'));
     assert.equal(progMsgs.length, 1, '相同工具活动进度不得重复刷屏');
     assert.equal(progMsgs[0].text.includes('running a command'), false, '通用英文 spoken 应被静默抑制');
-    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[co-bot\]\*\*/, 'hideChiefPrefix=false 时应保留样式 A Bot 徽章');
+    assert.match(sent.at(-1)!.text, /^🤖 \*\*\[bot\]\*\*/, 'hideChiefPrefix=false 时应保留样式 A Bot 徽章');
+
+    // Widget messages (agents_show_widget) must be delivered in both self-chat and silentProgress external chats
+    const beforeWidget = sent.length;
+    omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
+      const wMsg = { id: nextId(), role: 'bot', kind: 'widget', threadId, requestMessageId: reqMsg.id, text: '请选择：1. 方案Alpha 2. 方案Beta' };
+      const finMsg = { id: nextId(), role: 'bot', kind: 'text', threadId, requestMessageId: reqMsg.id, text: '选项已发出，点一个就行（也可以直接回 1 或 2）。', turnTerminal: true };
+      messages.push(wMsg, finMsg);
+      jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+      broadcast({ kind: 'message', threadId, message: wMsg });
+      setTimeout(() => broadcast({ kind: 'message', threadId, message: finMsg }), 20);
+    });
+    await transport.emitUser('@bot 给两个方案选择');
+    await until(() => sent.some((m, i) => i >= beforeWidget && m.text.includes('选项已发出')));
+    const widgetCombined = sent.slice(beforeWidget).map((m) => m.text).join('\n');
+    assert.match(widgetCombined, /请选择：1\. 方案Alpha 2\. 方案Beta/, 'kind=widget 选项文案不得被吞掉');
+    const beforeGrpWidget = sent.length;
+    await bridge.onEvent({ id: 'grp_widget_1', ts: Date.now(), chat: { id: 'grp_w', type: 'group', name: 'Widget群' }, sender: { id: 'me', name: '我', isSelf: true }, text: '@bot 群里给个选择' });
+    await until(() => sent.some((m, i) => i >= beforeGrpWidget && m.text.includes('选项已发出')));
+    const grpWidgetText = sent.slice(beforeGrpWidget).map((m) => m.text).join('\n');
+    assert.match(grpWidgetText, /请选择：1\. 方案Alpha 2\. 方案Beta/, '外部群开启 silentProgress 时也不得过滤掉 kind=widget');
 
     const beforeSoft = sent.length;
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
@@ -82,8 +102,8 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
 
     await transport.emitUser('@bot 发中等长回答');
     await until(() => sent.length === beforeSoft + 2);
-    assert.match(sent[beforeSoft].text, /^🤖 \*\*\[co-bot\]\*\* \(1\/2\)/, '软拆分首条应携带 (1/2) Bot 徽章');
-    assert.match(sent[beforeSoft + 1].text, /^🤖 \*\*\[co-bot\]\*\* \(2\/2\)/, '软拆分次条应携带 (2/2) Bot 徽章');
+    assert.match(sent[beforeSoft].text, /^🤖 \*\*\[bot\]\*\* \(1\/2\)/, '软拆分首条应携带 (1/2) Bot 徽章');
+    assert.match(sent[beforeSoft + 1].text, /^🤖 \*\*\[bot\]\*\* \(2\/2\)/, '软拆分次条应携带 (2/2) Bot 徽章');
     assert.equal(filesSent.length, 0, '软拆分区间内不应生成 .md 附件');
 
     await transport.emitUser('@bot 发超长回答');

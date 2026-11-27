@@ -164,7 +164,7 @@ async function buildPromptContext(
   bridge: OpenMausBotBridge,
   ev: InboundEvent | null | undefined,
   chatCtx: BridgeChatContext,
-  { skipSelfQuote = false, injectRecent = bridge.chats.injectRecentContext !== false }: { skipSelfQuote?: boolean; injectRecent?: boolean } = {},
+  { skipSelfQuote = false, injectRecent = bridge.chats.injectRecentContext === true }: { skipSelfQuote?: boolean; injectRecent?: boolean } = {},
 ) {
   if (!ev?.chat?.id) {
     return {
@@ -188,7 +188,14 @@ async function buildPromptContext(
     maxAutoAttachments: bridge.chats.maxAutoAttachments,
     allowAskColleagueHint: !chatCtx?.readonly,
     resolvePullHint: bridge.imContext?.getContextPullHint
-      ? (info: { oldestMsgId: string | null; hasTruncated: boolean; hasOlder: boolean }) => (
+      ? (info: {
+          oldestMsgId: string | null;
+          hasTruncated: boolean;
+          hasOlder: boolean;
+          availableCount: number;
+          availableFiles: number;
+          pullOnly: boolean;
+        }) => (
           bridge.imContext?.getContextPullHint?.(String(ev.chat.id), { ...info, readonly: Boolean(chatCtx?.readonly) }) ?? ''
         )
       : undefined,
@@ -304,7 +311,7 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
     return;
   }
 
-  if (msg.kind === 'text' && msg.turnTerminal) {
+  if ((msg.kind === 'text' || msg.kind === 'widget') && (msg.turnTerminal || msg.kind === 'widget')) {
     if (!text && !hasMedia) return;
     rememberBounded(bridge.deliveredOmbIds, msg.id);
     if (inQuietHours(bridge.now(), bridge.quietHours)) {
@@ -622,7 +629,7 @@ export async function dispatchToBot(
     ? { header: ctxInfo.preformattedHeader, quotedMsg: null, recentMsgs: [], quotedAttachments: [], contextAttachments: [] }
     : await buildPromptContext(bridge, ctxInfo.ev, ctxInfo, {
         skipSelfQuote: Boolean(!isExternal && replyToOmbId),
-        injectRecent: bridge.chats.injectRecentContext !== false && !ctxInfo.delegationReq,
+        injectRecent: bridge.chats.injectRecentContext === true && !ctxInfo.delegationReq,
       });
   const { uploads, transcripts } = await claimUploads(
     bridge,
@@ -631,6 +638,7 @@ export async function dispatchToBot(
     ctxInfo.originChatId,
     promptCtx.contextAttachments ?? promptCtx.quotedAttachments,
     ctxInfo.controlChatId,
+    { allowPendingFileMsgs: !isExternal },
   );
   const extras: string[] = [];
   const linkSnippet = formatLinkCardSnippet(ctxInfo.ev?.linkCard);
@@ -669,10 +677,29 @@ export async function dispatchToBot(
     ? ''
     : formatProjectContextBlock({ project, source, isExternal, isReadonly: Boolean(ctxInfo.readonly) });
   const sharedBlock = skipScope ? '' : bridge.sharedContext.formatPromptPointer();
-  const contextBlock = `${guardBlock}${projectBlock}${sharedBlock}${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}`;
-  const prepared = ctxInfo.readonly
-    ? { outboundText: `${contextBlock}${text}` }
-    : prepareSlashOutbound(text, contextBlock);
+  const scopeSig = skipScope
+    ? ''
+    : JSON.stringify({
+        project: project?.path ?? '',
+        source,
+        isExternal,
+        isReadonly: Boolean(ctxInfo.readonly),
+        sharedDir: bridge.sharedContext.isAvailable() ? bridge.sharedContext.dir : '',
+      });
+  const includeScope = !skipScope && bridge.threadInjectedScope.get(threadId) !== scopeSig;
+  const buildOutbound = (withScope: boolean): { mode?: 'goal'; outboundText: string; emptyGoal?: boolean } => {
+    const scopeText = withScope ? `${projectBlock}${sharedBlock}` : '';
+    const contextBlock = `${guardBlock}${scopeText}${promptCtx.header || ''}${extras.length ? `${extras.join('\n')}\n\n` : ''}`;
+    const res = ctxInfo.readonly
+      ? { outboundText: `${contextBlock}${text}` }
+      : prepareSlashOutbound(text, contextBlock);
+    if (!res.emptyGoal && uploads.length) {
+      const tags = uploads.map((u) => formatAttachmentTag(u));
+      return { ...res, outboundText: `${res.outboundText}\n\n${tags.join('\n')}` };
+    }
+    return res;
+  };
+  let prepared = buildOutbound(includeScope);
   if (prepared.emptyGoal) {
     const who = bridge.botPrefix(bot.id, bot.name, { isGroup });
     const goalHint = `🎯 请在 \`/goal\` 后写明要达成的目标，例如：\`${bridge.trigger} /goal 梳理本周发布风险并给出检查清单\``;
@@ -682,11 +709,6 @@ export async function dispatchToBot(
       replyChat ? { botId: bot.id, botName: bot.name, threadId, ...(isGroup ? { isGroup: true } : {}), targetChatId: replyChat } : null,
     );
     return null;
-  }
-  let outboundText = prepared.outboundText;
-  if (uploads.length) {
-    const tags = uploads.map((u) => formatAttachmentTag(u));
-    outboundText = `${outboundText}\n\n${tags.join('\n')}`;
   }
 
   const sendId = `cobot_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -706,30 +728,34 @@ export async function dispatchToBot(
     summary: text,
   });
 
-  const sendOpts = {
-    text: outboundText,
-    sendId,
-    replyToId: replyToOmbId,
-    ...(prepared.mode ? { mode: prepared.mode } : {}),
+  const sendReq = (tid: string, out: { mode?: 'goal'; outboundText: string }) => {
+    const sendOpts = {
+      text: out.outboundText,
+      sendId,
+      replyToId: replyToOmbId,
+      ...(out.mode ? { mode: out.mode } : {}),
+    };
+    return isGroup && typeof bridge.client.sendGroupMessage === 'function'
+      ? bridge.client.sendGroupMessage(bot.id, { ...sendOpts, threadId: tid })
+      : bridge.client.sendMessage(bot.id, { ...sendOpts, threadId: tid });
   };
-  const sendReq = (tid: string) => (isGroup && typeof bridge.client.sendGroupMessage === 'function'
-    ? bridge.client.sendGroupMessage(bot.id, { ...sendOpts, threadId: tid })
-    : bridge.client.sendMessage(bot.id, { ...sendOpts, threadId: tid }));
 
   let receipt: { queued?: boolean; queueId?: string; blockedBy?: string; steered?: boolean; message?: OmbMessage };
   bridge.pendingThreads.add(threadId);
   try {
     try {
-      receipt = await sendReq(threadId);
+      receipt = await sendReq(threadId, prepared);
     } catch (e) {
       const err = e as OmbHttpError;
       if (isExternal && err?.status === 404 && ctxInfo.originChatId) {
         bridge.pendingThreads.delete(threadId);
+        bridge.threadInjectedScope.delete(threadId);
         bridge.chatThreads.delete(`${ctxInfo.originChatId}:${bot.id}`);
         const refreshed = await bridge.ensureChatThread(ctxInfo.originChatId, ctxInfo.chatType, ctxInfo.chatName || '', bot);
         threadId = refreshed.threadId;
+        if (!skipScope && !includeScope) prepared = buildOutbound(true);
         bridge.pendingThreads.add(threadId);
-        receipt = await sendReq(threadId);
+        receipt = await sendReq(threadId, prepared);
       } else {
         throw e;
       }
@@ -744,6 +770,10 @@ export async function dispatchToBot(
     bridge.pendingThreads.delete(threadId);
   }
 
+  if (!skipScope) {
+    bridge.threadInjectedScope.set(threadId, scopeSig);
+    trimMapCap(bridge.threadInjectedScope, 200);
+  }
   const ctxStore = bridge.imContext?.store ?? bridge.localContextStore;
   ctxStore.markDispatched(ctxInfo.originChatId, [imMsgId, ...(promptCtx.consumedSelfMsgIds ?? [])]);
 

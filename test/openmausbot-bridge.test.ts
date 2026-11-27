@@ -43,11 +43,11 @@ test('openmausbot bridge: routes @bot to chief, skips digest & notes, supports m
 
     await transport.emitUser('@dev 查一下构建');
     await until(() => sent.length === 2);
-    assert.match(sent[1].text, /\*\*\[Dev\]\*\*[\s\S]*Dev 收到：查一下构建/);
+    assert.match(sent[1].text, /\[Dev\] Dev 收到：查一下构建/);
 
     await transport.emitUser('顺便看下日志', { replyTo: sent[1].id });
     await until(() => sent.length === 3);
-    assert.match(sent[2].text, /\*\*\[Dev\]\*\*[\s\S]*Dev 收到：顺便看下日志/);
+    assert.match(sent[2].text, /\[Dev\] Dev 收到：顺便看下日志/);
   } finally {
     await bridge.stop();
     await omb.close();
@@ -275,7 +275,7 @@ test('openmausbot bridge: proactive routine forwarding, dedupe, quietHours + @bo
 
     await transport.emitUser('帮我看下耗时', { replyTo: sent[3].id });
     await until(() => sent.length === 5);
-    assert.match(sent[4].text, /\*\*\[Ops\]\*\*[\s\S]*Ops: 帮我看下耗时/);
+    assert.match(sent[4].text, /\[Ops\] Ops: 帮我看下耗时/);
   } finally {
     await bridge.stop();
     await omb.close();

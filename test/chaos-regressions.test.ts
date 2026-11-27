@@ -350,7 +350,7 @@ test('externalBotPrefix custom/empty, disconnected noBuffer + mentions replay, a
   for (const [extPrefix, expectRe] of [
     ['', /^纯正文回复$/],
     ['[AI] ', /^\[AI\] 纯正文回复$/],
-    ['🤖 ', /^🤖 \*\*\[co-bot\]\*\*\n---\n纯正文回复$/],
+    ['🤖 ', /^🤖 \[bot\] 纯正文回复$/],
   ] as Array<[string, RegExp]>) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-prefix-'));
     const mock = makeMockHarness({

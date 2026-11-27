@@ -1,10 +1,13 @@
 /**
- * IM 会话上下文插件：提供进程内 ChatContextStore、通道历史合并去重、以及本机只读 `/api/context/history` 探索接口。
+ * IM 会话上下文插件：提供进程内 ChatContextStore、通道历史合并去重、以及本机只读 `/api/context/history` 与 `/api/context/attachment` 探索接口。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { isLoopbackUrl, probeHostOf } from '../../scripts/omb.ts';
 import { assemblePromptContext, ChatContextStore } from '../core/chat-context.ts';
 import { ContextPullManager } from '../core/context-pull.ts';
 import type { ManagedChannel } from '../core/channel-contract.ts';
+import { fileSafe, safeAttachmentName } from '../format.ts';
 import type { ImContextService } from '../openmausbot/types.ts';
 import type { ChatContextMessage, ChatsConfig, InboundEvent, KernelPlugin } from '../types.ts';
 import type { WebServer } from '../web/server.ts';
@@ -121,9 +124,24 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       return local;
     };
 
+    const pullCacheDir = path.resolve(cfg?.dataDir || './data', 'in', 'pull');
+    const downloadAttachment: NonNullable<ConstructorParameters<typeof ContextPullManager>[0]['downloadAttachment']> | undefined =
+      typeof channel?.download === 'function'
+        ? async (cid, msg, att) => {
+            const safe = safeAttachmentName(att.name, 'file');
+            const dest = path.join(pullCacheDir, fileSafe(cid) || 'chat', fileSafe(msg.id) || 'msg', `${fileSafe(att.id) || 'att'}_${safe}`);
+            if (!fs.existsSync(dest)) {
+              fs.mkdirSync(path.dirname(dest), { recursive: true });
+              await channel.download!(att, dest);
+            }
+            return { localPath: dest, size: fs.statSync(dest).size, mime: att.mime };
+          }
+        : undefined;
+
     const pullManager = new ContextPullManager({
       resolveMessage,
       getHistory: (cid, o) => getHistory(cid, { limit: o.limit, before: o.before }),
+      downloadAttachment,
       isSelfMessageReadable: (cid, msg) => store.isSelfMessageReadableByBot(cid, msg),
       isRecalled: (cid, mid) => store.isRecalled(cid, mid),
       searchCached: (cid, query, lim) => store.searchMessages(cid, query, lim),
@@ -133,6 +151,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
     if (web) {
       web.route('GET', '/api/context/history', ({ req, url }) => pullManager.handleRequest(url, req.socket?.remoteAddress));
+      web.route('GET', '/api/context/attachment', ({ req, res, url }) => pullManager.handleAttachmentRequest(url, req.socket?.remoteAddress, res));
     }
 
     const resolveLoopbackWebUrl = (): string | null => {
@@ -146,16 +165,20 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       return isLoopbackUrl(url) ? url : null;
     };
 
-    const getContextPullHint: NonNullable<ImContextService['getContextPullHint']> = (chatId, info) => (
-      pullManager.formatPullHint(chatId, {
+    const getContextPullHint: NonNullable<ImContextService['getContextPullHint']> = (chatId, info) => {
+      const isSelf = store.getChatMeta(chatId)?.type === 'self';
+      return pullManager.formatPullHint(chatId, {
         baseUrl: resolveLoopbackWebUrl(),
         oldestMsgId: info.oldestMsgId,
         hasTruncated: info.hasTruncated,
         hasOlder: info.hasOlder,
-        channelHasHistory,
+        channelHasHistory: isSelf ? false : channelHasHistory,
+        availableCount: info.availableCount,
+        availableFiles: info.availableFiles,
+        pullOnly: info.pullOnly,
         readonly: Boolean(info.readonly),
-      })
-    );
+      });
+    };
 
     const buildPromptContext: ImContextService['buildPromptContext'] = (opts2) => assemblePromptContext({
       ...opts2,
