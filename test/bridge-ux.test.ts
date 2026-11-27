@@ -67,25 +67,86 @@ test('UX Batch 1: immediate intermediate text without duplication, Chinese progr
     assert.equal(progMsgs[0].text.includes('running a command'), false, '通用英文 spoken 应被静默抑制');
     assert.match(sent.at(-1)!.text, /^🤖 \*\*\[bot\]\*\*/, 'hideChiefPrefix=false 时应保留样式 A Bot 徽章');
 
-    // Widget messages (agents_show_widget) must be delivered in both self-chat and silentProgress external chats
+    // Widget messages (agents_show_widget) must deliver text AND extracted button actions without duplicating onto terminal text
     const beforeWidget = sent.length;
+    const sampleWidgetTree = {
+      v: 1,
+      root: {
+        type: 'Card',
+        title: '请选择一个方案',
+        children: [
+          {
+            type: 'Row',
+            children: [
+              {
+                type: 'Button',
+                label: '方案Alpha',
+                style: 'primary',
+                onClickAction: { type: 'text', payload: { text: '方案Alpha' } },
+              },
+              {
+                type: 'Button',
+                label: '方案Beta',
+                style: 'secondary',
+                onClickAction: { type: 'text', payload: { text: '方案Beta' } },
+              },
+            ],
+          },
+        ],
+      },
+    };
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
-      const wMsg = { id: nextId(), role: 'bot', kind: 'widget', threadId, requestMessageId: reqMsg.id, text: '请选择：1. 方案Alpha 2. 方案Beta' };
+      const wMsg = { id: nextId(), role: 'bot', kind: 'widget', threadId, requestMessageId: reqMsg.id, text: '请选择：1. 方案Alpha 2. 方案Beta', widget: sampleWidgetTree };
       const finMsg = { id: nextId(), role: 'bot', kind: 'text', threadId, requestMessageId: reqMsg.id, text: '选项已发出，点一个就行（也可以直接回 1 或 2）。', turnTerminal: true };
-      messages.push(wMsg, finMsg);
-      jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+      messages.push(wMsg);
       broadcast({ kind: 'message', threadId, message: wMsg });
-      setTimeout(() => broadcast({ kind: 'message', threadId, message: finMsg }), 20);
+      setTimeout(() => {
+        messages.push(finMsg);
+        jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+        broadcast({ kind: 'message', threadId, message: finMsg });
+      }, 760);
     });
     await transport.emitUser('@bot 给两个方案选择');
     await until(() => sent.some((m, i) => i >= beforeWidget && m.text.includes('选项已发出')));
-    const widgetCombined = sent.slice(beforeWidget).map((m) => m.text).join('\n');
+    const selfWidgetSlice = sent.slice(beforeWidget);
+    const widgetCombined = selfWidgetSlice.map((m) => m.text).join('\n');
     assert.match(widgetCombined, /请选择：1\. 方案Alpha 2\. 方案Beta/, 'kind=widget 选项文案不得被吞掉');
+    const selfWidgetMsg = selfWidgetSlice.find((m) => m.text.includes('方案Alpha'));
+    const selfFinMsg = selfWidgetSlice.find((m) => m.text.includes('选项已发出'));
+    assert.notEqual(selfWidgetMsg, selfFinMsg, 'widget 与后续结束文本应分开发送');
+    assert.deepEqual(selfWidgetMsg?.actions, [
+      { label: '方案Alpha', text: '方案Alpha', kind: 'primary' },
+      { label: '方案Beta', text: '方案Beta' },
+    ], '自聊 kind=widget 应提取按钮为 ChannelAction[]');
+    assert.equal(selfFinMsg?.actions, undefined, '后续文本气泡不得重复携带 widget 按钮');
+
     const beforeGrpWidget = sent.length;
     await bridge.onEvent({ id: 'grp_widget_1', ts: Date.now(), chat: { id: 'grp_w', type: 'group', name: 'Widget群' }, sender: { id: 'me', name: '我', isSelf: true }, text: '@bot 群里给个选择' });
     await until(() => sent.some((m, i) => i >= beforeGrpWidget && m.text.includes('选项已发出')));
-    const grpWidgetText = sent.slice(beforeGrpWidget).map((m) => m.text).join('\n');
+    const grpWidgetSlice = sent.slice(beforeGrpWidget);
+    const grpWidgetText = grpWidgetSlice.map((m) => m.text).join('\n');
     assert.match(grpWidgetText, /请选择：1\. 方案Alpha 2\. 方案Beta/, '外部群开启 silentProgress 时也不得过滤掉 kind=widget');
+    const grpWidgetMsg = grpWidgetSlice.find((m) => m.text.includes('方案Alpha'));
+    const grpFinMsg = grpWidgetSlice.find((m) => m.text.includes('选项已发出'));
+    assert.deepEqual(grpWidgetMsg?.actions, [
+      { label: '方案Alpha', text: '@bot 方案Alpha', kind: 'primary' },
+      { label: '方案Beta', text: '@bot 方案Beta' },
+    ], '外部群直回 widget 按钮文本应自动加触发前缀');
+    assert.equal(grpFinMsg?.actions, undefined, '外部群后续文本气泡也不得重复携带 widget 按钮');
+
+    // Empty-text widget falls back to title + button labels cleanly
+    const beforeEmptyTextWidget = sent.length;
+    omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
+      const wMsg = { id: nextId(), role: 'bot', kind: 'widget', threadId, requestMessageId: reqMsg.id, text: '', widget: sampleWidgetTree };
+      messages.push(wMsg);
+      jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+      broadcast({ kind: 'message', threadId, message: wMsg });
+    });
+    await transport.emitUser('@bot 空文案widget');
+    await until(() => sent.some((m, i) => i >= beforeEmptyTextWidget && m.text.includes('请选择一个方案')));
+    const fallbackWidgetMsg = sent.slice(beforeEmptyTextWidget).find((m) => m.text.includes('请选择一个方案'));
+    assert.ok(fallbackWidgetMsg, 'text 为空的 kind=widget 应从 widget.root 提取兜底标题');
+    assert.equal(fallbackWidgetMsg?.actions?.length, 2, 'text 为空的 widget 也应投递按钮 actions');
 
     const beforeSoft = sent.length;
     omb.setScenario(({ reqMsg, threadId, messages, jobs, broadcast, nextId }) => {

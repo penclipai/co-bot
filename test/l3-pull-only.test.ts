@@ -9,11 +9,14 @@ import { ContextPullManager } from '../src/core/context-pull.ts';
 import { Kernel } from '../src/core/kernel.ts';
 import { defineChannelPlugin } from '../src/core/channel-contract.ts';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
+import { OpenMausBotClient } from '../src/openmausbot/client.ts';
 import { COBOT_COORDINATOR_SOUL, isManagedCobotSoul } from '../src/openmausbot/persona.ts';
 import { imContextPlugin } from '../src/plugins/im-context.ts';
+import { openmausbotPlugin } from '../src/plugins/openmausbot.ts';
 import { webPlugin } from '../src/plugins/web.ts';
-import type { RawConfig } from '../src/types.ts';
+import type { InboundEvent, RawConfig } from '../src/types.ts';
 import { makeMockHarness, makeMockTransport } from './helpers/mock-im-context.ts';
+import { startMockOmb } from './helpers/mock-omb.ts';
 
 const until = async (fn: () => boolean | Promise<boolean>, ms = 4000): Promise<void> => {
   const t = Date.now();
@@ -340,6 +343,178 @@ test('L3 /api/context/attachment caches downloads, redacts secrets, checks multi
     );
   } finally {
     await kernel.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('L3 multi-bot context pull: isolates other bot chatter via compression, excludeBots=1, onlyFiles=1, and bot-scoped grants', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-l3-multibot-'));
+  const omb = await startMockOmb([
+    { id: 'b_chief', name: 'co-bot', threadId: 't_chief', chiefOfStaff: true },
+    { id: 'b_plum', name: 'Plum', threadId: 't_plum', chiefOfStaff: false },
+  ]);
+  const capturedPrompts: Array<{ botId: string; text: string }> = [];
+  let pushInbound: ((ev: InboundEvent) => Promise<unknown>) | null = null;
+  const sent: Array<{ id: string; chatId: string; text: string }> = [];
+
+  omb.setScenario(({ bot, reqMsg, threadId, messages, jobs, broadcast, nextId }) => {
+    capturedPrompts.push({ botId: bot?.id || '', text: String(reqMsg.text || '') });
+    const body = bot?.id === 'b_plum'
+      ? `PLUM_VERBOSE_TAG_${'详细技术方案段落。'.repeat(18)}`
+      : `收到处理（${bot?.name || 'bot'}）`;
+    const reply = { id: nextId(), role: 'bot', kind: 'text', threadId, requestMessageId: reqMsg.id, text: body, turnTerminal: true };
+    messages.push(reply);
+    jobs.set(threadId, { state: 'completed', version: `v_${reqMsg.id}`, needsInput: [] });
+    broadcast({ kind: 'message', threadId, message: reply });
+  });
+
+  const chan = defineChannelPlugin({
+    name: 'mock-multi-chan',
+    capabilities: { files: true, images: false, history: false, replyTo: true, actions: false },
+    create() {
+      return {
+        async start(onEv) { pushInbound = onEv as (ev: InboundEvent) => Promise<unknown>; },
+        async send(chatId, text) {
+          const id = `out_${sent.length + 1}`;
+          sent.push({ id, chatId, text });
+          return id;
+        },
+        async sendFile() { return 'f_1'; },
+        async download(_att, dest) { fs.writeFileSync(dest, '# Plan\nbudget=880\n'); },
+        async stop() {},
+      };
+    },
+  });
+
+  const kernel = new Kernel({
+    config: {
+      openmausbot: { url: omb.baseUrl, autoStart: false, cliComputerOff: false, syncChiefIdentity: false },
+      web: { host: '127.0.0.1', port: 0 },
+      selfChat: { trigger: '@bot', stateSaveDebounceMs: 0, turnStallMs: 0 },
+      chats: { mode: 'owner_everywhere', externalReplyMode: 'inline' },
+      dataDir: tmpDir,
+    } as RawConfig,
+  });
+  kernel.use(webPlugin);
+  kernel.use(chan);
+  kernel.use(imContextPlugin);
+  kernel.use(openmausbotPlugin, { client: new OpenMausBotClient({ baseUrl: omb.baseUrl }), ensureOmb: false, autoHealOmb: null });
+
+  try {
+    await kernel.start();
+    const web = kernel.get<{ server: http.Server | null }>('web');
+    const port = (web.server!.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    const baseTs = Date.now() - 60_000;
+
+    await pushInbound!({
+      id: 'h_human_1',
+      ts: baseTs + 100,
+      chat: { id: 'grp_multi', type: 'group', name: '协同群' },
+      sender: { id: 'alice', name: 'Alice', isSelf: false },
+      text: '评审改到周四下午三点',
+    });
+    await pushInbound!({
+      id: 'h_file_1',
+      ts: baseTs + 200,
+      chat: { id: 'grp_multi', type: 'group', name: '协同群' },
+      sender: { id: 'alice', name: 'Alice', isSelf: false },
+      text: '已上传 plan.md',
+      attachments: [{ id: 'att_plan', msgId: 'h_file_1', name: 'plan.md' }],
+    });
+
+    // 9 rounds (18 messages) of @Plum chatter + 1 third-party bot badge message
+    for (let i = 1; i <= 9; i += 1) {
+      const before = sent.length;
+      await pushInbound!({
+        id: `plum_q_${i}`,
+        ts: baseTs + 1000 + i * 100,
+        chat: { id: 'grp_multi', type: 'group', name: '协同群' },
+        sender: { id: 'me', name: '我', isSelf: true },
+        text: `@Plum 第${i}轮详细讨论`,
+      });
+      await until(() => sent.length > before);
+    }
+    await pushInbound!({
+      id: 'ext_bot_1',
+      ts: baseTs + 3000,
+      chat: { id: 'grp_multi', type: 'group', name: '协同群' },
+      sender: { id: 'ext_bot', name: 'ExtBot', isSelf: false },
+      text: `🤖 **[ExtBot]**\n---\n外部告警机器人超长播报内容：${'警告详情。'.repeat(20)}`,
+    });
+
+    // Owner asks @bot (chief)
+    const beforeChief = sent.length;
+    await pushInbound!({
+      id: 'chief_q_1',
+      ts: baseTs + 4000,
+      chat: { id: 'grp_multi', type: 'group', name: '协同群' },
+      sender: { id: 'me', name: '我', isSelf: true },
+      text: '@bot 帮我看下前面的文档和评审时间',
+    });
+    await until(() => sent.length > beforeChief);
+
+    const chiefPrompt = capturedPrompts.findLast((p) => p.botId === 'b_chief')?.text || '';
+    const plumPrompt = capturedPrompts.findLast((p) => p.botId === 'b_plum')?.text || '';
+    const gChief = chiefPrompt.match(/context_pull:\s*http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=(g_[a-z0-9_]+)/)?.[1];
+    const gPlum = plumPrompt.match(/context_pull:\s*http:\/\/127\.0\.0\.1:\d+\/api\/context\/history\?grant=(g_[a-z0-9_]+)/)?.[1];
+    assert.ok(gChief && gPlum);
+    assert.notEqual(gChief, gPlum, '不同 Bot 在同群中应持有各自隔离的 context_pull grant');
+
+    // Default ?limit=15 marks Plum & ExtBot turns as otherBot:true and compresses preview <= 81 chars
+    const defHist = await fetch(`${base}/api/context/history?grant=${gChief}&limit=15`).then((r) => r.json()) as {
+      messages: Array<{ id: string; preview: string; otherBot?: boolean; botId?: string; targetBot?: string; totalChars: number }>;
+    };
+    const plumReplyItem = defHist.messages.find((m) => m.botId === 'b_plum');
+    const plumAskItem = defHist.messages.find((m) => m.id === 'plum_q_9');
+    const extBotItem = defHist.messages.find((m) => m.id === 'ext_bot_1');
+    assert.ok(plumReplyItem && plumReplyItem.otherBot === true);
+    assert.ok(plumReplyItem.preview.length <= 82, `otherBot 摘要应被压缩至 <=80 字（含省略号），实际 ${plumReplyItem.preview.length}`);
+    assert.ok(plumAskItem && plumAskItem.otherBot === true && plumAskItem.targetBot === 'Plum');
+    assert.ok(extBotItem && extBotItem.otherBot === true && extBotItem.preview.length <= 82);
+
+    // Cross-bot lookup via explicit msgId still returns full Plum reply
+    const plumFull = await fetch(`${base}/api/context/history?grant=${gChief}&msgId=${plumReplyItem.id}`).then((r) => r.json()) as {
+      ok: boolean; text: string; isBotReply?: boolean; botId?: string;
+    };
+    assert.equal(plumFull.ok, true);
+    assert.match(plumFull.text, /PLUM_VERBOSE_TAG_/);
+    assert.ok(plumFull.text.length > 150);
+
+    // excludeBots=1 skips all 18 Plum msgs + ExtBot and returns human msgs + plan.md on page 1
+    const cleanHist = await fetch(`${base}/api/context/history?grant=${gChief}&limit=15&excludeBots=1`).then((r) => r.json()) as {
+      excludeBots?: boolean; messages: Array<{ id: string }>;
+    };
+    assert.equal(cleanHist.excludeBots, true);
+    assert.equal(cleanHist.messages.some((m) => m.id === 'h_human_1'), true);
+    assert.equal(cleanHist.messages.some((m) => m.id === 'h_file_1'), true);
+    assert.equal(cleanHist.messages.some((m) => m.id === 'ext_bot_1' || m.id.startsWith('plum_q_')), false);
+
+    // onlyFiles=1 returns only file-bearing messages
+    const fileHist = await fetch(`${base}/api/context/history?grant=${gChief}&limit=15&onlyFiles=1`).then((r) => r.json()) as {
+      onlyFiles?: boolean; messages: Array<{ id: string; attachments?: Array<{ name: string }> }>;
+    };
+    assert.equal(fileHist.onlyFiles, true);
+    assert.deepEqual(fileHist.messages.map((m) => m.id), ['h_file_1']);
+    assert.equal(fileHist.messages[0].attachments?.[0]?.name, 'plan.md');
+
+    // Search honors excludeBots=1
+    const searchPlumExcluded = await fetch(`${base}/api/context/history?grant=${gChief}&q=PLUM_VERBOSE_TAG&excludeBots=1`).then((r) => r.json()) as {
+      messages: Array<{ id: string }>;
+    };
+    assert.equal(searchPlumExcluded.messages.length, 0);
+
+    // When Plum uses its own grant, Plum's replies are NOT otherBot:true, whereas chief_q_1 IS otherBot:true
+    const plumView = await fetch(`${base}/api/context/history?grant=${gPlum}&limit=15`).then((r) => r.json()) as {
+      messages: Array<{ id: string; otherBot?: boolean; botId?: string }>;
+    };
+    const plumOwn = plumView.messages.find((m) => m.botId === 'b_plum');
+    const chiefAskInPlum = plumView.messages.find((m) => m.id === 'chief_q_1');
+    assert.equal(Boolean(plumOwn?.otherBot), false);
+    assert.equal(chiefAskInPlum?.otherBot, true);
+  } finally {
+    await kernel.stop();
+    await omb.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

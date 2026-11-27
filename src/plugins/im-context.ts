@@ -176,6 +176,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
         availableCount: info.availableCount,
         availableFiles: info.availableFiles,
         pullOnly: info.pullOnly,
+        botId: info.botId,
         readonly: Boolean(info.readonly),
       });
     };

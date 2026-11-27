@@ -398,6 +398,7 @@ export class ChatContextStore {
     attachments,
     senderId = '__bot__',
     senderName = 'bot',
+    botId,
     isBotReply = true,
     chatType,
     chatName,
@@ -409,6 +410,7 @@ export class ChatContextStore {
     attachments?: InboundAttachment[];
     senderId?: string;
     senderName?: string;
+    botId?: string;
     isBotReply?: boolean;
     chatType?: ChatType;
     chatName?: string;
@@ -432,6 +434,7 @@ export class ChatContextStore {
       senderName: String(senderName || 'bot'),
       isSelf: true,
       isBotReply: Boolean(isBotReply),
+      ...(botId ? { botId: String(botId) } : {}),
       replyTo: replyTo != null ? String(replyTo) : undefined,
       mentionsMe: false,
       text: clipText(text, this.maxTextChars),
@@ -531,12 +534,24 @@ export class ChatContextStore {
     return Boolean(this.chats.get(String(chatId))?.recalled.has(String(msgId)));
   }
 
-  markDispatched(chatId: string, msgIds: Array<string | null | undefined>): void {
+  markDispatched(
+    chatId: string,
+    msgIds: Array<string | null | undefined>,
+    target?: { botId?: string; botName?: string },
+  ): void {
     const bucket = this.chats.get(String(chatId));
     if (!bucket) return;
     for (const id of msgIds) {
       const s = String(id ?? '').trim();
-      if (s) addBoundedSet(bucket.dispatchedIds, s, 500);
+      if (!s) continue;
+      addBoundedSet(bucket.dispatchedIds, s, 500);
+      if (target?.botId) {
+        const entry = bucket.byId.get(s);
+        if (entry) {
+          entry.targetBotId = String(target.botId);
+          if (target.botName) entry.targetBotName = String(target.botName);
+        }
+      }
     }
   }
 

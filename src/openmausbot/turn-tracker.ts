@@ -3,7 +3,7 @@
  */
 import { attachBotBadge } from '../core/security.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import { formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
+import { extractWidgetFallbackText, formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
 import { messageNeedsInput } from './client.ts';
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
@@ -18,6 +18,7 @@ const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
 
 /** 收集属于本轮次的全部 Bot 消息（包含缺少 requestMessageId 但通过 sentInTurn / 位置窗口关联的独立附件消息）。 */
 const isDeliverableTextKind = (kind: unknown): boolean => kind === 'text' || kind === 'widget';
+const deliverableTextOf = (m: OmbMessage): string => (m.kind === 'widget' ? extractWidgetFallbackText(m) : String(m.text ?? '').trim());
 
 function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, sendId: string | null): OmbMessage[] {
   const uIdx = messages.findLastIndex(
@@ -47,7 +48,7 @@ function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, se
   }
   for (const m of windowBots) {
     if (seen.has(m) || m.requestMessageId) continue;
-    if (m.kind === 'screen' || m.kind === 'burst' || m.kind === 'goal.run' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)) {
+    if (m.kind === 'screen' || m.kind === 'burst' || m.kind === 'goal.run' || m.kind === 'widget' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0)) {
       seen.add(m);
     }
   }
@@ -62,6 +63,7 @@ export interface TurnTrackerDeps {
     text: string;
     finalMsg?: OmbMessage;
     mediaMessages?: OmbMessage[];
+    widgetMessages?: OmbMessage[];
     proactive?: boolean;
     isGroup?: boolean;
     speakerName?: string;
@@ -169,7 +171,7 @@ export function createTurnTracker(
     const buckets: Array<{ speakerName: string; msgs: OmbMessage[]; texts: string[] }> = [];
     for (const m of msgs) {
       const speakerName = isGroup ? (m.from?.name || '') : '';
-      const text = String(m.text ?? '').trim();
+      const text = deliverableTextOf(m);
       if (!text) continue;
       const prev = buckets.at(-1);
       if (prev && prev.speakerName === speakerName) {
@@ -222,6 +224,7 @@ export function createTurnTracker(
         text: combined,
         finalMsg: b.msgs.at(-1),
         mediaMessages: b.msgs,
+        widgetMessages: b.msgs.filter((m) => m.kind === 'widget'),
         proactive: false,
         isGroup,
         speakerName: b.speakerName,
@@ -464,10 +467,10 @@ export function createTurnTracker(
         ? [...missingIntermediates, ...rawUndelivered]
         : rawUndelivered;
       if (silentProgress) {
-        const terminalOnly = undeliveredTexts.filter((m) => (m.turnTerminal || m.kind === 'widget') && String(m.text ?? '').trim());
+        const terminalOnly = undeliveredTexts.filter((m) => (m.turnTerminal || m.kind === 'widget') && deliverableTextOf(m));
         if (terminalOnly.length) undeliveredTexts = terminalOnly;
       }
-      const hasAnyText = undeliveredTexts.some((m) => String(m.text ?? '').trim());
+      const hasAnyText = undeliveredTexts.some((m) => deliverableTextOf(m));
 
       if (!hasAnyText) {
         const terminalGoal = matched.findLast((m) => m.kind === 'goal.run' && m.goalRun?.status && m.goalRun.status !== 'working');
@@ -555,6 +558,7 @@ export function createTurnTracker(
             text: b.texts.join('\n\n'),
             finalMsg: b.msgs.at(-1),
             mediaMessages: b.msgs,
+            widgetMessages: b.msgs.filter((m) => m.kind === 'widget'),
             proactive: false,
             isGroup: true,
             speakerName: b.speakerName,
@@ -566,7 +570,7 @@ export function createTurnTracker(
         return;
       }
 
-      const combined = undeliveredTexts.map((m) => String(m.text ?? '').trim()).filter(Boolean).join('\n\n');
+      const combined = undeliveredTexts.map((m) => deliverableTextOf(m)).filter(Boolean).join('\n\n');
       await deliverBotReply({
         botId,
         botName,
@@ -574,6 +578,7 @@ export function createTurnTracker(
         text: combined,
         finalMsg: undeliveredTexts.at(-1) ?? texts.at(-1),
         mediaMessages: matched,
+        widgetMessages: undeliveredTexts.filter((m) => m.kind === 'widget'),
         proactive: false,
         turnStartedAt: startedAt,
         chatCtx,
@@ -620,7 +625,7 @@ export function createTurnTracker(
         return;
       }
       if (isDeliverableTextKind(msg.kind) && !msg.turnTerminal) {
-        const trimmed = String(msg.text ?? '').trim();
+        const trimmed = deliverableTextOf(msg);
         const mid = msg.id ? String(msg.id) : null;
         if (!trimmed || (mid && (bridge.deliveredOmbIds.has(mid) || deliveredIntermediateIds.has(mid)))) return;
         if (pendingIntermediates.some((m) => mid && String(m.id) === mid) || heldIntermediates.some((m) => mid && String(m.id) === mid)) return;
@@ -629,7 +634,7 @@ export function createTurnTracker(
           clearTimeout(progressTimer);
           progressTimer = null;
         }
-        if ((silentProgress && msg.kind !== 'widget') || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles)) {
+        if (msg.kind !== 'widget' && (silentProgress || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles))) {
           heldIntermediates.push(msg);
           return;
         }
@@ -697,6 +702,7 @@ export function createTurnTracker(
             text: sameSpeakerParts.filter(Boolean).join('\n\n'),
             finalMsg: msg,
             mediaMessages: [...sameSpeakerMsgs, msg],
+            widgetMessages: [...sameSpeakerMsgs, msg].filter((m) => m.kind === 'widget'),
             proactive: false,
             isGroup: true,
             speakerName,

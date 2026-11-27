@@ -8,7 +8,7 @@ import { attachBotBadge } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { ChatContextMessage, ChatType, InboundEvent } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import { formatOmbError } from './cards.ts';
+import { extractWidgetFallbackText, formatOmbError } from './cards.ts';
 import { formatAttachmentTag, messageNeedsInput } from './client.ts';
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { claimUploads, deliverBotReply, emitCard, forwardBotMedia } from './delivery.ts';
@@ -164,7 +164,11 @@ async function buildPromptContext(
   bridge: OpenMausBotBridge,
   ev: InboundEvent | null | undefined,
   chatCtx: BridgeChatContext,
-  { skipSelfQuote = false, injectRecent = bridge.chats.injectRecentContext === true }: { skipSelfQuote?: boolean; injectRecent?: boolean } = {},
+  {
+    skipSelfQuote = false,
+    injectRecent = bridge.chats.injectRecentContext === true,
+    botId = '',
+  }: { skipSelfQuote?: boolean; injectRecent?: boolean; botId?: string } = {},
 ) {
   if (!ev?.chat?.id) {
     return {
@@ -196,7 +200,11 @@ async function buildPromptContext(
           availableFiles: number;
           pullOnly: boolean;
         }) => (
-          bridge.imContext?.getContextPullHint?.(String(ev.chat.id), { ...info, readonly: Boolean(chatCtx?.readonly) }) ?? ''
+          bridge.imContext?.getContextPullHint?.(String(ev.chat.id), {
+            ...info,
+            ...(botId ? { botId } : {}),
+            readonly: Boolean(chatCtx?.readonly),
+          }) ?? ''
         )
       : undefined,
   };
@@ -312,10 +320,11 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
   }
 
   if ((msg.kind === 'text' || msg.kind === 'widget') && (msg.turnTerminal || msg.kind === 'widget')) {
-    if (!text && !hasMedia) return;
+    const effText = msg.kind === 'widget' ? extractWidgetFallbackText(msg) : text;
+    if (!effText && !hasMedia) return;
     rememberBounded(bridge.deliveredOmbIds, msg.id);
     if (inQuietHours(bridge.now(), bridge.quietHours)) {
-      bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: text || '（附件通知）', finalMsg: msg });
+      bridge.quietQueue.push({ botId, botName, threadId, isGroup, speakerName, speakerBotId, text: effText || '（附件通知）', finalMsg: msg });
       bridge.saveState();
       return;
     }
@@ -323,9 +332,10 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
       botId,
       botName,
       threadId,
-      text: text || '（附件通知）',
+      text: effText || '（附件通知）',
       finalMsg: msg,
       mediaMessages: [msg],
+      widgetMessages: msg.kind === 'widget' ? [msg] : [],
       proactive: true,
       isGroup,
       speakerName,
@@ -630,6 +640,7 @@ export async function dispatchToBot(
     : await buildPromptContext(bridge, ctxInfo.ev, ctxInfo, {
         skipSelfQuote: Boolean(!isExternal && replyToOmbId),
         injectRecent: bridge.chats.injectRecentContext === true && !ctxInfo.delegationReq,
+        botId: bot.id,
       });
   const { uploads, transcripts } = await claimUploads(
     bridge,
@@ -775,7 +786,8 @@ export async function dispatchToBot(
     trimMapCap(bridge.threadInjectedScope, 200);
   }
   const ctxStore = bridge.imContext?.store ?? bridge.localContextStore;
-  ctxStore.markDispatched(ctxInfo.originChatId, [imMsgId, ...(promptCtx.consumedSelfMsgIds ?? [])]);
+  if (imMsgId) ctxStore.markDispatched(ctxInfo.originChatId, [imMsgId], { botId: bot.id, botName: shownName });
+  if (promptCtx.consumedSelfMsgIds?.length) ctxStore.markDispatched(ctxInfo.originChatId, promptCtx.consumedSelfMsgIds);
 
   const alreadyTracking = [...bridge.activeTurns.values()].some((t) => t.threadId === threadId);
   const compactCtx = compactChatCtx(ctxInfo);

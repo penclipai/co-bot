@@ -13,7 +13,7 @@ import type {
   InboundEvent,
   LinkCard,
 } from '../types.ts';
-import { scanAndRedactOutbound } from './security.ts';
+import { hasBotBadgePrefix, scanAndRedactOutbound } from './security.ts';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -393,6 +393,16 @@ function makeHttpError(message: string, status: number): Error & { status: numbe
   return err;
 }
 
+function isOtherBotMessage(msg: ChatContextMessage, currentBotId: string | null): boolean {
+  if (msg.isBotReply) return Boolean(currentBotId && msg.botId && msg.botId !== currentBotId);
+  if (currentBotId && msg.targetBotId && msg.targetBotId !== currentBotId) return true;
+  return hasBotBadgePrefix(msg.text);
+}
+
+function isAnyBotExchange(msg: ChatContextMessage, currentBotId: string | null): boolean {
+  return Boolean(msg.isBotReply || isOtherBotMessage(msg, currentBotId));
+}
+
 export interface ContextPullManagerOptions {
   resolveMessage: (chatId: string, msgId: string) => Promise<ChatContextMessage | null>;
   getHistory: (chatId: string, opts: { limit: number; before?: string | null }) => Promise<ChatContextMessage[]>;
@@ -414,7 +424,7 @@ export interface ContextPullManagerOptions {
 export class ContextPullManager {
   #opts: Required<Pick<ContextPullManagerOptions, 'resolveMessage' | 'getHistory' | 'now' | 'maxPerMinute'>> & ContextPullManagerOptions;
   #grantsByChat = new Map<string, string>();
-  #grantMeta = new Map<string, { chatId: string; hits: number[] }>();
+  #grantMeta = new Map<string, { chatId: string; botId: string | null; hits: number[] }>();
 
   constructor(opts: ContextPullManagerOptions) {
     this.#opts = {
@@ -424,22 +434,24 @@ export class ContextPullManager {
     };
   }
 
-  /** 为指定会话返回进程期可复用的短句柄（避免触发 `token=` 脱敏规则与重复审批）。 */
-  getGrant(chatId: string): string {
+  /** 为指定会话与 Bot 返回进程期可复用的短句柄（避免触发 `token=` 脱敏规则与重复审批）。 */
+  getGrant(chatId: string, botId?: string | null): string {
     const cid = String(chatId || '').trim();
     if (!cid) throw new Error('chatId 不能为空');
-    const existing = this.#grantsByChat.get(cid);
+    const bid = String(botId || '').trim();
+    const scopeKey = `${cid}\0${bid}`;
+    const existing = this.#grantsByChat.get(scopeKey);
     if (existing) return existing;
     while (this.#grantsByChat.size >= 200) {
-      const oldestChat = this.#grantsByChat.keys().next().value;
-      if (oldestChat === undefined) break;
-      const oldGrant = this.#grantsByChat.get(oldestChat);
-      this.#grantsByChat.delete(oldestChat);
+      const oldestKey = this.#grantsByChat.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldGrant = this.#grantsByChat.get(oldestKey);
+      this.#grantsByChat.delete(oldestKey);
       if (oldGrant) this.#grantMeta.delete(oldGrant);
     }
     const grant = `g_${crypto.randomBytes(5).toString('hex')}`;
-    this.#grantsByChat.set(cid, grant);
-    this.#grantMeta.set(grant, { chatId: cid, hits: [] });
+    this.#grantsByChat.set(scopeKey, grant);
+    this.#grantMeta.set(grant, { chatId: cid, botId: bid || null, hits: [] });
     return grant;
   }
 
@@ -477,7 +489,7 @@ export class ContextPullManager {
     }));
   }
 
-  #authenticate(url: URL, remoteAddress: string | undefined): string {
+  #authenticate(url: URL, remoteAddress: string | undefined): { chatId: string; botId: string | null } {
     if (!isLoopbackRemoteAddress(remoteAddress)) {
       throw makeHttpError('仅允许本机回环访问上下文探索接口', 403);
     }
@@ -495,12 +507,14 @@ export class ContextPullManager {
       throw makeHttpError('上下文拉取过于频繁，请稍后重试', 429);
     }
     meta.hits.push(nowTs);
-    return meta.chatId;
+    return { chatId: meta.chatId, botId: meta.botId };
   }
 
-  #summarize(msg: ChatContextMessage, previewMax = 240): Record<string, unknown> {
+  #summarize(msg: ChatContextMessage, currentBotId: string | null = null, previewMax = 240): Record<string, unknown> {
     const full = this.#composeFullText(msg);
-    const preview = full.length > previewMax ? `${full.slice(0, previewMax)}…` : full;
+    const otherBot = isOtherBotMessage(msg, currentBotId);
+    const effMax = otherBot ? Math.min(previewMax, 80) : previewMax;
+    const preview = full.length > effMax ? `${full.slice(0, effMax)}…` : full;
     const attachments = this.#formatAttachmentsMeta(msg);
     return {
       id: msg.id,
@@ -508,11 +522,14 @@ export class ContextPullManager {
       time: formatClock(msg.ts),
       sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
       ...(msg.isBotReply ? { isBotReply: true } : {}),
+      ...(msg.botId ? { botId: msg.botId } : {}),
+      ...(msg.targetBotName ? { targetBot: redactAndClip(msg.targetBotName, 40) } : {}),
+      ...(otherBot ? { otherBot: true } : {}),
       ...(msg.isForwarded ? { isForwarded: true } : {}),
       ...(msg.forwarded ? { forwardedCount: msg.forwarded.messages.length } : {}),
       preview,
       totalChars: full.length,
-      truncated: full.length > previewMax,
+      truncated: full.length > effMax,
       ...(attachments.length ? { attachments } : {}),
     };
   }
@@ -529,6 +546,7 @@ export class ContextPullManager {
       availableCount = 0,
       availableFiles = 0,
       pullOnly = false,
+      botId = null,
       readonly = false,
     }: {
       baseUrl?: string | null;
@@ -539,6 +557,7 @@ export class ContextPullManager {
       availableCount?: number;
       availableFiles?: number;
       pullOnly?: boolean;
+      botId?: string | null;
       readonly?: boolean;
     },
   ): string {
@@ -547,7 +566,7 @@ export class ContextPullManager {
       ? (availableCount > 0 || hasTruncated || hasOlder || channelHasHistory)
       : (hasTruncated || hasOlder || channelHasHistory);
     if (!hasPullable) return '';
-    const grant = this.getGrant(chatId);
+    const grant = this.getGrant(chatId, botId);
     const endpoint = `${baseUrl.replace(/\/+$/, '')}/api/context/history?grant=${grant}`;
     const meta: string[] = [];
     if (availableCount > 0) meta.push(`available=${availableCount}`);
@@ -558,9 +577,9 @@ export class ContextPullManager {
     return meta.length ? `context_pull: ${endpoint} (${meta.join(', ')})` : `context_pull: ${endpoint}`;
   }
 
-  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要。 */
+  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要（支持 `excludeBots` / `onlyFiles` 过滤）。 */
   async handleRequest(url: URL, remoteAddress: string | undefined): Promise<Record<string, unknown>> {
-    const chatId = this.#authenticate(url, remoteAddress);
+    const { chatId, botId: currentBotId } = this.#authenticate(url, remoteAddress);
     const msgId = String(url.searchParams.get('msgId') || '').trim();
     if (msgId) {
       const msg = await this.#opts.resolveMessage(chatId, msgId);
@@ -581,6 +600,8 @@ export class ContextPullManager {
         msgId: msg.id,
         ts: msg.ts,
         sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
+        ...(msg.isBotReply ? { isBotReply: true } : {}),
+        ...(msg.botId ? { botId: msg.botId } : {}),
         text: chunk,
         totalChars: full.length,
         offset,
@@ -590,31 +611,50 @@ export class ContextPullManager {
       };
     }
 
+    const excludeBots = ['1', 'true'].includes(String(url.searchParams.get('excludeBots') || url.searchParams.get('humansOnly') || '').toLowerCase());
+    const onlyFiles = ['1', 'true'].includes(String(url.searchParams.get('onlyFiles') || '').toLowerCase());
+    const matchesFilter = (m: ChatContextMessage): boolean => {
+      if (excludeBots && isAnyBotExchange(m, currentBotId)) return false;
+      if (onlyFiles && collectAllMsgAttachments(m).length === 0) return false;
+      return true;
+    };
+
     const query = String(url.searchParams.get('q') || '').trim();
     const limit = Math.max(1, Math.min(20, Number(url.searchParams.get('limit')) || 20));
     if (query) {
       const rawMatches = this.#opts.searchCached ? this.#opts.searchCached(chatId, query, Math.max(limit * 4, 80)) : [];
-      const readable = rawMatches.filter((m) => this.#canRead(chatId, m)).slice(-limit);
-      this.#opts.onTelemetry?.({ chatId, summary: `mode=search hits=${readable.length}` });
+      const readable = rawMatches.filter((m) => this.#canRead(chatId, m) && matchesFilter(m)).slice(-limit);
+      this.#opts.onTelemetry?.({
+        chatId,
+        summary: `mode=search hits=${readable.length}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}`,
+      });
       return {
         ok: true,
         mode: 'search',
         query,
-        messages: readable.map((m) => this.#summarize(m)),
+        ...(excludeBots ? { excludeBots: true } : {}),
+        ...(onlyFiles ? { onlyFiles: true } : {}),
+        messages: readable.map((m) => this.#summarize(m, currentBotId)),
       };
     }
 
     const before = String(url.searchParams.get('before') || '').trim() || null;
-    const rawHist = await this.#opts.getHistory(chatId, { limit: limit + 1, before });
-    const readable = rawHist.filter((m) => this.#canRead(chatId, m));
+    const fetchLimit = (excludeBots || onlyFiles) ? Math.min(120, Math.max((limit + 1) * 6, 80)) : (limit + 1);
+    const rawHist = await this.#opts.getHistory(chatId, { limit: fetchLimit, before });
+    const readable = rawHist.filter((m) => this.#canRead(chatId, m) && matchesFilter(m));
     const hasMore = readable.length > limit;
     const page = hasMore ? readable.slice(-limit) : readable;
     const nextBefore = hasMore && page.length ? page[0].id : null;
-    this.#opts.onTelemetry?.({ chatId, summary: `mode=history count=${page.length} hasMore=${hasMore}` });
+    this.#opts.onTelemetry?.({
+      chatId,
+      summary: `mode=history count=${page.length} hasMore=${hasMore}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}`,
+    });
     return {
       ok: true,
       mode: 'history',
-      messages: page.map((m) => this.#summarize(m)),
+      ...(excludeBots ? { excludeBots: true } : {}),
+      ...(onlyFiles ? { onlyFiles: true } : {}),
+      messages: page.map((m) => this.#summarize(m, currentBotId)),
       hasMore,
       nextBefore,
     };
@@ -626,7 +666,7 @@ export class ContextPullManager {
     remoteAddress: string | undefined,
     res?: http.ServerResponse,
   ): Promise<Record<string, unknown> | undefined> {
-    const chatId = this.#authenticate(url, remoteAddress);
+    const { chatId } = this.#authenticate(url, remoteAddress);
     const msgId = String(url.searchParams.get('msgId') || '').trim();
     if (!msgId) throw makeHttpError('缺少 msgId 参数', 400);
 

@@ -306,6 +306,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     senderId: 'me',
     senderName: '我',
     isBotReply: Boolean(draft.delegationRe || applyBotPrefix),
+    ...(applyBotPrefix ? { botId: draft.followUp?.botId || bridge.chiefBotId || undefined } : {}),
   });
   if (draft.delegationRe) {
     bridge.emitTelemetry('delegation_res', {

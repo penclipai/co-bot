@@ -549,6 +549,7 @@ export interface ImContextService {
       availableCount?: number;
       availableFiles?: number;
       pullOnly?: boolean;
+      botId?: string;
       readonly?: boolean;
     },
   ) => string;

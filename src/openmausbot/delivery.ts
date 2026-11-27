@@ -4,9 +4,9 @@ import { isAudioAttachment } from '../core/channel-contract.ts';
 import { sanitizeExternalMentions } from '../core/chat-context.ts';
 import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
 import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
-import type { ChannelSendOptions, InboundAttachment } from '../types.ts';
+import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import { fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
+import { extractWidgetActions, fmtTokens, formatCardPrompt, formatOmbError } from './cards.ts';
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { formatDelegationResponse } from './delegation.ts';
 import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
@@ -331,6 +331,7 @@ export async function deliverBotReply(
     text,
     finalMsg,
     mediaMessages = [],
+    widgetMessages,
     proactive = false,
     isGroup = false,
     speakerName = '',
@@ -343,6 +344,7 @@ export async function deliverBotReply(
     text: string;
     finalMsg?: OmbMessage;
     mediaMessages?: OmbMessage[];
+    widgetMessages?: OmbMessage[];
     proactive?: boolean;
     isGroup?: boolean;
     speakerName?: string;
@@ -468,10 +470,30 @@ export async function deliverBotReply(
   const useMarkdown = Boolean(bridge.markdown && caps?.markdown !== false);
   const badgeEffLen = badge ? (useMarkdown ? badge.length : plain(badge).length) : 0;
 
+  const effWidgets = widgetMessages ?? (finalMsg?.kind === 'widget' ? [finalMsg] : []);
+  const widgetActions: ChannelAction[] = [];
+  if (!isPrivDraft && !isPolishDraft && effWidgets.length) {
+    const extPrefix = isDirectExternalReply
+      ? ((botId === bridge.chiefBotId || badgeShown === 'bot') ? bridge.trigger : `@${shownName}`)
+      : '';
+    const seenAct = new Set<string>();
+    for (const wm of effWidgets) {
+      for (const act of extractWidgetActions(wm.widget, { externalTriggerPrefix: extPrefix })) {
+        const k = `${act.label}\0${act.text ?? ''}`;
+        if (seenAct.has(k)) continue;
+        seenAct.add(k);
+        widgetActions.push(act);
+        if (widgetActions.length >= 10) break;
+      }
+      if (widgetActions.length >= 10) break;
+    }
+  }
+  const outActions = widgetActions.length ? widgetActions : null;
+
   const safeFull = scanAndRedactOutbound(full).text;
   const sentIds: string[] = [];
   if (full.length <= effResult) {
-    const sid = await bridge.say(full, route, quoteReplyId);
+    const sid = await bridge.say(full, route, quoteReplyId, outActions);
     if (sid) sentIds.push(sid);
   } else if (effSoftSplit > effResult && full.length <= effSoftSplit) {
     let chunks: string[];
@@ -499,6 +521,7 @@ export async function deliverBotReply(
           ombMsgId: i === chunks.length - 1 ? (finalMsg?.id ?? null) : null,
         },
         i === 0 ? quoteReplyId : null,
+        i === chunks.length - 1 ? outActions : null,
       );
       if (sid) sentIds.push(sid);
     }
@@ -520,7 +543,7 @@ export async function deliverBotReply(
       wasCut = clipped.cut;
       out = `${clipped.text}${clipped.cut ? note : ''}${tailSuffix}`;
     }
-    const sid = await bridge.say(out, route, quoteReplyId);
+    const sid = await bridge.say(out, route, quoteReplyId, outActions);
     if (sid) sentIds.push(sid);
 
     if (wasCut && canAttach) {
@@ -580,6 +603,7 @@ export async function deliverBotReply(
     text: safeFull,
     replyTo: quoteReplyId ?? undefined,
     senderName: speakerName || botName,
+    botId: speakerBotId || botId,
   });
   bridge.emitTelemetry(proactive ? 'proactive' : 'reply', {
     botName: speakerName || botName,

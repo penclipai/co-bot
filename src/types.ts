@@ -416,6 +416,9 @@ export interface ChatContextMessage {
   senderName?: string;
   isSelf: boolean;
   isBotReply: boolean;
+  botId?: string;
+  targetBotId?: string;
+  targetBotName?: string;
   replyTo?: string;
   mentionsMe: boolean;
   mentions?: InboundMention[];

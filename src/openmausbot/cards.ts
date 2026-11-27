@@ -336,3 +336,100 @@ export function formatCardPrompt(
   }
   return { text: `${head}⏸️ **需要确认**\n> 请在管理后台确认下一步操作。`, actions: [], info: null };
 }
+
+function asWidgetRecord(val: unknown): Record<string, unknown> | null {
+  return val && typeof val === 'object' && !Array.isArray(val) ? (val as Record<string, unknown>) : null;
+}
+
+function walkWidgetNodes(root: unknown, visit: (node: Record<string, unknown>) => void): void {
+  const start = asWidgetRecord(root);
+  if (!start) return;
+  const stack: Array<{ node: Record<string, unknown>; depth: number }> = [{ node: start, depth: 0 }];
+  let visited = 0;
+  while (stack.length && visited < 120) {
+    const cur = stack.pop()!;
+    visited += 1;
+    visit(cur.node);
+    if (cur.depth >= 12) continue;
+    const nextDepth = cur.depth + 1;
+    const childList: Record<string, unknown>[] = [];
+    if (Array.isArray(cur.node.children)) {
+      for (const c of cur.node.children) {
+        const rec = asWidgetRecord(c);
+        if (rec) childList.push(rec);
+      }
+    }
+    for (const [k, v] of Object.entries(cur.node)) {
+      if (k === 'children' || k === 'onClickAction') continue;
+      const rec = asWidgetRecord(v);
+      if (rec) childList.push(rec);
+    }
+    for (let i = childList.length - 1; i >= 0; i -= 1) {
+      stack.push({ node: childList[i], depth: nextDepth });
+    }
+  }
+}
+
+/** 从 OpenMausBot `kind: 'widget'` 消息的 UI 树提取可点击按钮，转为通道通用的 `ChannelAction[]`。 */
+export function extractWidgetActions(
+  widget: OmbMessage['widget'] | null | undefined,
+  opts: { externalTriggerPrefix?: string } = {},
+): ChannelAction[] {
+  const root = widget?.root;
+  if (!root || typeof root !== 'object') return [];
+  const prefix = String(opts.externalTriggerPrefix ?? '').trim();
+  const seen = new Set<string>();
+  const out: ChannelAction[] = [];
+  walkWidgetNodes(root, (node) => {
+    if (out.length >= 10) return;
+    const isBtn = node.type === 'Button' || Boolean(asWidgetRecord(node.onClickAction));
+    if (!isBtn) return;
+    const label = String(node.label ?? '').trim();
+    if (!label) return;
+    const act = asWidgetRecord(node.onClickAction);
+    if (act && /^(?:url|link|open_?url)$/i.test(String(act.type ?? '').trim())) return;
+    const payload = act ? asWidgetRecord(act.payload) : null;
+    const rawReply = String(payload?.text ?? act?.text ?? act?.value ?? label).trim() || label;
+    const text = prefix && !rawReply.startsWith('@') ? `${prefix} ${rawReply}` : rawReply;
+    const key = `${label}\0${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const style = String(node.style ?? '').trim().toLowerCase();
+    const kind = style === 'primary'
+      ? 'primary'
+      : ((style === 'danger' || style === 'destructive') ? 'danger' : undefined);
+    out.push({ label, text, ...(kind ? { kind } : {}) });
+  });
+  return out;
+}
+
+/** 当 `kind: 'widget'` 缺少兜底文本时，从 widget UI 树提取标题、说明与按钮标签作为降级展示文本。 */
+export function extractWidgetFallbackText(msg: OmbMessage | null | undefined): string {
+  const direct = String(msg?.text ?? '').trim();
+  if (direct) return direct;
+  const root = msg?.widget?.root;
+  if (!root || typeof root !== 'object') return '';
+  const descLines: string[] = [];
+  const seenDesc = new Set<string>();
+  const labels: string[] = [];
+  const pushDesc = (raw: unknown): void => {
+    const s = String(raw ?? '').trim();
+    if (!s || seenDesc.has(s)) return;
+    seenDesc.add(s);
+    descLines.push(s);
+  };
+  walkWidgetNodes(root, (node) => {
+    pushDesc(node.title);
+    pushDesc(node.caption);
+    const nType = String(node.type ?? '').trim();
+    if (/^(?:text|markdown)$/i.test(nType)) {
+      pushDesc(node.value ?? node.text);
+    }
+    if (nType === 'Button' || asWidgetRecord(node.onClickAction)) {
+      const lbl = String(node.label ?? '').trim();
+      if (lbl && !labels.includes(lbl)) labels.push(lbl);
+    }
+  });
+  if (descLines.length) return descLines.join('\n');
+  return labels.length ? `选项：${labels.join(' / ')}` : '';
+}
