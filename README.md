@@ -45,7 +45,7 @@ src/plugins/         内置插件装配层（extensions、web、channel-sim、ch
 src/im/ & src/web/   Web 模拟器传输层与本地 HTTP 服务（127.0.0.1）
 scripts/             CLI 工具链（daemon、service、omb、check、pair、channel-test）
 public/              /sim 模拟器、/debug 诊断台与 Markdown 预览静态页
-docs/                使用指南（usage.md）、IM 协议规范（IM_PROTOCOL.md）、排障（TROUBLESHOOTING.md）与路线（ROADMAP.md）
+docs/                使用指南、IM 协议规范、排障、路线图与完备性形式化推导（FORMAL_COMPLETENESS.md）
 test/                Node 内置测试套件与共享 Mock 辅助模块
 config.example.json  最小化示例配置
 im-plugin.example.ts 通用 IM 通道插件模板（TypeScript）
@@ -56,4 +56,5 @@ im-plugin.example.ts 通用 IM 通道插件模板（TypeScript）
 - [使用指南（运维命令、交互用法、指令速查、配置与诊断台）](./docs/usage.md)
 - [内网 / 第三方 IM 通道接入协议规范（转发、`@` 提醒、历史穿透与安全基线）](./docs/IM_PROTOCOL.md)
 - [真实 IM 接入验收、常见排障与多用户隔离部署](./docs/TROUBLESHOOTING.md)
-- [架构演进路线图与克制红线（`v0.5` ~ `v0.7`）](./docs/ROADMAP.md)
+- [架构演进路线图与克制红线（`v0.5` ~ `v0.7.1+`）](./docs/ROADMAP.md)
+- [协调者完备性形式化推导与验证（P1～P5 公理闭环与回归基线）](./docs/FORMAL_COMPLETENESS.md)

@@ -1,6 +1,6 @@
 # co-bot 演进路线图
 
-> 本文档定义 `co-bot`（Coordinator Bot）的边界原则：**仅作为 OpenMausBot / `opencode` 之上的 IM 接入治理与跨人协同网关**，不与底层引擎重复造轮子。日常用法与配置见 [使用指南](./usage.md)。
+> 本文档定义 `co-bot`（Coordinator Bot）的边界原则：**仅作为 OpenMausBot / `opencode` 之上的 IM 接入治理与跨人协同网关**，不与底层引擎重复造轮子。日常用法与配置见 [使用指南](./usage.md)，完备性形式化推导与闭环验证见 [协调者完备性形式化推导与验证](./FORMAL_COMPLETENESS.md)。
 
 ---
 
@@ -29,10 +29,10 @@
 
 ```mermaid
 flowchart TB
-  IM["真实 IM 通道插件 (channel-contract / sim / 自定义 im-plugin / 未来机器人号)"] --> Inbound["入站门禁 & 2 档外部白名单策略"]
-  Inbound --> Router["路由与轻量控制 (@bot bind / 2 态 C2C 协议)"]
+  IM["真实 IM 通道插件 (channel-contract / sim / 自定义 im-plugin / 未来机器人号)"] --> Inbound["入站门禁 & 2 档外部白名单 / passiveMentionAlert"]
+  Inbound --> Router["统一 #N 收件箱 & 路由控制 (@bot bind / 2 态 C2C 协议)"]
   Router --> Context["上下文拼装: IM 会话窗口 (chat-context) + 共享 Git 目录路径指针"]
-  Router --> Guard["出站安全门禁: 密钥脱敏 + 🤖 标识 + @防误触 + 能力降级"]
+  Router --> Guard["出站安全门禁: 密钥 & 运维防漏 + 🤖 标识 + @防误触 + 能力降级"]
   Context --> OMB["OpenMausBot + opencode 运行时 (多 Bot 协同 / 审批卡 / 记忆)"]
   OMB --> Guard --> IM
   Guard -.-> Debug["本地 /debug 诊断台 (脱敏审计 / 应急静音 / 导出诊断包)"]
@@ -49,6 +49,7 @@ flowchart TB
 | `v0.5` | 安全底线与工作区边界 | 出站正文与文本/`.md` 附件凭证脱敏、`🤖 ` 外部标识、`<im-context>` 防注入围栏、`draft_first`、`@bot bind` 目录隔离、`notify` 能力 |
 | `v0.6` | 共享上下文与外部协作者 | `sharedContextDir` 非阻塞 `git pull --ff-only` 目录指针；2 档外部白名单只读护栏（`confirm_in_self` / `auto_readonly`） |
 | `v0.7` | C2C 互通、动态上下文与插件扩展 | `[cobot:req]`/`[cobot:res]` 2 态委托；`plugins/` 扩展；统一转发摘要+`/api/context/history` 按需翻页、`@同事` 追问确认与一次性私密回流；[IM 接入协议规范](./IM_PROTOCOL.md) 与单文件千行约束 |
+| `v0.7.1` | 协调者完备性闭环与安全加固 | `#N` 统一收件箱与裸回复碰撞保护、完整重启持久化（含 `pull-grants.json` 与卡片启动对账）、`@bot quiet`、外群截图精确可达与自聊跨群索引、`passiveMentionAlert`、`collaboratorBot` fail-closed、C2C `res` 来源校验、全链路 `recall` 擦除（详见 [FORMAL_COMPLETENESS.md](./FORMAL_COMPLETENESS.md)） |
 
 ### 下一阶段方向（`v0.8+`，按真机与团队实测反馈推进）
 
@@ -62,8 +63,8 @@ flowchart TB
 
 | 原设想项 | 决策 | 原因 |
 | --- | --- | --- |
-| 自建 `planner.js` 5 步 DAG 编排器 | ❌ 不做 | 与 OpenMausBot 原生 Turn/Queue/Card 状态机重叠，直接复用引擎原生机制。 |
+| 自建 5 步 DAG 编排器 | ❌ 不做 | 与 OpenMausBot 原生 Turn/Queue/Card 状态机重叠，直接复用引擎原生机制。 |
 | 共享仓库全文索引 + 强制目录规范 | ❌ 不做 | 与 `opencode` 代码检索能力重复，2 行路径指针更直接。 |
 | 提前抽象 Issue / MR 平台插件接口 | ⏸ 延后 | 暂不需要；联动 GitLab 时直接由 `opencode` 调用 CLI 工具即可。 |
-| 6 态 C2C 协议 + 三维规则矩阵 + `/sim` 沙箱 | ❌ 简化 | 过多中间态会造成 IM 刷屏，2 态协议 + 2 档策略配合单测更清晰可控。 |
+| 6 态 C2C 协议与重型多租户规则沙箱 | ❌ 简化 | 过多中间态会造成 IM 刷屏，2 态协议 + 2 档只读策略配合确定性测试更清晰可控。 |
 | 重型 `/debug` SPA 规则管理后台 | ❌ 不做 | 零依赖页面保持诊断审计与应急静音开关，规则统一收口于 `config.json`。 |

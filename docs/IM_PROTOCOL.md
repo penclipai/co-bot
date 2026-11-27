@@ -93,11 +93,11 @@
 ```
 
 - 扁平别名：`recalledMsgId` / `targetMsgId` / `revokedMsgId`。
-- 网关收到后立即从内存上下文、`ChatContextStore`、`fileMsgs`、`msgRoute`、磁盘缓存及 `/api/context/history` 分页/搜索结果中永久过滤该消息。
+- 网关收到后立即从内存上下文、`ChatContextStore`、`fileMsgs`、`msgRoute`、`data/in/pull` 拉取缓存、衍生待办（`privateDrafts` / `pendingSendBacks` / `pendingFollowUps`）及 `/api/context/history` 分页/搜索结果中永久过滤或擦除该消息，并将 `recalledMsgIds` 墓碑持久化至 `data/bridge-state.json` 防止重启回流。
 
 ### 3.3 统一转发协议（逐条转发与合并转发）
 
-1. **逐条转发（`isForwarded: true`）**：多条消息逐个转发时，每条均设 `isForwarded: true`；若在自聊 120s 粘性窗口内连发多条转发，网关会暂存上下文而不逐条抢答，直到用户发送 `@bot ...` 时一并消费注入并隔离 `#`/`备忘` 私人笔记。
+1. **逐条转发（`isForwarded: true`）**：多条消息逐个转发时，每条均设 `isForwarded: true`；在自聊窗口内连发转发时，网关会暂存上下文而不抢答，直到用户发送 `@bot ...` 时一并**直接内联**注入当轮 Prompt（不受外部群默认 `injectRecentContext: false` 限制）并消费清空，同时严格隔离 `#`/`备忘` 私人笔记。
 2. **合并转发（`forwarded: ForwardedBundle`）**：聊天记录打包转发时结构如下（单包最多保留 50 条）：
 
 ```ts
@@ -168,12 +168,12 @@ interface InboundAttachment {
 
 ## 五、本机上下文按需探索接口说明（网关内置，插件无需实现）
 
-当插件实现可选的 `getMessage` / `getHistory` 并投递转发或长上下文消息后，`co-bot` 仅在 **Web 监听于 `127.0.0.1` 且 OpenMausBot URL 为本机回环地址** 时向主人/内部回流提示暴露 `GET /api/context/history`：
+当插件投递转发或长上下文消息后，`co-bot` 仅在 **Web 监听于本机回环地址且 OpenMausBot URL 同为本机回环** 时向主人/内部回流提示暴露以下 3 个只读拉取端点（若后端为非回环远端 OpenMausBot，外部会话自动回退为注入最近最多 6 条上下文）：
 
-- `&msgId=<id>&offset=0&limit=4000`：分片读取超长正文或合并转发完整对话（默认分片 4000 字，上限 12000 字）；
-- `&before=<最早msgId>&limit=20`：向前翻看未进首屏窗口的更早群历史（合并本地缓存与插件 `getHistory`，自动过滤已撤回消息）；
-- `&q=<关键词>`：在当前会话可读历史中按关键词检索。
-- 安全硬约束：强制检验回环来源（非 `127.0.0.1`/`::1` 返回 `403`）、进程期会话隔离句柄 `grant`（无效 `403`、缺失 `401`、限流 15 次/分 `429`）、全文/摘要强制走 `scanAndRedactOutbound` 脱敏、自聊 `#`/`备忘` 私人笔记对 API 完全不可见（返回 `404` / 零检索命中）。
+- `GET /api/context/history?grant=<g>&msgId=<id>&offset=0&limit=4000`：分片读取超长正文或合并转发完整对话（默认分片 4000 字，上限 12000 字）；
+- `GET /api/context/history?grant=<g>&before=<最早msgId>&limit=20&excludeBots=1&onlyFiles=1&q=<关键词>`：向前翻看更早群历史（合并本地缓存与插件 `getHistory`，自动过滤已撤回消息），支持过滤 Bot 消息、只看文件或按关键词检索；
+- `GET /api/context/chats?grant=<g>` 与 `GET /api/context/attachment?grant=<g>&msgId=<id>&attId=<aid>`：供自聊主控 Bot 列出外部活跃会话列表，并按需下载附件缓存至 `data/in/pull/`。
+- 安全与持久化约束：强制检验回环来源（非 `127.0.0.1`/`::1` 返回 `403`）、会话作用域句柄 `grant`（持久化在 `data/pull-grants.json`，重启后在途恢复轮次仍有效；无效 `403`、缺失 `401`、限流 15 次/分 `429`）、全文/摘要强制走 `scanAndRedactOutbound` 脱敏、自聊 `#`/`备忘` 私人笔记对 API 完全不可见（返回 `404` / 零检索命中）。
 
 ---
 
