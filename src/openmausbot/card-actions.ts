@@ -79,6 +79,7 @@ export async function advanceQuestionCard(bridge: OpenMausBotBridge, card: Pendi
     bridge.pendingCards.set(nextSentId, {
       ...card,
       imMsgId: nextSentId,
+      chatId: ctrlChatId,
       questionIndex: nextIndex,
       collectedAnswers: nextAnswers,
       options: questions[nextIndex]?.options ?? [],

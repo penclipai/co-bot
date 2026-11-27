@@ -499,7 +499,7 @@ test('UX C1+C2+C3: concise help, persistent privateDraft polish & externalAckInS
     const draftBubbleV2 = tr2.sent.find((m) => m.text.includes('建议先扩连接池'))!;
     assert.match(draftBubbleV2.text, /@bot sendback draft_/);
     assert.match(draftBubbleV2.text, /发回「架构群」/);
-    assert.equal(draftBubbleV2.actions?.length ?? 0, 0);
+    assert.deepEqual(draftBubbleV2.actions?.map((a) => a.label), ['发回原群', '忽略']);
 
     await tr2.push({
       id: 'self_sb',

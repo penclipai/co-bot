@@ -71,7 +71,7 @@ export async function createAskDraftAndConfirm(
     ? (bridge.resolveKnownChat(proposal.chatRef) ?? { id: proposal.chatRef, name: proposal.chatRef, type: 'group' as ChatType })
     : (chatCtx?.originChatId ? { id: chatCtx.originChatId, name: chatCtx.chatName || chatCtx.originChatId, type: (chatCtx.chatType || 'group') as ChatType } : null);
 
-  if (!targetChat?.id || targetChat.id === 'self' || targetChat.id === bridge.selfChat) {
+  if (!targetChat?.id || targetChat.type === 'self' || (bridge.selfChat ? targetChat.id === bridge.selfChat : targetChat.id === 'self')) {
     await bridge.say(`⚠️ Bot 建议向 **${proposal.toRef}** 追问「${clip(proposal.question, 80)}」，但未能确定目标外部群/私聊。`);
     return null;
   }
@@ -154,6 +154,7 @@ export async function handleFollowUpReply(bridge: OpenMausBotBridge, ev: Inbound
 
   // 一次性消费：防止后续普通对话再次触发回流或死循环
   bridge.pendingFollowUps.delete(matched.id);
+  bridge.saveState();
   const who = ev.sender?.name || ev.sender?.id || matched.targetName;
   const replyText = String(ev.text ?? '').trim();
 

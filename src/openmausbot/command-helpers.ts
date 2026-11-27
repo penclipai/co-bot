@@ -130,7 +130,7 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
     `**通用（\`${t}\` / \`@Bot名\` / \`@群名\`）**`,
     `- \`${t} <问题>\` / \`${t}!\`：提问 / 外群私密起草`,
     '- `new [话题]` / `task [号]` / `stop`：会话与停止',
-    '- `status [群]`：查看状态与上下文（仅单Bot）',
+    '- `status [群]`：查看状态、上下文与待处理事项（仅单Bot）',
     '- `compact [群]`：压缩上下文（仅单Bot）',
     `- \`bye\`：退出自聊 ${followUpSec}s 免 \`@\` 续聊`,
   ];
@@ -141,7 +141,7 @@ export function buildHelpText(bridge: OpenMausBotBridge): string {
   }
   const ownerLines = [
     `**仅 \`${t}\` 可用**`,
-    '- `sendback [ID]`：草稿确认回群',
+    '- `sendback [ID]`：草稿发回（或引用草稿回 `确认发送`）',
     '- `chats` / `mute|unmute`：管群与静音',
     '- `summary <群>`：跨群纪要',
     '- `bind [项目]`：绑定项目目录',

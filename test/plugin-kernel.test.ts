@@ -302,7 +302,7 @@ test('OpenMausBotBridge capability-aware degradation: strips markdown, honors ma
   await bridge.say('# 标题\n**加粗内容**与`代码`', null, 'u_quote_1', [{ label: '允许', text: 'ok' }]);
   assert.equal(sentCalls.length, 1);
   assert.equal(sentCalls[0].text, '标题\n加粗内容与代码');
-  assert.deepEqual(sentCalls[0].opts, {});
+  assert.deepEqual(sentCalls[0].opts, { chatType: 'self' });
 
   const mockMsgs: OmbMessage[] = [];
   bridge.client = {

@@ -6,6 +6,10 @@ import type { CommandRegistry } from '../core/extensions.ts';
 import type {
   ChannelAction,
   ChannelCapabilities,
+  ChannelDownloadContext,
+  ChannelGetHistoryOptions,
+  ChannelGetMessageOptions,
+  ChannelIdPatterns,
   ChannelNotifyPayload,
   ChannelSendFileInput,
   ChannelSendOptions,
@@ -299,6 +303,7 @@ export interface PendingOutboundDelegation {
   project?: string;
   question?: string;
   createdAt?: number;
+  remindedAt?: number;
 }
 
 export interface BridgeChatContext {
@@ -382,18 +387,32 @@ export interface PendingFollowUp {
   threadId: string;
   isGroup: boolean;
   question: string;
+  createdAt: number;
   expiresAt: number;
+  remindedAt?: number;
 }
 
 export interface PendingSendBack {
+  id?: string;
+  imMsgId?: string | null;
   draft: PrivateDraft;
   text: string;
   useBotPrefix?: boolean;
   expiresAt: number;
 }
 
+export interface CoordinatorInboxSummary {
+  cards: Array<{ imMsgId: string; title: string; botName: string; kind: string }>;
+  sendBacks: Array<{ id: string; imMsgId?: string | null; originName: string; preview: string; isFollowUp: boolean; expiresAt: number }>;
+  drafts: Array<{ id: string; imMsgId?: string | null; originName: string; preview: string; createdAt: number }>;
+  followUps: Array<{ id: string; chatName: string; targetName: string; question: string; createdAt: number; expiresAt: number }>;
+  delegations: Array<{ id: string; chatName: string; project?: string; question: string; createdAt: number }>;
+  total: number;
+}
+
 export interface PendingCard {
   imMsgId: string;
+  chatId?: string;
   cardKind: 'card' | 'secret' | 'connector' | 'signIn' | 'burst';
   cardBotId: string;
   requestId: string | null;
@@ -503,6 +522,7 @@ export interface ChatThreadEntry {
 
 export interface OutboundBufferItem {
   chatId: string;
+  chatType?: ChatType;
   text: string;
   route: MsgRoute | null;
   replyTo: string | null;
@@ -519,16 +539,19 @@ export interface FileMsgEntry {
 }
 
 export interface BridgeTransport {
+  selfId?: string;
   selfChatId?: string;
   capabilities?: Partial<ChannelCapabilities>;
   canFiles?: boolean;
+  idPatterns?: ChannelIdPatterns;
   start: (onEvent: (ev: InboundEvent) => unknown) => Promise<void> | void;
   stop?: () => Promise<void> | void;
   status?: () => Partial<ChannelStatus> | null;
   send: (chatId: string, text: string, opts?: ChannelSendOptions) => Promise<string | undefined>;
   sendFile?: (chatId: string, file: ChannelSendFileInput, opts?: ChannelSendOptions) => Promise<string | undefined>;
-  download?: (att: InboundAttachment, savePath: string) => Promise<void> | void;
-  getMessage?: (chatId: string, msgId: string) => Promise<unknown>;
+  download?: (att: InboundAttachment, savePath: string, ctx?: ChannelDownloadContext) => Promise<void> | void;
+  getMessage?: (chatId: string, msgId: string, opts?: ChannelGetMessageOptions) => Promise<unknown>;
+  getHistory?: (chatId: string, opts?: ChannelGetHistoryOptions) => Promise<unknown[]>;
   notify?: (payload: ChannelNotifyPayload) => Promise<void> | void;
 }
 
@@ -551,6 +574,8 @@ export interface ImContextService {
       pullOnly?: boolean;
       botId?: string;
       readonly?: boolean;
+      allowCrossChat?: boolean;
+      triggerText?: string;
     },
   ) => string;
   buildPromptContext: (opts: {
@@ -610,6 +635,9 @@ export interface BridgeOptions {
   turnStallMs?: number;
   stateSaveDebounceMs?: number;
   draftTtlMs?: number;
+  followUpRemindMs?: number;
+  delegationRemindMs?: number;
+  mutedHintCooldownMs?: number;
   outboundBufferMax?: number;
   outboundBufferTtlMs?: number;
   resultChars?: number;

@@ -247,3 +247,21 @@ export function trimMapCap<K, V>(map: Map<K, V>, cap: number): void {
     map.delete(first);
   }
 }
+
+const SCOPED_KEY_SEP = '\u0000';
+
+/** 生成按会话作用域隔离的复合键 `${chatId}\0${msgId}`，防止不同群的同号 msgId 互串。 */
+export function scopedMsgKey(chatId: string | null | undefined, msgId: string | null | undefined): string {
+  const mid = String(msgId ?? '').trim();
+  if (!mid) return '';
+  const cid = String(chatId ?? '').trim();
+  return cid ? `${cid}${SCOPED_KEY_SEP}${mid}` : mid;
+}
+
+/** 拆解 `scopedMsgKey` 生成的复合键；若为旧版裸 `msgId`，返回 `{ chatId: null, msgId }`。 */
+export function unscopeMsgKey(key: string): { chatId: string | null; msgId: string } {
+  const s = String(key ?? '');
+  const idx = s.indexOf(SCOPED_KEY_SEP);
+  if (idx < 0) return { chatId: null, msgId: s };
+  return { chatId: s.slice(0, idx) || null, msgId: s.slice(idx + 1) };
+}

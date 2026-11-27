@@ -64,11 +64,12 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
       if (channelHasMessage && typeof channel?.getMessage === 'function') {
         try {
-          const remote = await channel.getMessage(chatId, msgId) as Partial<InboundEvent> | null;
+          const chatType = store.getChatMeta(chatId)?.type;
+          const remote = await channel.getMessage(chatId, msgId, chatType ? { chatType } : {}) as Partial<InboundEvent> | null;
           if (remote && String(remote.chat?.id ?? chatId) === String(chatId)) {
             const fixed: Partial<InboundEvent> = remote.chat?.id
               ? remote
-              : { ...remote, chat: { type: 'direct', ...(remote.chat || {}), id: String(chatId) } };
+              : { ...remote, chat: { type: chatType || 'direct', ...(remote.chat || {}), id: String(chatId) } };
             return store.recordInbound(fixed);
           }
         } catch { /* fallback below */ }
@@ -76,7 +77,8 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
       if (channelHasHistory && typeof channel?.getHistory === 'function') {
         try {
-          const hist = await channel.getHistory(chatId, { limit: 40 });
+          const chatType = store.getChatMeta(chatId)?.type;
+          const hist = await channel.getHistory(chatId, { limit: 40, ...(chatType ? { chatType } : {}) });
           if (Array.isArray(hist) && hist.length) {
             store.recordHistoryBatch(chatId, hist);
             const found = store.getMessage(chatId, msgId);
@@ -102,7 +104,9 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
       const missingInLocal = Boolean(before && !anchor);
       if ((local.length < max || missingInLocal) && channelHasHistory && typeof channel?.getHistory === 'function') {
         try {
+          const chatType = store.getChatMeta(chatId)?.type;
           const remote = await channel.getHistory(chatId, {
+            ...(chatType ? { chatType } : {}),
             limit: max + 5,
             beforeMsgId: before || undefined,
             beforeTs: anchor?.ts,
@@ -132,15 +136,23 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
             const dest = path.join(pullCacheDir, fileSafe(cid) || 'chat', fileSafe(msg.id) || 'msg', `${fileSafe(att.id) || 'att'}_${safe}`);
             if (!fs.existsSync(dest)) {
               fs.mkdirSync(path.dirname(dest), { recursive: true });
-              await channel.download!(att, dest);
+              const chatType = store.getChatMeta(cid)?.type;
+              const attWithChat = att.chatId ? att : { ...att, chatId: cid };
+              await channel.download!(attWithChat, dest, { chatId: cid, ...(chatType ? { chatType } : {}) });
             }
             return { localPath: dest, size: fs.statSync(dest).size, mime: att.mime };
           }
         : undefined;
 
+    const listChats = () => store.listChats().map((c) => ({
+      ...c,
+      fileCount: store.getAvailableStats(c.id).fileCount,
+    }));
+
     const pullManager = new ContextPullManager({
       resolveMessage,
       getHistory: (cid, o) => getHistory(cid, { limit: o.limit, before: o.before }),
+      listChats,
       downloadAttachment,
       isSelfMessageReadable: (cid, msg) => store.isSelfMessageReadableByBot(cid, msg),
       isRecalled: (cid, mid) => store.isRecalled(cid, mid),
@@ -150,6 +162,7 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
     });
 
     if (web) {
+      web.route('GET', '/api/context/chats', ({ req, url }) => pullManager.handleChatsRequest(url, req.socket?.remoteAddress));
       web.route('GET', '/api/context/history', ({ req, url }) => pullManager.handleRequest(url, req.socket?.remoteAddress));
       web.route('GET', '/api/context/attachment', ({ req, res, url }) => pullManager.handleAttachmentRequest(url, req.socket?.remoteAddress, res));
     }
@@ -167,6 +180,10 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
 
     const getContextPullHint: NonNullable<ImContextService['getContextPullHint']> = (chatId, info) => {
       const isSelf = store.getChatMeta(chatId)?.type === 'self';
+      const allowCross = Boolean(isSelf && info.allowCrossChat && !info.readonly);
+      const externalChats = allowCross
+        ? listChats().filter((c) => c.type !== 'self' && c.id !== chatId)
+        : [];
       return pullManager.formatPullHint(chatId, {
         baseUrl: resolveLoopbackWebUrl(),
         oldestMsgId: info.oldestMsgId,
@@ -178,6 +195,9 @@ export const imContextPlugin: KernelPlugin<{ chats?: Partial<ChatsConfig> }> = {
         pullOnly: info.pullOnly,
         botId: info.botId,
         readonly: Boolean(info.readonly),
+        allowCrossChat: allowCross,
+        triggerText: info.triggerText || '',
+        externalChats,
       });
     };
 

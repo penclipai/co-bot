@@ -64,14 +64,17 @@
 | 发送者名 | `sender.name?: string` | `fromName?: string` | 否 | 昵称/显示名，用于群聊上下文署名及自动学习 `@同事` 映射表 |
 | 本人标记 | `sender.isSelf: boolean` | `isSelf?: boolean` | 标准必填 | 扁平结构缺省时由 `sender.id === options.selfId` 推导 |
 | 正文 | `text: string` | `text: string` | 是 | 文本内容；纯附件、纯链接卡或纯合并转发时可传 `""` |
-| 引用回复 | `replyTo?: string` | `quoteMsgId?: string` | 否 | 被引用原消息的 ID |
+| 引用回复 ID | `replyTo?: string` | `quoteMsgId?: string` | 否 | 被引用原消息的 ID（空串自动忽略） |
+| 引用消息快照 | `quote?: InboundQuote` | `quote` / `quoteSenderId` / `quoteSenderName` / `quoteText` / `quoteTs` | 否 | 强烈推荐填入原消息发送者 ID/昵称与正文；当缓存与 `getMessage` 未命中时直接作为只读兜底，并参与群成员 ID 学习 |
 | 单条/标志转发 | `isForwarded?: boolean` | `isForwarded?: boolean` / `forwardedFrom` | 否 | 逐条转发（如转发 5 条消息到当前群或自聊）设为 `true` |
 | 合并转发 | `forwarded?: ForwardedBundle` | `forwarded` / `mergedForward` / `forwardMessages` | 否 | 聊天记录合并转发体，存在时自动推导 `isForwarded = true` |
-| 结构化 `@` | `mentions?: InboundMention[]` | `mentions` / `atUserIds` / `atAll` | 否 | 结构化提及，含 `id`、`name`、`isAll`、`isSelf` |
+| 结构化 `@` | `mentions?: InboundMention[]` | `mentions` / `atUserIds` / `atAll` | 否 | 结构化提及，含 `id`、`name`、`isAll`、`isSelf`、`idKind`（缺真实 `id` 标记为 `name_fallback`，不入成员表） |
 | `@我` 标记 | `mentionsMe?: boolean` | `mentionsMe?: boolean` | 否 | 缺省时由 `mentions` 中 `isSelf` 或 `atAllCountsAsMention` 推导 |
 | 链接/分享卡片 | `linkCard?: LinkCard` | `linkCard` / `card` | 否 | 含 `title`、`description`（别名 `summary`/`digest`）、`url`（`href`）、`source`（`appName`） |
 | 附件列表 | `attachments?: InboundAttachment[]` | `files?: Array<{ fileId, name, ... }>` | 否 | 附件字段见 3.4 |
 | 发送端设备 | `device?: InboundDevice` | `fromDevice?: InboundDevice` | 否 | `id`、`type`（`'mobile' \| 'desktop' \| 'pad' \| 'web' \| 'unknown'`）、`name` |
+
+> **强建议**：真实 IM 对接优先使用 [channel-contract.ts](../src/core/channel-contract.ts) 导出的类型安全构造器 `createInboundMessage(...)` / `createRecallEvent(...)`；混写标准字段与扁平字段（如在扁平结构里写 `replyTo` 或在标准结构里写 `fromId`）会触发契约告警（在 `strictContract: true` 时直接报错）。
 
 ### 3.2 撤回事件（Recall）
 
@@ -120,12 +123,14 @@ interface ForwardedBundle {
 interface InboundAttachment {
   id: string;           // 扁平映射为 fileId
   msgId?: string;       // 所属消息 ID；合并转发嵌套附件强烈建议保留原 item.id 或父 msgId
+  chatId?: string;      // 所属会话 ID（网关会自动补全并透传给 download）
   name: string;         // 原始文件名（含扩展名以便识别图片/音频/日志）
   size?: number;        // 字节数
   mime?: string;        // MIME 类型
   kind?: string;        // 例如 'audio' / 'voice' / 'image' / 'file'
   durationSec?: number; // 语音时长（秒）
   transcript?: string;  // 若 IM 自带语音转文字，直接传入可免本地二次转写
+  extra?: Record<string, unknown>; // 平台私有下载凭据/元数据（仅透传给 download，不对外暴露）
 }
 ```
 
@@ -137,7 +142,8 @@ interface InboundAttachment {
 
 1. **`start(onEvent, { onDisconnect })`**：建立长连接或订阅事件，向 `onEvent(raw)` 推入入站消息；底层连接异常中断时务必调用 `onDisconnect?.(err)` 触发托管重连。
 2. **`send(chatId, text, opts)` -> `Promise<string | number | undefined>`**：
-   - 必须返回已发送消息的 IM `msgId`（用于引用链 `msgRoute`、`ownIds` 回声过滤与 `@同事` 回复匹配）。
+   - `opts.chatType` 会由内核自动透传（`'self' | 'direct' | 'group' | 'system'`），方便单聊/群聊接口分离的 IM 路由。
+   - 必须返回已发送消息的 IM `msgId`（用于引用链 `msgRoute`、`ownIds` 回声过滤与 `@同事` 回复匹配；空返回值将触发契约告警）。
    - **`opts.mentions` 结构化 `@同事` 契约**：当主机确认向群里某个同事发起追问时，`opts.mentions` 会传入目标用户列表：
      ```ts
      Array<{ id: string; name?: string }> // 例如 [{ id: 'u_alice', name: 'Alice' }]
@@ -151,10 +157,10 @@ interface InboundAttachment {
 
 | 方法 | 签名 | 行为要求 |
 | --- | --- | --- |
-| `sendFile` | `(chatId, { path, name, mime }, opts) => Promise<string \| undefined>` | 从本地 `path` 读取经网关脱敏后的临时/原文文件并上传发送；返回平台消息 `id` |
-| `download` | `(att: InboundAttachment, savePath: string) => Promise<void>` | 将 `att`（可能来自合并转发内嵌套 `att.msgId`）下载写入 `savePath` |
-| `getMessage` | `(chatId: string, msgId: string) => Promise<Partial<InboundEvent> \| null>` | 按 `msgId` 拉取单条消息（用于引用/点击超长历史时缓存未命中回溯） |
-| `getHistory` | `(chatId: string, { limit?, beforeMsgId?, beforeTs? }) => Promise<Array<Partial<InboundEvent>>>` | 返回 **严格按时间升序（旧 -> 新）** 的历史消息数组；若指定 `beforeMsgId`，**不得**重复包含该锚点消息本身；须过滤已撤回消息 |
+| `sendFile` | `(chatId, { path, name, mime }, opts) => Promise<string \| undefined>` | 从本地 `path` 读取经网关脱敏后的临时/原文文件并上传发送（可读取 `opts.chatType`）；返回平台消息 `id` |
+| `download` | `(att: InboundAttachment, savePath: string, ctx?: { chatId?, chatType? }) => Promise<void>` | 将 `att`（含 `att.msgId` / `att.chatId` / `att.extra`）下载写入 `savePath` |
+| `getMessage` | `(chatId: string, msgId: string, opts?: { chatType? }) => Promise<Partial<InboundEvent> \| null>` | 按 `msgId` 拉取单条消息（用于引用/点击超长历史时缓存未命中回溯） |
+| `getHistory` | `(chatId: string, { chatType?, limit?, beforeMsgId?, beforeTs? }) => Promise<Array<Partial<InboundEvent>>>` | 返回 **严格按时间升序（旧 -> 新）** 的历史消息数组；若指定 `beforeMsgId`，**不得**重复包含该锚点消息本身；须过滤已撤回消息 |
 | `notify` | `({ title, body, chatId, urgent }) => Promise<void>` | 在自聊收到审批卡、追问回复结论或协作回传时触发端内强提醒 |
 | `status` | `() => { connected: boolean; selfChatId?: string; lastError?: string }` | 供 `/api/status` 与 `/debug` 诊断台展示通道健康状态 |
 
@@ -173,25 +179,29 @@ interface InboundAttachment {
 
 ## 六、内网实现安全基线与验收清单
 
-### 6.1 安全基线
+### 6.1 安全与防传错 ID 基线
 
-1. **严禁仅凭昵称判断 `isSelf`**：`sender.isSelf` 必须严格基于 IM 平台认证后的真实 `userId === selfId`（自聊专属通道除外），防止群成员改同名伪造主人权限。
-2. **严禁跳过 `onEvent` 返回稳定 `id`**：若插件每次重连对同一历史消息生成随机 ID，会导致上下文重复与撤回失效；需使用 IM 平台稳定消息 ID。
-3. **回声与文件防环**：`send()` / `sendFile()` 返回的出站消息 ID 会记入 `ownIds`，若 IM 平台通过长连接回推自己发出的消息，务必保留原 ID 以便精准消重。
-4. **`collaborators` 仅写明真实用户 ID**：外部只读白名单配在 `config.json` `chats.collaborators[].id` 时须对应平台不可伪造的 `sender.id`。
+1. **严禁仅凭昵称判断 `isSelf`**：`sender.isSelf` 必须严格基于 IM 平台认证后的真实 `userId === selfId`（自聊专属通道除外），防止群成员改同名伪造主人权限。`ManagedChannel` 会自动交叉校验 `selfId` 与 `sender.id`/`isSelf` 一致性。
+2. **严禁跳过 `onEvent` 返回稳定 `id`**：若插件每次重连对同一历史消息生成随机 ID，会导致上下文重复与撤回失效；需使用 IM 平台稳定消息 ID。网关内部对 `seen` / `ownIds` / `msgRoute` / `fileMsgs` / `pendingCards` 已按 `(chatId, msgId)` 作用域隔离，不同群可安全使用会话内递增 ID。
+3. **防止单聊/群聊 ID 撞号与 64 位精度丢失**：
+   - 若目标 IM 的单聊 `userId` 与群聊 `groupId` 可能撞号，请使用 `encodeScopedChatId(type, rawId)`（如 `dm:1001` / `grp:1001`），在 `send`/`sendFile`/`getHistory` 中用 `decodeScopedChatId(chatId)` 还原并结合 `opts.chatType` 路由。
+   - 64 位雪花整数 ID 请直接在 JSON 解析或 SDK 回调层保持为 `string`（传入 `>= 1e15` 的 `number` 会触发精确度警告）。
+4. **声明 `idPatterns` + `strictContract` 护栏**：在 `defineChannelPlugin` 中按平台规则声明 `idPatterns: { userId, chatId, groupChatId, directChatId, msgId }` 与 `strictContract: true`，可在配置加载、入站与出站第一时间抓出 `open_id` / `user_id` / 昵称 / 群 ID 传混错误。
+5. **回声与文件防环**：`send()` / `sendFile()` 返回的出站消息 ID 会记入按会话隔离的 `ownIds`，若 IM 平台通过长连接回推自己发出的消息，务必保留原 ID 以便精准消重。
+6. **`collaborators` 与 `mentions` 仅使用真实平台 ID**：`chats.collaborators[].id` 须对应不可伪造的 `sender.id`；`mentions[].id` 仅填平台真实用户 ID（无 ID 时填 `name`，切勿拿昵称充当 `id`）。
 
 ### 6.2 内网联调与验收流程
 
-1. **静态契约与目录发现检查**：
+1. **静态契约与 ID 配置检查**：
    ```bash
-   npm run channel:test -- --channel ./im-plugin.ts --dry
+   npm run channel:test -- --channel ./im-plugin.ts --dry --strict
    ```
-   确认零错误并核对打印出的 `capabilities`（特别检查 `history`、`files`、`replyTo` 与真实实现一致）。
-2. **真机收发冒烟校验**：
+   确认零错误并核对打印出的 `capabilities`（特别检查 `history`、`files`、`replyTo` 与真实实现一致）以及 `idPatterns` 配置检查通过。
+2. **真机收发、引用/@/历史全量体检**：
    ```bash
-   npm run channel:test -- --channel ./im-plugin.ts --wait 20 --send "co-bot 通道联通自检" --check-file
+   npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "co-bot 通道联通自检" --check-file --check-history
    ```
-   在等待窗内从手机自聊发一条消息，验证 `InboundEvent` 字段映射、文件收发与 `selfChatId` 自动学习均无告警。
+   在等待窗内依次从手机自聊、外部群**引用回复**和 **`@` 同事** 各发 1 条消息，核对末尾打印的 **字段映射核对表** 中 `chat.id` / `sender.id` / `quote.senderId` / `mentions` 均为预期平台真实 ID。
 3. **6 项端到端场景实测清单**：
    - [ ] **单条长文本/多条逐条转发**：群里转发 1 段 >5KB 日志和 2 条零散消息后 `@bot 总结`，能调取完整末尾内容且密钥片段被脱敏。
    - [ ] **合并转发（含嵌套附件）**：群里发送包含 ≥5 条消息及附件的聊天记录合并转发，能展开末尾结论并自动下载上传嵌套附件。

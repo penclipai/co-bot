@@ -115,19 +115,21 @@ function clipText(text: unknown, max: number): string {
   return `${s.slice(0, max)}…`;
 }
 
-function cloneAttachments(attachments: InboundAttachment[] | undefined, fallbackMsgId?: string): InboundAttachment[] {
+function cloneAttachments(attachments: InboundAttachment[] | undefined, fallbackMsgId?: string, fallbackChatId?: string): InboundAttachment[] {
   if (!Array.isArray(attachments) || !attachments.length) return [];
   return attachments
     .filter((a) => a && a.id != null)
     .map((a) => ({
       id: String(a.id),
       msgId: String(a.msgId ?? fallbackMsgId ?? ''),
+      ...((a.chatId || fallbackChatId) ? { chatId: String(a.chatId || fallbackChatId) } : {}),
       name: String(a.name ?? a.id),
       ...(a.size != null ? { size: Number(a.size) || undefined } : {}),
       ...(a.mime ? { mime: String(a.mime) } : {}),
       ...(a.kind ? { kind: String(a.kind) } : {}),
       ...(Number(a.durationSec) > 0 ? { durationSec: Number(a.durationSec) } : {}),
       ...(a.transcript ? { transcript: clipText(a.transcript, 500) } : {}),
+      ...(a.extra && typeof a.extra === 'object' && !Array.isArray(a.extra) ? { extra: { ...a.extra } } : {}),
     }));
 }
 
@@ -270,11 +272,11 @@ export class ChatContextStore {
   #rememberMember(bucket: ChatBucket, id: unknown, name: unknown): void {
     const idStr = String(id ?? '').trim();
     const nameStr = String(name ?? '').trim();
-    if (!idStr && !nameStr) return;
-    const key = idStr || `name:${nameStr.toLowerCase()}`;
+    if (!idStr || idStr === '__bot__' || idStr === '__all__') return;
+    const key = idStr;
     const existing = bucket.members.get(key);
     bucket.members.set(key, {
-      id: idStr || existing?.id || '',
+      id: idStr,
       name: nameStr || existing?.name || idStr,
     });
     if (bucket.members.size > 200) {
@@ -352,7 +354,7 @@ export class ChatContextStore {
       ...(linkCard ? { linkCard } : {}),
       ...(ev.isForwarded || forwarded ? { isForwarded: true } : {}),
       ...(forwarded ? { forwarded } : {}),
-      attachments: cloneAttachments(ev.attachments, mid),
+      attachments: cloneAttachments(ev.attachments, mid, chatId),
     };
   }
 
@@ -368,8 +370,11 @@ export class ChatContextStore {
     this.#rememberMember(bucket, ev.sender?.id, ev.sender?.name);
     if (Array.isArray(ev.mentions)) {
       for (const m of ev.mentions) {
-        if (m && !m.isAll) this.#rememberMember(bucket, m.id, m.name);
+        if (m && !m.isAll && m.idKind !== 'name_fallback') this.#rememberMember(bucket, m.id, m.name);
       }
+    }
+    if (ev.quote?.senderId) {
+      this.#rememberMember(bucket, ev.quote.senderId, ev.quote.senderName);
     }
     const entry = this.normalizeInbound(ev, chatId, bucket.meta);
     return entry ? this.#upsertEntry(bucket, entry) : null;
@@ -445,13 +450,15 @@ export class ChatContextStore {
 
   recordHistoryBatch(chatId: string, events: Array<Partial<InboundEvent>> = []): number {
     if (!chatId || !Array.isArray(events)) return 0;
+    const cid = String(chatId);
+    const existingType = this.chats.get(cid)?.meta.type || 'direct';
     let added = 0;
     for (const ev of events) {
       if (!ev?.id) continue;
       const normalized: Partial<InboundEvent> = ev.chat?.id
         ? ev
-        : { ...ev, chat: { type: 'direct', ...(ev.chat || {}), id: String(chatId) } };
-      if (String(normalized.chat?.id ?? '') !== String(chatId)) continue;
+        : { ...ev, chat: { type: existingType, ...(ev.chat || {}), id: cid } };
+      if (String(normalized.chat?.id ?? '') !== cid) continue;
       if (this.recordInbound(normalized)) added += 1;
     }
     return added;
@@ -814,6 +821,28 @@ export function formatImContextBlock({
   return `${lines.join('\n')}\n\n`;
 }
 
+/** 当本地缓存与 `getMessage` 均未命中被引用消息时，用事件内联的 `quote` 快照构造只读 `ChatContextMessage` 兜底。 */
+export function buildQuoteFallbackMessage(ev: Partial<InboundEvent> | null | undefined): ChatContextMessage | null {
+  const q = ev?.quote;
+  if (!q || !q.msgId) return null;
+  const chatId = String(q.chatId || ev?.chat?.id || '');
+  const chatType: ChatType = ev?.chat?.type || 'direct';
+  return {
+    id: String(q.msgId),
+    ts: Number(q.ts) || Number(ev?.ts) || Date.now(),
+    chatId,
+    chatType,
+    ...(ev?.chat?.name ? { chatName: String(ev.chat.name) } : {}),
+    senderId: String(q.senderId ?? ''),
+    ...(q.senderName ? { senderName: String(q.senderName) } : {}),
+    isSelf: Boolean(q.isSelf),
+    isBotReply: false,
+    mentionsMe: false,
+    text: q.text ? clipText(q.text, 8000) : '',
+    attachments: [],
+  };
+}
+
 /** 统一装配入站提示上下文：记录入站消息、拉取引用与最近历史、合批同批多附件并格式化 `<im-context>`。 */
 export async function assemblePromptContext({
   ev,
@@ -877,7 +906,12 @@ export async function assemblePromptContext({
   store.recordInbound(ev);
   const chatId = String(ev.chat.id);
   const isSelfSkip = ev.chat.type === 'self' && skipSelfQuote;
-  const quotedMsg = (ev.replyTo && !isSelfSkip) ? await resolveMessage(chatId, ev.replyTo) : null;
+  let quotedMsg = (ev.replyTo && !isSelfSkip) ? await resolveMessage(chatId, ev.replyTo) : null;
+  if (!quotedMsg && !isSelfSkip && ev.quote?.msgId) {
+    quotedMsg = buildQuoteFallbackMessage(ev);
+  } else if (quotedMsg && !quotedMsg.senderName && ev.quote?.senderName) {
+    quotedMsg = { ...quotedMsg, senderName: ev.quote.senderName };
+  }
   const isExternal = ev.chat.type !== 'self';
   const pendingSelf = (!isExternal && contextWindow > 0)
     ? store.getPendingSelfContext(chatId, {

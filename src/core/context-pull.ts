@@ -7,6 +7,7 @@ import type http from 'node:http';
 import path from 'node:path';
 import type {
   ChatContextMessage,
+  ChatType,
   ForwardedBundle,
   ForwardedMessageItem,
   InboundAttachment,
@@ -266,15 +267,20 @@ function normalizeAttList(rawAtts: unknown, fallbackMsgId: string): InboundAttac
     const a = item as AnyRecord;
     const id = a.id ?? a.fileId;
     if (id == null) continue;
+    const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
+      ? { ...(item.extra as AnyRecord) }
+      : undefined;
     out.push({
       id: String(id),
       msgId: String(a.msgId ?? fallbackMsgId),
+      ...(a.chatId ? { chatId: String(a.chatId) } : {}),
       name: String(a.name || id),
       ...(Number(a.size) > 0 ? { size: Number(a.size) } : {}),
       ...(a.mime ? { mime: String(a.mime) } : {}),
       ...(a.kind ? { kind: String(a.kind) } : {}),
       ...(Number(a.durationSec) > 0 ? { durationSec: Number(a.durationSec) } : {}),
       ...(a.transcript ? { transcript: String(a.transcript) } : {}),
+      ...(extra && Object.keys(extra).length ? { extra } : {}),
     });
   }
   return out;
@@ -399,13 +405,42 @@ function isOtherBotMessage(msg: ChatContextMessage, currentBotId: string | null)
   return hasBotBadgePrefix(msg.text);
 }
 
-function isAnyBotExchange(msg: ChatContextMessage, currentBotId: string | null): boolean {
+export function isAnyBotExchange(msg: ChatContextMessage, currentBotId: string | null): boolean {
   return Boolean(msg.isBotReply || isOtherBotMessage(msg, currentBotId));
+}
+
+const CROSS_CHAT_INTENT_RE = /(?:群|各群|跨群|其他群|私聊|聊天记录|进展|汇总|总结|纪要|对比|核对|同步|阻塞|待办|同事|谁说|提到|文档|附件|文件|发布|窗口)/i;
+
+/** 仅当自聊主协调者收到跨群、多人同步或外部文档相关提问时暴露跨群只读入口，避免无关闲聊注入额外提示。 */
+export function shouldExposeCrossChatInSelf(triggerText: unknown, externalChats: PullChatSummary[]): boolean {
+  if (!Array.isArray(externalChats) || !externalChats.length) return false;
+  const raw = String(triggerText ?? '').trim();
+  if (!raw) return false;
+  const stripped = raw.replace(/^@[^\s:：,，]+\s*/u, '').trim() || raw;
+  const low = stripped.toLowerCase();
+  for (const c of externalChats) {
+    const cid = String(c?.id || '').trim().toLowerCase();
+    const cname = String(c?.name || '').trim().toLowerCase();
+    if ((cid.length >= 2 && low.includes(cid)) || (cname.length >= 2 && low.includes(cname))) {
+      return true;
+    }
+  }
+  return CROSS_CHAT_INTENT_RE.test(stripped);
+}
+
+export interface PullChatSummary {
+  id: string;
+  type: ChatType | string;
+  name: string;
+  count: number;
+  fileCount?: number;
+  updatedAt?: number;
 }
 
 export interface ContextPullManagerOptions {
   resolveMessage: (chatId: string, msgId: string) => Promise<ChatContextMessage | null>;
   getHistory: (chatId: string, opts: { limit: number; before?: string | null }) => Promise<ChatContextMessage[]>;
+  listChats?: () => PullChatSummary[];
   downloadAttachment?: (chatId: string, msg: ChatContextMessage, att: InboundAttachment) => Promise<{
     localPath: string;
     size?: number;
@@ -420,11 +455,13 @@ export interface ContextPullManagerOptions {
   maxPerMinute?: number;
 }
 
-/** 本地只读上下文按需探索管理器：为单会话颁发隔离句柄 `grant` 并服务全文、向前翻页与搜索。 */
+export type PullGrantScope = 'single' | 'owner_all';
+
+/** 本地只读上下文按需探索管理器：为单会话或主人自聊主协调者颁发句柄 `grant` 并服务全文、向前翻页、搜索与跨群只读列表。 */
 export class ContextPullManager {
   #opts: Required<Pick<ContextPullManagerOptions, 'resolveMessage' | 'getHistory' | 'now' | 'maxPerMinute'>> & ContextPullManagerOptions;
   #grantsByChat = new Map<string, string>();
-  #grantMeta = new Map<string, { chatId: string; botId: string | null; hits: number[] }>();
+  #grantMeta = new Map<string, { chatId: string; botId: string | null; scope: PullGrantScope; hits: number[] }>();
 
   constructor(opts: ContextPullManagerOptions) {
     this.#opts = {
@@ -434,12 +471,13 @@ export class ContextPullManager {
     };
   }
 
-  /** 为指定会话与 Bot 返回进程期可复用的短句柄（避免触发 `token=` 脱敏规则与重复审批）。 */
-  getGrant(chatId: string, botId?: string | null): string {
+  /** 为指定会话、Bot 与权限域返回进程期可复用的短句柄（避免触发 `token=` 脱敏规则与重复审批）。 */
+  getGrant(chatId: string, botId?: string | null, scope: PullGrantScope = 'single'): string {
     const cid = String(chatId || '').trim();
     if (!cid) throw new Error('chatId 不能为空');
     const bid = String(botId || '').trim();
-    const scopeKey = `${cid}\0${bid}`;
+    const effScope: PullGrantScope = scope === 'owner_all' ? 'owner_all' : 'single';
+    const scopeKey = `${cid}\0${bid}\0${effScope}`;
     const existing = this.#grantsByChat.get(scopeKey);
     if (existing) return existing;
     while (this.#grantsByChat.size >= 200) {
@@ -451,7 +489,7 @@ export class ContextPullManager {
     }
     const grant = `g_${crypto.randomBytes(5).toString('hex')}`;
     this.#grantsByChat.set(scopeKey, grant);
-    this.#grantMeta.set(grant, { chatId: cid, botId: bid || null, hits: [] });
+    this.#grantMeta.set(grant, { chatId: cid, botId: bid || null, scope: effScope, hits: [] });
     return grant;
   }
 
@@ -489,7 +527,7 @@ export class ContextPullManager {
     }));
   }
 
-  #authenticate(url: URL, remoteAddress: string | undefined): { chatId: string; botId: string | null } {
+  #authenticate(url: URL, remoteAddress: string | undefined): { chatId: string; botId: string | null; scope: PullGrantScope } {
     if (!isLoopbackRemoteAddress(remoteAddress)) {
       throw makeHttpError('仅允许本机回环访问上下文探索接口', 403);
     }
@@ -507,7 +545,16 @@ export class ContextPullManager {
       throw makeHttpError('上下文拉取过于频繁，请稍后重试', 429);
     }
     meta.hits.push(nowTs);
-    return { chatId: meta.chatId, botId: meta.botId };
+    return { chatId: meta.chatId, botId: meta.botId, scope: meta.scope };
+  }
+
+  #resolveTargetChatId(auth: { chatId: string; scope: PullGrantScope }, url: URL): string {
+    const reqChatId = String(url.searchParams.get('chatId') || '').trim();
+    if (!reqChatId || reqChatId === auth.chatId) return auth.chatId;
+    if (auth.scope !== 'owner_all') {
+      throw makeHttpError('无权跨会话拉取其他群聊或私聊上下文', 403);
+    }
+    return reqChatId;
   }
 
   #summarize(msg: ChatContextMessage, currentBotId: string | null = null, previewMax = 240): Record<string, unknown> {
@@ -548,6 +595,9 @@ export class ContextPullManager {
       pullOnly = false,
       botId = null,
       readonly = false,
+      allowCrossChat = false,
+      triggerText = '',
+      externalChats = [],
     }: {
       baseUrl?: string | null;
       oldestMsgId?: string | null;
@@ -559,27 +609,73 @@ export class ContextPullManager {
       pullOnly?: boolean;
       botId?: string | null;
       readonly?: boolean;
+      allowCrossChat?: boolean;
+      triggerText?: string;
+      externalChats?: PullChatSummary[];
     },
   ): string {
     if (!baseUrl || readonly) return '';
-    const hasPullable = pullOnly
+    const activeExternal = allowCrossChat
+      ? externalChats.filter((c) => c && c.id && c.id !== chatId && (c.count > 0 || (c.fileCount ?? 0) > 0))
+      : [];
+    const crossTriggered = Boolean(allowCrossChat && shouldExposeCrossChatInSelf(triggerText, activeExternal));
+    const hasPullable = (pullOnly
       ? (availableCount > 0 || hasTruncated || hasOlder || channelHasHistory)
-      : (hasTruncated || hasOlder || channelHasHistory);
+      : (hasTruncated || hasOlder || channelHasHistory)) || crossTriggered;
     if (!hasPullable) return '';
-    const grant = this.getGrant(chatId, botId);
-    const endpoint = `${baseUrl.replace(/\/+$/, '')}/api/context/history?grant=${grant}`;
+    const scope: PullGrantScope = crossTriggered ? 'owner_all' : 'single';
+    const grant = this.getGrant(chatId, botId, scope);
+    const baseClean = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${baseClean}/api/context/history?grant=${grant}`;
     const meta: string[] = [];
     if (availableCount > 0) meta.push(`available=${availableCount}`);
     if (availableFiles > 0) meta.push(`files=${availableFiles}`);
     if (hasTruncated) meta.push('truncated');
     if (!pullOnly && hasOlder && oldestMsgId) meta.push(`before=${oldestMsgId}`);
     if (availableCount === 0 && !hasOlder && channelHasHistory) meta.push('remote_history');
-    return meta.length ? `context_pull: ${endpoint} (${meta.join(', ')})` : `context_pull: ${endpoint}`;
+    const baseHint = meta.length ? `context_pull: ${endpoint} (${meta.join(', ')})` : `context_pull: ${endpoint}`;
+    if (crossTriggered && activeExternal.length > 0) {
+      const preview = activeExternal.slice(0, 4).map((c) => {
+        const label = c.name && c.name !== c.id ? `${c.id}:${c.name}` : c.id;
+        return `${label}(${c.count}${c.fileCount ? `,f=${c.fileCount}` : ''})`;
+      }).join(', ');
+      return `${baseHint} | external_chats=${activeExternal.length} [${preview}], chats_url=${baseClean}/api/context/chats?grant=${grant}`;
+    }
+    return baseHint;
   }
 
-  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要（支持 `excludeBots` / `onlyFiles` 过滤）。 */
+  /** 处理 `GET /api/context/chats` 请求（仅限主人自聊主协调者 `owner_all` 句柄），列出可跨群检索的会话摘要。 */
+  async handleChatsRequest(url: URL, remoteAddress: string | undefined): Promise<Record<string, unknown>> {
+    const auth = this.#authenticate(url, remoteAddress);
+    if (auth.scope !== 'owner_all') {
+      throw makeHttpError('仅主人自聊主协调者可列出跨群会话', 403);
+    }
+    const raw = (this.#opts.listChats?.() ?? [])
+      .filter((c) => c && c.id && c.id !== auth.chatId && this.#opts.getChatType?.(c.id) !== 'self')
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, 30)
+      .map((c) => ({
+        chatId: c.id,
+        type: c.type,
+        name: redactAndClip(c.name || c.id, 48),
+        count: c.count,
+        ...(c.fileCount ? { fileCount: c.fileCount } : {}),
+        ...(c.updatedAt ? { updatedTime: formatClock(c.updatedAt) } : {}),
+      }));
+    this.#opts.onTelemetry?.({ chatId: auth.chatId, summary: `mode=chats count=${raw.length}` });
+    return {
+      ok: true,
+      mode: 'chats',
+      chats: raw,
+    };
+  }
+
+  /** 处理 `GET /api/context/history` 请求，返回脱敏后的详情或分页摘要（支持 `excludeBots`、`onlyFiles` 与主人跨群 `chatId=`）。 */
   async handleRequest(url: URL, remoteAddress: string | undefined): Promise<Record<string, unknown>> {
-    const { chatId, botId: currentBotId } = this.#authenticate(url, remoteAddress);
+    const auth = this.#authenticate(url, remoteAddress);
+    const currentBotId = auth.botId;
+    const chatId = this.#resolveTargetChatId(auth, url);
+    const crossTag = chatId !== auth.chatId ? ` crossChat=${chatId}` : '';
     const msgId = String(url.searchParams.get('msgId') || '').trim();
     if (msgId) {
       const msg = await this.#opts.resolveMessage(chatId, msgId);
@@ -593,10 +689,11 @@ export class ContextPullManager {
       const chunk = full.slice(offset, offset + limit);
       const nextOffset = (offset + chunk.length) < full.length ? (offset + chunk.length) : null;
       const attachments = this.#formatAttachmentsMeta(msg);
-      this.#opts.onTelemetry?.({ chatId, summary: `mode=detail msgId=${msgId} chars=${chunk.length}` });
+      this.#opts.onTelemetry?.({ chatId, summary: `mode=detail msgId=${msgId} chars=${chunk.length}${crossTag}` });
       return {
         ok: true,
         mode: 'detail',
+        chatId,
         msgId: msg.id,
         ts: msg.ts,
         sender: redactAndClip(msg.senderName || msg.senderId || (msg.isSelf ? 'me' : 'member'), 40),
@@ -626,11 +723,12 @@ export class ContextPullManager {
       const readable = rawMatches.filter((m) => this.#canRead(chatId, m) && matchesFilter(m)).slice(-limit);
       this.#opts.onTelemetry?.({
         chatId,
-        summary: `mode=search hits=${readable.length}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}`,
+        summary: `mode=search hits=${readable.length}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}${crossTag}`,
       });
       return {
         ok: true,
         mode: 'search',
+        chatId,
         query,
         ...(excludeBots ? { excludeBots: true } : {}),
         ...(onlyFiles ? { onlyFiles: true } : {}),
@@ -647,11 +745,12 @@ export class ContextPullManager {
     const nextBefore = hasMore && page.length ? page[0].id : null;
     this.#opts.onTelemetry?.({
       chatId,
-      summary: `mode=history count=${page.length} hasMore=${hasMore}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}`,
+      summary: `mode=history count=${page.length} hasMore=${hasMore}${excludeBots ? ' excludeBots=1' : ''}${onlyFiles ? ' onlyFiles=1' : ''}${crossTag}`,
     });
     return {
       ok: true,
       mode: 'history',
+      chatId,
       ...(excludeBots ? { excludeBots: true } : {}),
       ...(onlyFiles ? { onlyFiles: true } : {}),
       messages: page.map((m) => this.#summarize(m, currentBotId)),
@@ -666,7 +765,9 @@ export class ContextPullManager {
     remoteAddress: string | undefined,
     res?: http.ServerResponse,
   ): Promise<Record<string, unknown> | undefined> {
-    const { chatId } = this.#authenticate(url, remoteAddress);
+    const auth = this.#authenticate(url, remoteAddress);
+    const chatId = this.#resolveTargetChatId(auth, url);
+    const crossTag = chatId !== auth.chatId ? ` crossChat=${chatId}` : '';
     const msgId = String(url.searchParams.get('msgId') || '').trim();
     if (!msgId) throw makeHttpError('缺少 msgId 参数', 400);
 
@@ -696,7 +797,7 @@ export class ContextPullManager {
     const dl = await this.#opts.downloadAttachment(chatId, msg, att);
     const size = dl.size ?? fs.statSync(dl.localPath).size;
     const mime = dl.mime || att.mime || guessMimeFromName(att.name);
-    this.#opts.onTelemetry?.({ chatId, summary: `mode=attachment msgId=${msg.id} attId=${att.id} name=${att.name}` });
+    this.#opts.onTelemetry?.({ chatId, summary: `mode=attachment msgId=${msg.id} attId=${att.id} name=${att.name}${crossTag}` });
 
     const rawParam = url.searchParams.get('raw');
     if ((rawParam === '1' || rawParam === 'true') && res) {

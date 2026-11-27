@@ -70,6 +70,7 @@ export const defaults: AppConfig = {
     externalSilentProgress: true,
     externalAckInSelf: false,
     routeControlsToSelf: true,
+    collaboratorConfirmAck: false,
     privateFlag: true,
     externalSanitizeMentions: 'all',
     recentAttachmentWindowMs: 120_000,
@@ -228,6 +229,9 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
           }
         }
       }
+    }
+    if (ch.collaboratorConfirmAck !== undefined && typeof ch.collaboratorConfirmAck !== 'boolean') {
+      errors.push('chats.collaboratorConfirmAck 必须为布尔值');
     }
     if (ch.externalSanitizeMentions !== undefined && !['all', 'dangerous', 'none'].includes(String(ch.externalSanitizeMentions))) {
       errors.push(`chats.externalSanitizeMentions 必须为 all / dangerous / none，当前为「${String(ch.externalSanitizeMentions)}」`);

@@ -250,3 +250,24 @@ export function attachBotBadge(
   const sep = HR_LINE_START_RE.test(cleanBody) ? '\n' : '\n---\n';
   return `${head}${sep}${cleanBody}`;
 }
+
+const INTERNAL_OPS_LEAK_PATTERNS: Array<{ reason: string; re: RegExp }> = [
+  {
+    reason: 'omb_panel',
+    re: /(?:Bot['’]s\s+screen|Where\s+\S+\s+works|This\s+computer|打开\s*\*?\*?Bot\s*面板|对\s*\S+\s*开放.*(?:电脑|机器))/i,
+  },
+  {
+    reason: 'internal_endpoint',
+    re: /(?:context_pull:\s*https?:\/\/127\.0\.0\.1|https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/api\/context\/(?:history|attachment|chats)|omb_sess_[A-Za-z0-9_-]{8,})/i,
+  },
+];
+
+/** 检测出站给外部会话的文本是否意外包含宿主/引擎内部运维配置或本机上下文接口细节。 */
+export function detectInternalOpsLeak(text: unknown): { matched: boolean; reason: string } {
+  const s = String(text ?? '');
+  if (!s) return { matched: false, reason: '' };
+  for (const rule of INTERNAL_OPS_LEAK_PATTERNS) {
+    if (rule.re.test(s)) return { matched: true, reason: rule.reason };
+  }
+  return { matched: false, reason: '' };
+}

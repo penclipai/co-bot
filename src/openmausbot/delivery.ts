@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isAudioAttachment } from '../core/channel-contract.ts';
 import { sanitizeExternalMentions } from '../core/chat-context.ts';
-import { attachBotBadge, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
+import { attachBotBadge, detectInternalOpsLeak, formatExternalBotPrefix, redactTextFileBeforeSend, scanAndRedactOutbound } from '../core/security.ts';
 import { clip, fileSafe, mdClip, mdSplit, plain, safeAttachmentName } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, InboundAttachment } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
@@ -10,7 +10,7 @@ import { extractWidgetActions, fmtTokens, formatCardPrompt, formatOmbError } fro
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { formatDelegationResponse } from './delegation.ts';
 import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
-import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
+import { compactChatCtx, rememberBounded, trimMapCap, unscopeMsgKey } from './mentions.ts';
 import type { BridgeChatContext, CompactChatContext, MsgRoute, OmbMessage, PrivateDraft } from './types.ts';
 
 const IMAGE_MIME: Record<string, string> = {
@@ -63,12 +63,16 @@ export async function sendOutboundFile(
   if (size > 0) bridge.pendingOutFiles.set(`${safe}:${size}`, exp);
   bridge.pendingOutFiles.set(safe, exp);
   const caps = bridge.channelCaps();
-  const safeOpts: ChannelSendOptions = caps?.replyTo === false && passOpts?.replyTo
-    ? { ...passOpts, replyTo: undefined }
-    : passOpts;
+  const chatType = bridge.resolveChatType(chatId);
+  const safeOpts: ChannelSendOptions = {
+    ...(chatType ? { chatType } : {}),
+    ...(caps?.replyTo === false && passOpts?.replyTo
+      ? { ...passOpts, replyTo: undefined }
+      : passOpts),
+  };
   try {
     const fid = (await bridge.transport.sendFile(chatId, { path: sendPath, name }, safeOpts)) ?? null;
-    bridge.rememberOwnId(fid);
+    bridge.rememberOwnId(fid, chatId);
     if (recordContext) {
       bridge.recordOutboundToContext(chatId, {
         id: fid ?? undefined,
@@ -106,21 +110,28 @@ export async function claimUploads(
   errChatId: string | null = null,
   { allowPendingFileMsgs = true }: { allowPendingFileMsgs?: boolean } = {},
 ): Promise<{ uploads: ClaimedUpload[]; transcripts: ClaimedTranscript[] }> {
-  const ids: string[] = [];
-  if (mid && bridge.fileMsgs.has(mid)) ids.push(mid);
-  if (quotedId && bridge.fileMsgs.has(quotedId)) ids.push(quotedId);
-  if (allowPendingFileMsgs && !ids.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
+  const entries: Array<{ msgId: string; entry: { chatId: string; atts: InboundAttachment[]; used: boolean } }> = [];
+  const pushResolved = (rawId: string | null) => {
+    if (!rawId) return;
+    const hit = bridge.getFileMsg(originChatId, rawId);
+    if (hit && !entries.some((x) => x.entry === hit.entry)) {
+      entries.push({ msgId: unscopeMsgKey(hit.key).msgId, entry: hit.entry });
+    }
+  };
+  pushResolved(mid);
+  pushResolved(quotedId);
+  if (allowPendingFileMsgs && !entries.length && (!Array.isArray(contextAttachments) || !contextAttachments.length)) {
     const now = bridge.now();
-    for (const [id, entry] of bridge.fileMsgs) {
+    for (const [k, entry] of bridge.fileMsgs) {
       if (!entry.used && now - entry.at < 10 * 60 * 1000 && (!originChatId || !entry.chatId || entry.chatId === originChatId)) {
-        ids.push(id);
+        entries.push({ msgId: unscopeMsgKey(k).msgId, entry });
       }
     }
   }
   const uploaded: ClaimedUpload[] = [];
   const transcripts: ClaimedTranscript[] = [];
   const seenKeys = new Set<string>();
-  const processOne = async (attIdKey: string, msgIdForPath: string, a: InboundAttachment): Promise<void> => {
+  const processOne = async (attIdKey: string, chatIdForPath: string, msgIdForPath: string, a: InboundAttachment): Promise<void> => {
     if (!a || a.id == null) return;
     if (seenKeys.has(attIdKey)) return;
     seenKeys.add(attIdKey);
@@ -133,11 +144,17 @@ export async function claimUploads(
       return;
     }
     const safe = safeAttachmentName(a.name, 'file');
-    const dest = path.join(bridge.inDir, fileSafe(msgIdForPath) || 'f', safe);
+    const effChatId = a.chatId || chatIdForPath || originChatId || '';
+    const dest = path.join(bridge.inDir, fileSafe(effChatId) || 'chat', fileSafe(msgIdForPath) || 'f', safe);
     try {
       if (!fs.existsSync(dest)) {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        await bridge.transport.download(a, dest);
+        const attWithChat = (!a.chatId && effChatId) ? { ...a, chatId: effChatId } : a;
+        const chatType = effChatId ? bridge.resolveChatType(effChatId) : undefined;
+        await bridge.transport.download(attWithChat, dest, {
+          ...(effChatId ? { chatId: effChatId } : {}),
+          ...(chatType ? { chatType } : {}),
+        });
       }
       if (isAudio && !directTranscript && typeof bridge.transcribeAudio === 'function') {
         try {
@@ -168,18 +185,18 @@ export async function claimUploads(
     }
   };
 
-  for (const id of ids) {
-    const entry = bridge.fileMsgs.get(id);
-    if (!entry) continue;
+  for (const { msgId, entry } of entries) {
     entry.used = true;
     for (const a of entry.atts) {
-      await processOne(`${a.msgId ?? id}:${a.id}`, id, a);
+      const cid = a.chatId || entry.chatId || originChatId || '';
+      await processOne(`${cid}:${a.msgId ?? msgId}:${a.id}`, cid, msgId, a);
     }
   }
   if (Array.isArray(contextAttachments) && contextAttachments.length) {
     for (const a of contextAttachments) {
       const msgIdForPath = a.msgId || quotedId || 'q';
-      await processOne(`${msgIdForPath}:${a.id}`, msgIdForPath, a);
+      const cid = a.chatId || originChatId || '';
+      await processOne(`${cid}:${msgIdForPath}:${a.id}`, cid, msgIdForPath, a);
     }
   }
   return { uploads: uploaded, transcripts };
@@ -298,6 +315,7 @@ export async function emitCard(
       : (msg.burst?.task || msg.secret?.label || msg.connector?.label || (msg.signIn ? '登录验证' : '待确认操作'));
     bridge.pendingCards.set(sentId, {
       imMsgId: sentId,
+      chatId: ctrlChat,
       cardKind,
       cardBotId: msg.from?.botId || botId,
       requestId: msg.card?.requestId ?? null,
@@ -408,6 +426,24 @@ export async function deliverBotReply(
     : effectiveText;
   const isDirectExternalReply = Boolean(isExternal && !chatCtx?.privateReply && !proactive && targetChatId && targetChatId !== bridge.selfChat);
   const isDirectDelegationRes = Boolean(isDirectExternalReply && chatCtx?.delegationReq?.id);
+  let externalSafeBody = safeBody;
+  if (isDirectExternalReply && !isDirectDelegationRes) {
+    const leak = detectInternalOpsLeak(safeBody);
+    if (leak.matched) {
+      bridge.emitTelemetry('internal_leak_intercepted', {
+        chatId: targetChatId,
+        chatType: chatCtx?.chatType,
+        summary: `${leak.reason} bot=${shownName}`,
+      });
+      if (bridge.selfChat) {
+        await bridge.say(
+          `⚠️ **已拦截外部会话内部运维细节**（来自「${originName}」· ${shownName}）\n> ${clip(safeBody, 800)}`,
+          { targetChatId: bridge.selfChat },
+        );
+      }
+      externalSafeBody = '暂时无法直接访问该工作区，已转交主人处理。';
+    }
+  }
   const customExtPrefix = bridge.chats.externalBotPrefix ?? '🤖 ';
   const useDefaultExtBadge = Boolean(
     isDirectExternalReply && !isDirectDelegationRes && customExtPrefix && customExtPrefix.trim() === '🤖',
@@ -418,10 +454,10 @@ export async function deliverBotReply(
       ? (useDefaultExtBadge ? (who || `🤖 **[${badgeShown}]**`) : '')
       : who);
 
-  let bodyCore = safeBody;
+  let bodyCore = externalSafeBody;
   let delegationTagSuffix = '';
   if (isDirectDelegationRes && chatCtx?.delegationReq?.id) {
-    const tagged = formatDelegationResponse({ re: chatCtx.delegationReq.id, text: safeBody });
+    const tagged = formatDelegationResponse({ re: chatCtx.delegationReq.id, text: externalSafeBody });
     const tagIdx = tagged.lastIndexOf('\n[cobot:res ');
     const rawCore = tagIdx >= 0 ? tagged.slice(0, tagIdx) : tagged;
     bodyCore = badge ? rawCore.replace(/^🤖\s*/u, '') : rawCore;
@@ -431,7 +467,7 @@ export async function deliverBotReply(
   }
 
   const draftFooter = draftKey && draftMeta
-    ? `\n\n---\n👉 回复 \`${bridge.trigger} sendback ${draftKey}\` 发回「${clip(draftMeta.originName, 16)}」，或引用本条继续润色`
+    ? `\n\n---\n👉 回复 \`${bridge.trigger} sendback ${draftKey}\` 发回「${clip(draftMeta.originName, 16)}」，或引用本条回 \`确认发送\` / \`取消\` / 继续润色`
     : '';
   const tailSuffix = `${draftFooter}${delegationTagSuffix}`;
   const fixedPrefix = privHead + proHead;
@@ -488,7 +524,15 @@ export async function deliverBotReply(
       if (widgetActions.length >= 10) break;
     }
   }
-  const outActions = widgetActions.length ? widgetActions : null;
+  const draftActions: ChannelAction[] = (draftKey && draftMeta && !widgetActions.length)
+    ? [
+        { label: '发回原群', text: `${bridge.trigger} sendback ${draftKey}`, kind: 'primary' },
+        { label: '忽略', text: `${bridge.trigger} sendback cancel ${draftKey}` },
+      ]
+    : [];
+  const outActions = widgetActions.length
+    ? widgetActions
+    : (draftActions.length ? draftActions : null);
 
   const safeFull = scanAndRedactOutbound(full).text;
   const sentIds: string[] = [];

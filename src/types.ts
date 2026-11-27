@@ -91,6 +91,7 @@ export interface ChatsConfig {
   externalSilentProgress: boolean;
   externalAckInSelf: boolean;
   routeControlsToSelf: boolean;
+  collaboratorConfirmAck: boolean;
   privateFlag: boolean;
   externalSanitizeMentions: SanitizeMentionsMode;
   recentAttachmentWindowMs: number;
@@ -168,12 +169,14 @@ export interface InboundDevice {
 export interface InboundAttachment {
   id: string;
   msgId?: string;
+  chatId?: string;
   name: string;
   size?: number;
   mime?: string;
   kind?: string;
   durationSec?: number;
   transcript?: string;
+  extra?: Record<string, unknown>;
 }
 
 export interface InboundMention {
@@ -181,6 +184,17 @@ export interface InboundMention {
   name?: string;
   isAll?: boolean;
   isSelf?: boolean;
+  idKind?: 'platform' | 'name_fallback';
+}
+
+export interface InboundQuote {
+  msgId: string;
+  senderId?: string;
+  senderName?: string;
+  isSelf?: boolean;
+  text?: string;
+  ts?: number;
+  chatId?: string;
 }
 
 export interface LinkCard {
@@ -219,6 +233,7 @@ export interface InboundEvent {
   mentionsMe?: boolean;
   mentions?: InboundMention[];
   replyTo?: string;
+  quote?: InboundQuote;
   recalledMsgId?: string;
   attachments?: InboundAttachment[];
 }
@@ -238,6 +253,7 @@ export interface OutboundMention {
 }
 
 export interface ChannelSendOptions {
+  chatType?: ChatType;
   replyTo?: string;
   actions?: ChannelAction[];
   mentions?: OutboundMention[];
@@ -260,9 +276,27 @@ export interface ChannelNotifyPayload {
 }
 
 export interface ChannelGetHistoryOptions {
+  chatType?: ChatType;
   limit?: number;
   beforeMsgId?: string | null;
   beforeTs?: number | null;
+}
+
+export interface ChannelGetMessageOptions {
+  chatType?: ChatType;
+}
+
+export interface ChannelDownloadContext {
+  chatId?: string;
+  chatType?: ChatType;
+}
+
+export interface ChannelIdPatterns {
+  userId?: RegExp;
+  chatId?: RegExp;
+  directChatId?: RegExp;
+  groupChatId?: RegExp;
+  msgId?: RegExp;
 }
 
 export interface ChannelStartContext {
@@ -281,11 +315,12 @@ export interface ChannelStatus {
 export interface ChannelAdapter {
   capabilities?: ChannelCapabilityInput;
   canFiles?: boolean;
+  idPatterns?: ChannelIdPatterns;
   start: (onEvent: (rawMsg: unknown) => void, ctx: ChannelStartContext) => Promise<void> | void;
   send: (chatId: string, text: string, opts?: ChannelSendOptions) => Promise<string | number | void> | string | number | void;
   sendFile?: (chatId: string, file: ChannelSendFileInput, opts?: ChannelSendOptions) => Promise<string | number | void> | string | number | void;
-  download?: (att: InboundAttachment, savePath: string) => Promise<void> | void;
-  getMessage?: (chatId: string, msgId: string) => Promise<unknown> | unknown;
+  download?: (att: InboundAttachment, savePath: string, ctx?: ChannelDownloadContext) => Promise<void> | void;
+  getMessage?: (chatId: string, msgId: string, opts?: ChannelGetMessageOptions) => Promise<unknown> | unknown;
   getHistory?: (chatId: string, opts?: ChannelGetHistoryOptions) => Promise<unknown[]> | unknown[];
   notify?: (payload: ChannelNotifyPayload) => Promise<void> | void;
   status?: () => Partial<ChannelStatus> | null;
@@ -299,6 +334,8 @@ export interface ChannelPluginSpec<TOptions extends Record<string, unknown> = Re
   provides?: string[];
   inject?: PluginInjectSpec;
   capabilities?: ChannelCapabilityInput;
+  idPatterns?: ChannelIdPatterns;
+  strictContract?: boolean;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   source?: string;

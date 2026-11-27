@@ -14,7 +14,7 @@ import {
   replyMultiCardHint,
 } from './card-actions.ts';
 import { parseChoiceIndex, parseMultiChoiceAnswer } from './cards.ts';
-import { isExternalChatAllowed } from './chat-manager.ts';
+import { confirmDraftDirect, discardPrivateDraft, isExternalChatAllowed } from './chat-manager.ts';
 import { buildHelpText, handleCommand } from './commands.ts';
 import { formatDelegationRequest, generateDelegationId, parseDelegationTag } from './delegation.ts';
 import { handleFollowUpReply } from './follow-up.ts';
@@ -24,7 +24,6 @@ import {
   parseInlineTriggerMention,
   parseStartMention,
   parseStructuredBotMention,
-  trimMapCap,
 } from './mentions.ts';
 import type {
   BridgeChatContext,
@@ -308,8 +307,7 @@ async function handleCollaboratorEvent(
     }
   }
   if (Array.isArray(ev.attachments) && ev.attachments.length) {
-    bridge.fileMsgs.set(String(ev.id), { chatId, atts: ev.attachments, at: bridge.now(), used: false });
-    trimMapCap(bridge.fileMsgs, 50);
+    bridge.setFileMsg(chatId, String(ev.id), ev.attachments);
   }
 
   const resolvedChief = await bridge.client.resolveBot('');
@@ -330,6 +328,13 @@ async function handleCollaboratorEvent(
   chatCtx.allowedProjects = decision.allowedProjects;
   chatCtx.delegationReq = isReq && delegation.kind === 'req' ? delegation : null;
   chatCtx.explicitProject = isReq && delegation.kind === 'req' ? delegation.project : '';
+  if (decision.mode === 'confirm_in_self' && bridge.chats.collaboratorConfirmAck) {
+    await bridge.say(
+      '🤖 已收到，正在整理并转交主人确认后回复。',
+      { targetChatId: chatId },
+      String(ev.id),
+    );
+  }
   return bridge.dispatchToBot(chief, question, String(ev.id), quotedId, null, chatCtx);
 }
 
@@ -390,22 +395,19 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
   }
 
   const mid = String(ev.id);
-  if (bridge.ownIds.has(mid)) return;
-  if (bridge.seen.has(mid)) return;
-  bridge.seen.add(mid);
-  if (bridge.seen.size > 5000) {
-    const first = bridge.seen.values().next().value;
-    if (first !== undefined) bridge.seen.delete(first);
-  }
+  if (bridge.isOwnId(chatId, mid)) return;
+  if (bridge.hasSeenMsg(chatId, mid)) return;
+  bridge.markSeenMsg(chatId, mid);
 
   // 撤回事件：同步从内存上下文窗口、待用附件队列、消息路由和磁盘缓存擦除
   if (ev.kind === 'recall' && ev.recalledMsgId) {
     const recalledId = String(ev.recalledMsgId);
     if (bridge.imContext?.recallMessage) bridge.imContext.recallMessage(chatId, recalledId);
     else bridge.localContextStore.recallMessage(chatId, recalledId);
-    bridge.fileMsgs.delete(recalledId);
-    bridge.msgRoute.delete(recalledId);
+    bridge.deleteFileMsg(chatId, recalledId);
+    bridge.deleteMsgRoute(chatId, recalledId);
     try {
+      fs.rmSync(path.join(bridge.inDir, fileSafe(chatId) || 'chat', fileSafe(recalledId) || 'f'), { recursive: true, force: true });
       fs.rmSync(path.join(bridge.inDir, fileSafe(recalledId) || 'f'), { recursive: true, force: true });
     } catch { /* ignore */ }
     bridge.emitTelemetry('recall', { chatId, chatType, summary: `recall:${recalledId}` });
@@ -417,7 +419,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
 
   const atts = Array.isArray(ev.attachments) ? ev.attachments : [];
   if (!rawText && atts.length && atts.every((a) => bridge.isPendingOutFile(a))) {
-    bridge.rememberOwnId(mid);
+    bridge.rememberOwnId(mid, chatId);
     return;
   }
 
@@ -446,7 +448,7 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     const wouldTrigger = Boolean(
       parseStartMention(rawText, bridge.trigger, aliases, names)
       || parseInlineTriggerMention(rawText, bridge.trigger, aliases, names)
-      || (ev.replyTo != null && bridge.msgRoute.has(String(ev.replyTo))),
+      || (ev.replyTo != null && bridge.getMsgRoute(chatId, String(ev.replyTo))),
     );
     if (wouldTrigger) {
       bridge.emitTelemetry('policy_denied', {
@@ -454,18 +456,32 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
         chatType,
         summary: `sender=${ev.sender?.id || 'me'} reason=chat_not_allowed`,
       });
+      if (bridge.chatPolicyOverrides.muted.has(chatId) && bridge.selfChat) {
+        const now = bridge.now();
+        const cooldown = Number(bridge.mutedHintCooldownMs) || 0;
+        const lastAt = bridge.lastMutedHintAt.get(chatId) || 0;
+        if (cooldown <= 0 || (now - lastAt) >= cooldown) {
+          bridge.lastMutedHintAt.set(chatId, now);
+          const chatLabel = ev.chat?.name || chatId;
+          await bridge.say(
+            `🔇 「${chatLabel}」（\`${chatId}\`）当前已静音，刚才的 \`${bridge.trigger}\` 未触发。回复 \`${bridge.trigger} unmute ${chatId}\` 可恢复。`,
+            { targetChatId: bridge.selfChat },
+            null,
+            [{ label: '解除静音', text: `${bridge.trigger} unmute ${chatId}`, kind: 'primary' }],
+          );
+        }
+      }
     }
     return;
   }
 
   if (atts.length) {
-    bridge.fileMsgs.set(mid, { chatId, atts, at: bridge.now(), used: false });
-    trimMapCap(bridge.fileMsgs, 50);
+    bridge.setFileMsg(chatId, mid, atts);
   }
 
   const quotedId = ev.replyTo != null ? String(ev.replyTo) : null;
-  const quotedCard = quotedId ? (bridge.pendingCards.get(quotedId) ?? null) : null;
-  const quotedRoute = quotedId ? (bridge.msgRoute.get(quotedId) ?? null) : null;
+  const quotedCard = quotedId ? bridge.getPendingCard(chatId, quotedId) : null;
+  const quotedRoute = quotedId ? bridge.getMsgRoute(chatId, quotedId) : null;
 
   if (!rawText) {
     if (!atts.length && !ev.linkCard && !ev.forwarded) return;
@@ -531,8 +547,8 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
           const ids = [...bridge.pendingMediaIds];
           bridge.clearPendingMedia();
           const hasUnused = ids.some((id) => {
-            const ent = bridge.fileMsgs.get(id);
-            return ent && !ent.used;
+            const hit = bridge.getFileMsg(chatId, id);
+            return hit && !hit.entry.used;
           });
           if (target && hasUnused) {
             bridge.dispatchToBot(target, '请查看我发送的图片/文件。', null, null, null).catch(() => {});
@@ -583,13 +599,29 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     if (res) return res;
   }
 
-  // 1b. 自聊私密草稿确认回发（确认发送 / 取消 / 改：...）
+  // 1b. 自聊私密草稿确认回发（支持引用确认/直发/取消/改写，及无引用时对最新预览的确认）
+  if (isSelfChat && !rawText.startsWith('@') && quotedId) {
+    const quotedSb = [...bridge.pendingSendBacks.values()].find((p) => p.imMsgId === quotedId && bridge.now() < p.expiresAt);
+    if (quotedSb) {
+      if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return bridge.confirmSendBack(quotedSb.id);
+      if (/^(?:取消|算了|不要|cancel|no)$/i.test(rawText)) return bridge.cancelSendBack(quotedSb.id);
+      const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
+      if (editM && editM[1].trim()) return bridge.requestSendBack(quotedSb.draft, editM[1].trim());
+    }
+    const quotedDraft = bridge.resolvePrivateDraft({ quotedId });
+    if (quotedDraft && (quotedDraft.imMsgId === quotedId || bridge.privateDrafts.get(quotedId)?.id === quotedDraft.id)) {
+      if (/^(?:确认发送|直接发|直接发送)$/i.test(rawText)) return confirmDraftDirect(bridge, quotedDraft);
+      if (/^(?:发回|发送|send|sendback)$/i.test(rawText)) return bridge.requestSendBack(quotedDraft);
+      if (/^(?:取消|忽略|算了|不要|cancel)$/i.test(rawText)) return discardPrivateDraft(bridge, quotedDraft);
+      const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
+      if (editM && editM[1].trim()) return bridge.requestSendBack(quotedDraft, editM[1].trim());
+    }
+  }
   const pendingSendBack = bridge.pendingSendBack;
   if (isSelfChat && !rawText.startsWith('@') && !quotedRoute && pendingSendBack && bridge.now() < pendingSendBack.expiresAt) {
-    if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return bridge.confirmSendBack();
+    if (/^(?:确认发送|确认|发送|send|ok|yes|好|好的)$/i.test(rawText)) return bridge.confirmSendBack(pendingSendBack.id);
     if (/^(?:取消|算了|不要|cancel|no)$/i.test(rawText)) {
-      bridge.pendingSendBack = null;
-      return bridge.say('❎ 已取消发回原群。');
+      return bridge.cancelSendBack(pendingSendBack.id);
     }
     const editM = rawText.match(/^(?:改|修改|替换)[:：\s]+([\s\S]+)$/);
     if (editM && editM[1].trim()) {

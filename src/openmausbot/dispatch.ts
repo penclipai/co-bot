@@ -204,6 +204,8 @@ async function buildPromptContext(
             ...info,
             ...(botId ? { botId } : {}),
             readonly: Boolean(chatCtx?.readonly),
+            allowCrossChat: Boolean(!chatCtx?.isExternal && !chatCtx?.readonly && (!bridge.chiefBotId || botId === bridge.chiefBotId)),
+            triggerText: String(ev.text || ''),
           }) ?? ''
         )
       : undefined,
@@ -217,7 +219,8 @@ async function buildPromptContext(
       if (cached) return cached;
       if (typeof bridge.transport?.getMessage === 'function') {
         try {
-          const remote = await bridge.transport.getMessage(cid, msgId);
+          const chatType = bridge.resolveChatType(cid);
+          const remote = await bridge.transport.getMessage(cid, msgId, chatType ? { chatType } : {});
           if (remote) return bridge.localContextStore.recordInbound(remote as Partial<InboundEvent>);
         } catch { /* ignore */ }
       }

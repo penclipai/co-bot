@@ -6,28 +6,47 @@ import type {
   ChannelAdapter,
   ChannelCapabilities,
   ChannelCapabilityInput,
+  ChannelDownloadContext,
   ChannelGetHistoryOptions,
+  ChannelGetMessageOptions,
+  ChannelIdPatterns,
   ChannelNotifyPayload,
   ChannelPluginSpec,
   ChannelSendFileInput,
   ChannelSendOptions,
   ChannelStatus,
   ChatType,
-  DeviceType,
   InboundAttachment,
   InboundEvent,
-  InboundMention,
   KernelPlugin,
   LinkCard,
   LoggerLike,
 } from '../types.ts';
+import {
+  CHAT_TYPES,
+  createInboundMessage,
+  createRecallEvent,
+  decodeScopedChatId,
+  encodeScopedChatId,
+  matchIdPattern,
+  normalizeInboundEvent,
+  validateConfigIdsAgainstPatterns,
+  validateIdsAgainstPatterns,
+  validateInboundEvent,
+} from './channel-validation.ts';
 import { isAudioAttachment, redactSecrets } from './chat-context.ts';
-import { normalizeForwarded, normalizeLinkCard } from './context-pull.ts';
 
-export { isAudioAttachment };
-
-const CHAT_TYPES = new Set<string>(['self', 'direct', 'group', 'system']);
-const DEVICE_TYPES = new Set<string>(['mobile', 'desktop', 'pad', 'web', 'unknown']);
+export {
+  createInboundMessage,
+  createRecallEvent,
+  decodeScopedChatId,
+  encodeScopedChatId,
+  isAudioAttachment,
+  normalizeInboundEvent,
+  validateConfigIdsAgainstPatterns,
+  validateIdsAgainstPatterns,
+  validateInboundEvent,
+};
 
 type AnyRecord = Record<string, unknown>;
 
@@ -38,6 +57,8 @@ export interface ManagedChannelOptions {
   selfId?: string;
   selfChatId?: string;
   atAllCountsAsMention?: boolean;
+  idPatterns?: ChannelIdPatterns;
+  strictContract?: boolean;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   emitTelemetry?: ((type: string, data: Record<string, unknown>) => void) | null;
@@ -179,290 +200,6 @@ export function normalizeCapabilities(
   };
 }
 
-/** 将各家 IM 的结构化 `@提及` 列表归一化为 `[{ id, name?, isAll?, isSelf? }]`。 */
-function normalizeMentions(
-  rawMentions: unknown,
-  { atUserIds, atAll = false, selfId = '' }: { atUserIds?: unknown[]; atAll?: boolean; selfId?: string } = {},
-): InboundMention[] {
-  const selfStr = String(selfId ?? '');
-  const list: InboundMention[] = [];
-  const byKey = new Map<string, InboundMention>();
-  const push = (item: { id?: unknown; name?: unknown; isAll?: boolean; isSelf?: unknown }): void => {
-    const isAll = Boolean(item.isAll);
-    const id = String(item.id || (isAll ? '__all__' : (item.name || ''))).trim();
-    if (!id) return;
-    const name = item.name ? String(item.name).replace(/^@/, '').trim() : undefined;
-    const isSelf = typeof item.isSelf === 'boolean' ? item.isSelf : Boolean(selfStr && id === selfStr);
-    const key = isAll ? '__all__' : id;
-    const prev = byKey.get(key);
-    if (prev) {
-      if (name && !prev.name) prev.name = name;
-      if (isSelf) prev.isSelf = true;
-      return;
-    }
-    const entry: InboundMention = {
-      id,
-      ...(name ? { name } : {}),
-      ...(isAll ? { isAll: true } : {}),
-      ...(isSelf ? { isSelf: true } : {}),
-    };
-    byKey.set(key, entry);
-    list.push(entry);
-  };
-  if (Array.isArray(rawMentions)) {
-    for (const m of rawMentions) {
-      if (!m) continue;
-      if (typeof m === 'string') {
-        const clean = m.replace(/^@/, '').trim();
-        if (clean) push({ id: clean, name: clean });
-        continue;
-      }
-      if (typeof m === 'object') {
-        const rec = m as AnyRecord;
-        push({
-          id: rec.id ?? rec.userId ?? rec.uid ?? rec.name ?? '',
-          name: rec.name ?? rec.nick ?? rec.displayName,
-          isAll: Boolean(rec.isAll),
-          isSelf: rec.isSelf,
-        });
-      }
-    }
-  }
-  if (Array.isArray(atUserIds)) {
-    for (const uid of atUserIds) {
-      if (uid != null && String(uid).trim()) push({ id: String(uid).trim() });
-    }
-  }
-  if (atAll) {
-    push({ id: '__all__', name: '所有人', isAll: true });
-  }
-  return list;
-}
-
-/** 校验标准 InboundEvent 结构是否满足网关分发契约。 */
-export function validateInboundEvent(ev: unknown): { ok: boolean; errors: string[]; event: InboundEvent | null } {
-  const errors: string[] = [];
-  if (!ev || typeof ev !== 'object') {
-    return { ok: false, errors: ['事件必须为非空对象'], event: null };
-  }
-  const rec = ev as AnyRecord;
-  const isRecall = rec.kind === 'recall';
-  if (!rec.id || typeof rec.id !== 'string') errors.push('缺少字符串类型的 id');
-  const chat = rec.chat as AnyRecord | undefined;
-  if (!chat || typeof chat !== 'object') {
-    errors.push('缺少 chat 对象');
-  } else {
-    if (!chat.id || typeof chat.id !== 'string') errors.push('chat.id 必须为非空字符串');
-    if (!CHAT_TYPES.has(String(chat.type))) errors.push(`chat.type 非法：${String(chat.type)}（应为 self|direct|group|system）`);
-  }
-  const sender = rec.sender as AnyRecord | undefined;
-  if (isRecall) {
-    if (!rec.recalledMsgId || typeof rec.recalledMsgId !== 'string') errors.push('撤回事件缺少字符串类型的 recalledMsgId');
-    if (rec.sender != null && typeof rec.sender !== 'object') errors.push('sender 必须为对象');
-  } else {
-    if (!sender || typeof sender !== 'object') {
-      errors.push('缺少 sender 对象');
-    } else {
-      if (typeof sender.id !== 'string') errors.push('sender.id 必须为字符串');
-      if (typeof sender.isSelf !== 'boolean') errors.push('sender.isSelf 必须为布尔值');
-    }
-    if (typeof rec.text !== 'string') errors.push('text 必须为字符串');
-  }
-  if (rec.mentions !== undefined && !Array.isArray(rec.mentions)) {
-    errors.push('mentions 若存在必须为数组');
-  }
-  if (rec.attachments !== undefined) {
-    if (!Array.isArray(rec.attachments)) {
-      errors.push('attachments 若存在必须为数组');
-    } else {
-      for (let i = 0; i < rec.attachments.length; i++) {
-        const a = rec.attachments[i] as AnyRecord | null;
-        if (!a || !a.id || !a.name) errors.push(`attachments[${i}] 缺少 id 或 name`);
-      }
-    }
-  }
-  return { ok: errors.length === 0, errors, event: ev as InboundEvent };
-}
-
-/**
- * 将标准 InboundEvent 或通用扁平 IM 消息（FlatMessage）归一化为标准 InboundEvent。
- */
-export function normalizeInboundEvent(
-  raw: unknown,
-  { selfId = '', selfChatId = '', atAllCountsAsMention = false }: {
-    selfId?: string;
-    selfChatId?: string;
-    atAllCountsAsMention?: boolean;
-  } = {},
-): InboundEvent {
-  if (!raw || typeof raw !== 'object') {
-    throw new Error('消息体必须为对象');
-  }
-  const r = raw as AnyRecord;
-  const rawChat = r.chat && typeof r.chat === 'object' ? (r.chat as AnyRecord) : null;
-  const rawSender = r.sender && typeof r.sender === 'object' ? (r.sender as AnyRecord) : null;
-
-  const selfStr = String(selfId ?? '');
-  const isRecall = r.kind === 'recall' || r.type === 'recall' || r.eventType === 'recall';
-
-  // 0. 消息撤回事件（兼容标准结构与扁平结构）
-  if (isRecall) {
-    const chatId = rawChat?.id ?? r.chatId;
-    const recalledMsgId = r.recalledMsgId ?? r.targetMsgId ?? r.revokedMsgId;
-    if (chatId == null || recalledMsgId == null) throw new Error('撤回事件缺少 chatId 或 recalledMsgId');
-    const cid = String(chatId);
-    const rawType = String(rawChat?.type ?? r.chatType ?? '');
-    const chatType: ChatType = rawType === 'self' || (selfChatId && cid === selfChatId)
-      ? 'self'
-      : (CHAT_TYPES.has(rawType) ? (rawType as ChatType) : 'direct');
-    const senderId = String(rawSender?.id ?? r.fromId ?? '');
-    const senderName = rawSender?.name ?? r.fromName;
-    const isSelf = typeof rawSender?.isSelf === 'boolean'
-      ? rawSender.isSelf
-      : (typeof r.isSelf === 'boolean' ? r.isSelf : Boolean(selfStr && senderId === selfStr));
-    const ev: InboundEvent = {
-      id: String(r.id ?? r.msgId ?? `recall_${String(recalledMsgId)}`),
-      kind: 'recall',
-      ts: Number(r.ts ?? r.time) || Date.now(),
-      chat: {
-        id: cid,
-        type: chatType,
-        ...((rawChat?.name || r.chatName) ? { name: String(rawChat?.name || r.chatName) } : {}),
-      },
-      sender: {
-        id: senderId,
-        ...(senderName ? { name: String(senderName) } : {}),
-        isSelf,
-      },
-      recalledMsgId: String(recalledMsgId),
-      text: '',
-    };
-    const checked = validateInboundEvent(ev);
-    if (!checked.ok) throw new Error(checked.errors.join('；'));
-    return ev;
-  }
-
-  // 1. 若已经是标准结构（存在 chat.id 与 sender）
-  if (rawChat && rawSender) {
-    if (r.id == null || rawChat.id == null) throw new Error('缺少 id 或 chat.id');
-    const chatId = String(rawChat.id);
-    const rawChatType = String(rawChat.type ?? '');
-    const chatType: ChatType = rawChatType === 'self' || (selfChatId && chatId === selfChatId)
-      ? 'self'
-      : (CHAT_TYPES.has(rawChatType) ? (rawChatType as ChatType) : 'direct');
-    const senderId = String(rawSender.id ?? '');
-    const isSelf = typeof rawSender.isSelf === 'boolean'
-      ? rawSender.isSelf
-      : Boolean(selfId && senderId === String(selfId));
-    const dev = r.device && typeof r.device === 'object' ? (r.device as AnyRecord) : null;
-    const mentions = normalizeMentions(r.mentions, { selfId });
-    const derivedMentionMe = mentions.some((m) => m.isSelf || (selfStr && m.id === selfStr) || (m.isAll && atAllCountsAsMention));
-    const linkCard = normalizeLinkCard(r.linkCard ?? r.card);
-    const forwarded = normalizeForwarded(r.forwarded ?? r.mergedForward ?? r.forwardMessages, String(r.id), normalizeLinkCard);
-    const isForwarded = Boolean(r.isForwarded || r.forwardedFrom || forwarded);
-    const ev: InboundEvent = {
-      id: String(r.id),
-      ts: Number(r.ts) || Date.now(),
-      chat: {
-        id: chatId,
-        type: chatType,
-        ...(rawChat.name ? { name: String(rawChat.name) } : {}),
-      },
-      sender: {
-        id: senderId,
-        ...(rawSender.name ? { name: String(rawSender.name) } : {}),
-        isSelf,
-      },
-      ...(dev ? {
-        device: {
-          id: String(dev.id ?? ''),
-          type: DEVICE_TYPES.has(String(dev.type)) ? (String(dev.type) as DeviceType) : 'unknown',
-          ...(dev.name ? { name: String(dev.name) } : {}),
-        },
-      } : {}),
-      text: String(r.text ?? ''),
-      ...(linkCard ? { linkCard } : {}),
-      ...(isForwarded ? { isForwarded: true } : {}),
-      ...(forwarded ? { forwarded } : {}),
-      ...(r.mentionsMe !== undefined ? { mentionsMe: Boolean(r.mentionsMe) } : (derivedMentionMe ? { mentionsMe: true } : {})),
-      ...(mentions.length ? { mentions } : {}),
-      ...(r.replyTo != null ? { replyTo: String(r.replyTo) } : {}),
-      ...(Array.isArray(r.attachments) && r.attachments.length ? {
-        attachments: (r.attachments as AnyRecord[])
-          .filter((a) => a && a.id != null)
-          .map((a) => ({
-            id: String(a.id),
-            msgId: String(a.msgId ?? r.id),
-            name: String(a.name || a.id),
-            ...(Number(a.size) ? { size: Number(a.size) } : {}),
-            ...(a.mime ? { mime: String(a.mime) } : {}),
-            ...(a.kind ? { kind: String(a.kind) } : {}),
-            ...(Number(a.durationSec) > 0 ? { durationSec: Number(a.durationSec) } : {}),
-            ...(a.transcript ? { transcript: String(a.transcript) } : {}),
-          })),
-      } : {}),
-    };
-    const checked = validateInboundEvent(ev);
-    if (!checked.ok) throw new Error(checked.errors.join('；'));
-    return ev;
-  }
-
-  // 2. 扁平结构（FlatMessage 快捷映射）
-  if (r.msgId == null || r.chatId == null) throw new Error('缺少 msgId 或 chatId');
-  const chatId = String(r.chatId);
-  const type: ChatType = r.chatType === 'self' || (selfChatId && chatId === selfChatId)
-    ? 'self'
-    : (r.chatType === 'group' ? 'group' : (r.chatType === 'system' ? 'system' : 'direct'));
-  const at = Array.isArray(r.atUserIds) ? r.atUserIds.map(String) : [];
-  const d = r.fromDevice && typeof r.fromDevice === 'object' ? (r.fromDevice as AnyRecord) : null;
-  const senderId = String(r.fromId ?? '');
-  const mentions = normalizeMentions(r.mentions, { atUserIds: at, atAll: Boolean(r.atAll), selfId });
-  const linkCard = normalizeLinkCard(r.linkCard ?? r.card);
-  const forwarded = normalizeForwarded(r.forwarded ?? r.mergedForward ?? r.forwardMessages, String(r.msgId), normalizeLinkCard);
-  const isForwarded = Boolean(r.isForwarded || r.forwardedFrom || forwarded);
-  const ev: InboundEvent = {
-    id: String(r.msgId),
-    ts: Number(r.time) || Date.now(),
-    chat: { id: chatId, type, name: r.chatName ? String(r.chatName) : undefined },
-    sender: {
-      id: senderId,
-      name: r.fromName ? String(r.fromName) : undefined,
-      isSelf: typeof r.isSelf === 'boolean' ? r.isSelf : Boolean(selfStr && senderId === selfStr),
-    },
-    device: d
-      ? {
-          id: String(d.id ?? ''),
-          type: DEVICE_TYPES.has(String(d.type)) ? (String(d.type) as DeviceType) : 'unknown',
-          name: d.name ? String(d.name) : undefined,
-        }
-      : undefined,
-    text: String(r.text ?? ''),
-    ...(linkCard ? { linkCard } : {}),
-    ...(isForwarded ? { isForwarded: true } : {}),
-    ...(forwarded ? { forwarded } : {}),
-    mentionsMe: Boolean((r.mentionsMe !== undefined ? r.mentionsMe : false) || (selfStr && at.includes(selfStr)) || (r.atAll && atAllCountsAsMention) || mentions.some((m) => m.isSelf)),
-    ...(mentions.length ? { mentions } : {}),
-    replyTo: r.quoteMsgId != null ? String(r.quoteMsgId) : undefined,
-    ...(Array.isArray(r.files) && r.files.length ? {
-      attachments: (r.files as AnyRecord[])
-        .filter((f) => f && f.fileId != null)
-        .map((f) => ({
-          id: String(f.fileId),
-          msgId: String(r.msgId),
-          name: String(f.name || f.fileId),
-          size: Number(f.size) || undefined,
-          mime: f.mime ? String(f.mime) : undefined,
-          ...(f.kind ? { kind: String(f.kind) } : {}),
-          ...(Number(f.durationSec) > 0 ? { durationSec: Number(f.durationSec) } : {}),
-          ...(f.transcript ? { transcript: String(f.transcript) } : {}),
-        })),
-    } : {}),
-  };
-  const checked = validateInboundEvent(ev);
-  if (!checked.ok) throw new Error(checked.errors.join('；'));
-  return ev;
-}
-
 /** 静态校验通道适配器实现与 capabilities 一致性。 */
 export function validateChannelAdapter(
   adapter: Partial<ChannelAdapter> | null | undefined,
@@ -503,6 +240,8 @@ export class ManagedChannel {
   selfId: string;
   selfChatId: string;
   atAllCountsAsMention: boolean;
+  idPatterns: ChannelIdPatterns | null;
+  strictContract: boolean;
   reconnectDelayMs: number;
   maxReconnectDelayMs: number;
   emitTelemetry: ((type: string, data: Record<string, unknown>) => void) | null;
@@ -515,6 +254,7 @@ export class ManagedChannel {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   onEvent: ((ev: InboundEvent) => unknown) | null;
   #connGen = 0;
+  #chatTypes = new Map<string, ChatType>();
 
   constructor({
     name = 'channel',
@@ -523,6 +263,8 @@ export class ManagedChannel {
     selfId = '',
     selfChatId = '',
     atAllCountsAsMention = false,
+    idPatterns,
+    strictContract = false,
     reconnectDelayMs = 2000,
     maxReconnectDelayMs = 30_000,
     emitTelemetry = null,
@@ -534,6 +276,8 @@ export class ManagedChannel {
     this.selfId = String(selfId ?? '');
     this.selfChatId = selfChatId ? String(selfChatId) : '';
     this.atAllCountsAsMention = Boolean(atAllCountsAsMention);
+    this.idPatterns = idPatterns ?? adapter.idPatterns ?? null;
+    this.strictContract = Boolean(strictContract);
     this.reconnectDelayMs = Number(reconnectDelayMs ?? 2000);
     this.maxReconnectDelayMs = Math.max(this.reconnectDelayMs, Number(maxReconnectDelayMs ?? 30_000));
     this.emitTelemetry = emitTelemetry;
@@ -545,6 +289,7 @@ export class ManagedChannel {
     this.reconnecting = false;
     this.reconnectTimer = null;
     this.onEvent = null;
+    if (this.selfChatId) this.#chatTypes.set(this.selfChatId, 'self');
   }
 
   get canFiles(): boolean {
@@ -569,6 +314,58 @@ export class ManagedChannel {
     } catch { /* ignore telemetry errors */ }
   }
 
+  #warnContract(message: string): void {
+    this.logger.warn?.(`[channel:${this.name}] ${message}`);
+    this.#emit('channel:contract_warning', { summary: clipSummary(message, 160) });
+  }
+
+  #rememberChatType(chatId: string, chatType: ChatType): void {
+    if (!chatId || !chatType) return;
+    if (this.#chatTypes.has(chatId)) this.#chatTypes.delete(chatId);
+    this.#chatTypes.set(chatId, chatType);
+    while (this.#chatTypes.size > 500) {
+      const oldest = this.#chatTypes.keys().next().value;
+      if (oldest === undefined) break;
+      this.#chatTypes.delete(oldest);
+    }
+  }
+
+  #resolveChatType(chatId: string, explicitType?: ChatType): ChatType | undefined {
+    if (explicitType && CHAT_TYPES.has(explicitType)) return explicitType;
+    if (this.selfChatId && chatId === this.selfChatId) return 'self';
+    return this.#chatTypes.get(chatId) ?? decodeScopedChatId(chatId)?.type;
+  }
+
+  #validateOutboundOpts(chatId: string, chatType: ChatType | undefined, opts: ChannelSendOptions): void {
+    const p = this.idPatterns;
+    if (!p) return;
+    const errs: string[] = [];
+    if (p.chatId && !matchIdPattern(p.chatId, chatId)) {
+      errs.push(`出站 chatId=${JSON.stringify(chatId)} 不符合 chatId 规范 ${p.chatId}`);
+    }
+    if (chatType === 'group' && p.groupChatId && !matchIdPattern(p.groupChatId, chatId)) {
+      errs.push(`出站群 chatId=${JSON.stringify(chatId)} 不符合 groupChatId 规范 ${p.groupChatId}`);
+    }
+    if (chatType === 'direct' && p.directChatId && !matchIdPattern(p.directChatId, chatId)) {
+      errs.push(`出站私聊 chatId=${JSON.stringify(chatId)} 不符合 directChatId 规范 ${p.directChatId}`);
+    }
+    if (opts.replyTo && p.msgId && !matchIdPattern(p.msgId, String(opts.replyTo))) {
+      errs.push(`出站 opts.replyTo=${JSON.stringify(opts.replyTo)} 不符合 msgId 规范 ${p.msgId}`);
+    }
+    if (Array.isArray(opts.mentions) && p.userId) {
+      for (const m of opts.mentions) {
+        if (m?.id && !matchIdPattern(p.userId, String(m.id))) {
+          errs.push(`出站 opts.mentions[].id=${JSON.stringify(m.id)} 不符合 userId 规范 ${p.userId}`);
+        }
+      }
+    }
+    if (!errs.length) return;
+    for (const err of errs) this.#warnContract(err);
+    if (this.strictContract) {
+      throw new Error(errs.join('；'));
+    }
+  }
+
   async #connectAdapter(): Promise<void> {
     if (this.stopped) return;
     const gen = ++this.#connGen;
@@ -583,11 +380,15 @@ export class ManagedChannel {
             selfId: this.selfId,
             selfChatId: this.selfChatId,
             atAllCountsAsMention: this.atAllCountsAsMention,
+            idPatterns: this.idPatterns,
+            strict: this.strictContract,
+            onWarning: (w) => this.#warnContract(w),
           });
         } catch (e) {
           this.logger.error?.(`[channel:${this.name}] 无法识别的消息，已跳过：`, e instanceof Error ? e.message : e);
           return;
         }
+        this.#rememberChatType(ev.chat.id, ev.chat.type);
         if (ev.chat.type === 'self' && !this.selfChatId) {
           this.selfChatId = ev.chat.id;
         }
@@ -681,61 +482,96 @@ export class ManagedChannel {
 
   async send(chatId: string, text: string, opts: ChannelSendOptions = {}): Promise<string | undefined> {
     if (!chatId) throw new Error('尚未获知目标会话 ID（selfChatId）');
-    const id = await this.adapter.send(chatId, text, opts);
+    const cid = String(chatId);
+    const chatType = this.#resolveChatType(cid, opts.chatType);
+    const outOpts: ChannelSendOptions = chatType && opts.chatType !== chatType ? { ...opts, chatType } : opts;
+    this.#validateOutboundOpts(cid, chatType, outOpts);
+    const id = await this.adapter.send(cid, text, outOpts);
+    const idStr = id != null ? String(id).trim() : '';
+    if (!idStr) {
+      this.#warnContract('adapter.send() 未返回非空 msgId，引用路由与回声去重可能失效');
+    } else if (this.idPatterns?.msgId && !matchIdPattern(this.idPatterns.msgId, idStr)) {
+      this.#warnContract(`adapter.send() 返回的 msgId=${JSON.stringify(idStr)} 不符合 msgId 规范 ${this.idPatterns.msgId}`);
+    }
     this.#emit('channel:outbound', {
       kind: 'text',
-      chatId: String(chatId),
-      msgId: id ? String(id) : null,
+      chatId: cid,
+      msgId: idStr || null,
       chars: String(text ?? '').length,
       summary: clipSummary(text),
     });
-    return id != null ? String(id) : undefined;
+    return idStr || undefined;
   }
 
   async sendFile(chatId: string, file: ChannelSendFileInput, opts: ChannelSendOptions = {}): Promise<string | undefined> {
     if (!chatId) throw new Error('尚未获知目标会话 ID（selfChatId）');
     if (!this.canFiles || !this.adapter.sendFile) throw new Error(`通道「${this.name}」不支持发送文件`);
-    const id = await this.adapter.sendFile(chatId, file, opts);
+    const cid = String(chatId);
+    const chatType = this.#resolveChatType(cid, opts.chatType);
+    const outOpts: ChannelSendOptions = chatType && opts.chatType !== chatType ? { ...opts, chatType } : opts;
+    this.#validateOutboundOpts(cid, chatType, outOpts);
+    const id = await this.adapter.sendFile(cid, file, outOpts);
+    const idStr = id != null ? String(id).trim() : '';
+    if (!idStr) {
+      this.#warnContract('adapter.sendFile() 未返回非空 msgId，文件回声防环可能失效');
+    }
     this.#emit('channel:outbound', {
       kind: 'file',
-      chatId: String(chatId),
-      msgId: id ? String(id) : null,
+      chatId: cid,
+      msgId: idStr || null,
       summary: clipSummary(file?.name || pathBasename(file?.path)),
     });
-    return id != null ? String(id) : undefined;
+    return idStr || undefined;
   }
 
-  async download(att: InboundAttachment, savePath: string): Promise<void> {
+  async download(att: InboundAttachment, savePath: string, ctx?: ChannelDownloadContext): Promise<void> {
     if (typeof this.adapter?.download !== 'function') {
       throw new Error(`通道「${this.name}」未实现 download`);
     }
-    await this.adapter.download(att, savePath);
+    const chatId = ctx?.chatId ?? att?.chatId;
+    const chatType = ctx?.chatType ?? (chatId ? this.#resolveChatType(String(chatId)) : undefined);
+    const dlCtx: ChannelDownloadContext = {
+      ...(chatId ? { chatId: String(chatId) } : {}),
+      ...(chatType ? { chatType } : {}),
+    };
+    await this.adapter.download(att, savePath, dlCtx);
   }
 
-  #normalizeMaybeEvent(raw: unknown): InboundEvent | null {
+  #normalizeMaybeEvent(raw: unknown, source = 'history'): InboundEvent | null {
     if (!raw || typeof raw !== 'object') return null;
     try {
-      return normalizeInboundEvent(raw, {
+      const ev = normalizeInboundEvent(raw, {
         selfId: this.selfId,
         selfChatId: this.selfChatId,
         atAllCountsAsMention: this.atAllCountsAsMention,
+        idPatterns: this.idPatterns,
+        strict: this.strictContract,
+        onWarning: (w) => this.#warnContract(`[${source}] ${w}`),
       });
-    } catch {
+      this.#rememberChatType(ev.chat.id, ev.chat.type);
+      return ev;
+    } catch (e) {
+      this.logger.warn?.(`[channel:${this.name}] ${source} 消息归一化失败，已跳过：`, e instanceof Error ? e.message : e);
       return null;
     }
   }
 
-  async getMessage(chatId: string, msgId: string): Promise<InboundEvent | null> {
+  async getMessage(chatId: string, msgId: string, opts: ChannelGetMessageOptions = {}): Promise<InboundEvent | null> {
     if (typeof this.adapter?.getMessage !== 'function') return null;
-    const raw = await this.adapter.getMessage(chatId, msgId);
-    return this.#normalizeMaybeEvent(raw);
+    const cid = String(chatId);
+    const chatType = this.#resolveChatType(cid, opts.chatType);
+    const raw = await this.adapter.getMessage(cid, msgId, chatType ? { ...opts, chatType } : opts);
+    return this.#normalizeMaybeEvent(raw, 'getMessage');
   }
 
   async getHistory(chatId: string, opts: ChannelGetHistoryOptions = {}): Promise<InboundEvent[]> {
     if (typeof this.adapter?.getHistory !== 'function') return [];
-    const list = await this.adapter.getHistory(chatId, opts);
+    const cid = String(chatId);
+    const chatType = this.#resolveChatType(cid, opts.chatType);
+    const passOpts: ChannelGetHistoryOptions = chatType && opts.chatType !== chatType ? { ...opts, chatType } : opts;
+    const list = await this.adapter.getHistory(cid, passOpts);
     return Array.isArray(list)
-      ? list.map((m) => this.#normalizeMaybeEvent(m)).filter((x): x is InboundEvent => x !== null)
+      ? list.map((m) => this.#normalizeMaybeEvent(m, 'getHistory')).filter((x): x is InboundEvent => x !== null)
       : [];
   }
 
@@ -799,13 +635,35 @@ function createManagedChannelPlugin<TOptions extends Record<string, unknown>>(
         throw new Error(`通道插件「${name}」不符合契约：${check.errors.join('；')}`);
       }
       const o = opts as AnyRecord;
+      const selfId = typeof o.selfId === 'string' ? o.selfId : String(o.selfId ?? '');
+      const selfChatId = typeof o.selfChatId === 'string' ? o.selfChatId : String(o.selfChatId ?? '');
+      const idPatterns = spec.idPatterns ?? adapter.idPatterns;
+      const strictContract = Boolean(o.strictContract ?? spec.strictContract ?? false);
+      const cfgIdErrs = validateConfigIdsAgainstPatterns(
+        {
+          selfId,
+          selfChatId,
+          collaborators: ctx.config?.chats?.collaborators,
+          allowChatIds: ctx.config?.chats?.allowChatIds,
+          denyChatIds: ctx.config?.chats?.denyChatIds,
+        },
+        idPatterns,
+      );
+      if (cfgIdErrs.length) {
+        for (const err of cfgIdErrs) ctx.logger?.warn?.(`[channel:${name}] 配置 ID 契约告警：${err}`);
+        if (strictContract) {
+          throw new Error(`通道插件「${name}」配置 ID 不符合 idPatterns：${cfgIdErrs.join('；')}`);
+        }
+      }
       const managed = new ManagedChannel({
         name,
         capabilities: check.capabilities,
         adapter,
-        selfId: typeof o.selfId === 'string' ? o.selfId : String(o.selfId ?? ''),
-        selfChatId: typeof o.selfChatId === 'string' ? o.selfChatId : String(o.selfChatId ?? ''),
+        selfId,
+        selfChatId,
         atAllCountsAsMention: Boolean(o.atAllCountsAsMention ?? false),
+        idPatterns,
+        strictContract,
         reconnectDelayMs: o.reconnectDelayMs != null ? Number(o.reconnectDelayMs) : spec.reconnectDelayMs,
         maxReconnectDelayMs: o.maxReconnectDelayMs != null ? Number(o.maxReconnectDelayMs) : spec.maxReconnectDelayMs,
         emitTelemetry: (evName, payload) => ctx.emit(evName, payload),

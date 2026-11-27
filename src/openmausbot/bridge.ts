@@ -13,8 +13,9 @@ import type {
 } from '../types.ts';
 import { extractCardInfo, formatOmbError } from './cards.ts';
 import {
-  buildExternalSummaryPrompt, compactExternalChat, confirmSendBack, getChatPolicy,
-  listKnownChats, requestSendBack, resolveKnownChat, resolvePrivateDraft,
+  buildExternalSummaryPrompt, cancelSendBack, checkPendingReminders, compactExternalChat,
+  confirmSendBack, getChatPolicy, getCoordinatorInbox, listKnownChats, requestSendBack,
+  resolveKnownChat, resolvePrivateDraft,
 } from './chat-manager.ts';
 import { type OpenMausBotClient } from './client.ts';
 import { DelegationTracker } from './delegation.ts';
@@ -27,7 +28,7 @@ import {
   dispatchToBot, handleSseEvent, steerLatestQueue, switchTask,
 } from './dispatch.ts';
 import { handleInboundEvent, sendDelegation } from './inbound-router.ts';
-import { inQuietHours, rememberBounded, trimMapCap } from './mentions.ts';
+import { inQuietHours, rememberBounded, scopedMsgKey, trimMapCap } from './mentions.ts';
 import {
   drainOutboundQueue, flushOutboundBuffer as flushOutboundQueueBuffer,
   isTransportDisconnected, sendBridgeText, type SendTextExtra,
@@ -79,6 +80,9 @@ export class OpenMausBotBridge {
   turnStallMs: number;
   stateSaveDebounceMs: number;
   draftTtlMs: number;
+  followUpRemindMs: number;
+  delegationRemindMs: number;
+  mutedHintCooldownMs: number;
   outboundBufferMax: number;
   outboundBufferTtlMs: number;
   resultChars: number;
@@ -135,7 +139,8 @@ export class OpenMausBotBridge {
   lastAutoCompactAt = new Map<string, number>();
   privateDrafts = new Map<string, PrivateDraft>();
   lastPrivateDraftId: string | null = null;
-  pendingSendBack: PendingSendBack | null = null;
+  pendingSendBacks = new Map<string, PendingSendBack>();
+  lastMutedHintAt = new Map<string, number>();
   pendingFollowUps = new Map<string, PendingFollowUp>();
   inFlightTurns = new Map<string, InFlightTurnMeta>();
   pendingChatThreads = new Map<string, Promise<OmbTargetBot>>();
@@ -158,6 +163,7 @@ export class OpenMausBotBridge {
   quietQueue: QuietQueueItem[] = [];
   quietTimer: ReturnType<typeof setInterval> | null = null;
   cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  reminderTimer: ReturnType<typeof setInterval> | null = null;
   focus: BridgeFocus | null = null;
   chatThreads = new Map<string, ChatThreadEntry>();
   selfThreads = new Map<string, BridgeFocus>();
@@ -194,6 +200,9 @@ export class OpenMausBotBridge {
     turnStallMs = 180_000,
     stateSaveDebounceMs = 150,
     draftTtlMs = 30 * 60_000,
+    followUpRemindMs = 15 * 60_000,
+    delegationRemindMs = 30 * 60_000,
+    mutedHintCooldownMs = 10 * 60_000,
     outboundBufferMax = 30,
     outboundBufferTtlMs = 5 * 60_000,
     resultChars = 1500,
@@ -236,6 +245,9 @@ export class OpenMausBotBridge {
     this.turnStallMs = turnStallMs;
     this.stateSaveDebounceMs = stateSaveDebounceMs;
     this.draftTtlMs = draftTtlMs;
+    this.followUpRemindMs = followUpRemindMs;
+    this.delegationRemindMs = delegationRemindMs;
+    this.mutedHintCooldownMs = mutedHintCooldownMs;
     this.outboundBufferMax = outboundBufferMax;
     this.outboundBufferTtlMs = outboundBufferTtlMs;
     this.resultChars = resultChars;
@@ -287,6 +299,24 @@ export class OpenMausBotBridge {
     return this.transport?.selfChatId || this.learnedSelfChatId || '';
   }
 
+  get selfUserId(): string {
+    return String(this.transport?.selfId || '').trim();
+  }
+
+  resolveChatType(chatId: string | null | undefined): ChatType | undefined {
+    const cid = String(chatId ?? '').trim();
+    if (!cid) return undefined;
+    if (this.selfChat && cid === this.selfChat) return 'self';
+    const ext = this.externalChatMeta.get(cid);
+    if (ext?.type) return ext.type;
+    const meta = this.imContext?.store?.getChatMeta(cid) ?? this.localContextStore.getChatMeta(cid);
+    if (meta?.type) return meta.type;
+    for (const entry of this.chatThreads.values()) {
+      if (entry.chatId === cid && entry.chatType) return entry.chatType;
+    }
+    return undefined;
+  }
+
   #loadState(): void { loadBridgeState(this); }
   saveState(opts?: { immediate?: boolean }): void { saveBridgeState(this, opts); }
   flushState(): void { flushBridgeState(this); }
@@ -307,13 +337,136 @@ export class OpenMausBotBridge {
     }
   }
 
-  rememberOwnId(id: unknown): void {
-    if (id != null) rememberBounded(this.ownIds, id, 2000);
+  rememberOwnId(id: unknown, chatId?: string | null): void {
+    if (id == null) return;
+    const mid = String(id).trim();
+    if (!mid) return;
+    const key = scopedMsgKey(chatId, mid);
+    rememberBounded(this.ownIds, key, 2000);
+  }
+
+  isOwnId(chatId: string | null | undefined, msgId: string | null | undefined): boolean {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return false;
+    const scoped = scopedMsgKey(chatId, mid);
+    return Boolean((scoped && this.ownIds.has(scoped)) || this.ownIds.has(mid));
+  }
+
+  hasSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): boolean {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return false;
+    const scoped = scopedMsgKey(chatId, mid);
+    return Boolean((scoped && this.seen.has(scoped)) || this.seen.has(mid));
+  }
+
+  markSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): void {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return;
+    const scoped = scopedMsgKey(chatId, mid);
+    rememberBounded(this.seen, scoped || mid, 5000);
+  }
+
+  setMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined, route: MsgRoute): void {
+    const mid = String(msgId ?? '').trim();
+    if (!mid || !route?.botId) return;
+    const cid = String(chatId || route.targetChatId || '').trim();
+    const key = scopedMsgKey(cid, mid);
+    this.msgRoute.set(key, route);
+    trimMapCap(this.msgRoute, 500);
+  }
+
+  getMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): MsgRoute | null {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return null;
+    const cid = String(chatId ?? '').trim();
+    if (cid) {
+      const hit = this.msgRoute.get(scopedMsgKey(cid, mid));
+      if (hit) return hit;
+    }
+    const legacy = this.msgRoute.get(mid) ?? null;
+    if (!legacy) return null;
+    const routeChat = legacy.targetChatId || legacy.originChatId || '';
+    if (cid && routeChat && routeChat !== cid) return null;
+    return legacy;
+  }
+
+  deleteMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): void {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return;
+    const cid = String(chatId ?? '').trim();
+    if (cid) this.msgRoute.delete(scopedMsgKey(cid, mid));
+    const legacy = this.msgRoute.get(mid);
+    if (legacy) {
+      const routeChat = legacy.targetChatId || legacy.originChatId || '';
+      if (!cid || !routeChat || routeChat === cid) this.msgRoute.delete(mid);
+    }
+  }
+
+  setFileMsg(chatId: string, msgId: string, atts: InboundAttachment[]): void {
+    const mid = String(msgId ?? '').trim();
+    const cid = String(chatId ?? '').trim();
+    if (!mid) return;
+    const key = scopedMsgKey(cid, mid);
+    this.fileMsgs.set(key, { chatId: cid, atts, at: this.now(), used: false });
+    trimMapCap(this.fileMsgs, 50);
+  }
+
+  getFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): { key: string; entry: FileMsgEntry } | null {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return null;
+    const cid = String(chatId ?? '').trim();
+    if (cid) {
+      const sk = scopedMsgKey(cid, mid);
+      const hit = this.fileMsgs.get(sk);
+      if (hit) return { key: sk, entry: hit };
+    }
+    const legacy = this.fileMsgs.get(mid);
+    if (!legacy) return null;
+    if (cid && legacy.chatId && legacy.chatId !== cid) return null;
+    return { key: mid, entry: legacy };
+  }
+
+  deleteFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): void {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return;
+    const cid = String(chatId ?? '').trim();
+    if (cid) this.fileMsgs.delete(scopedMsgKey(cid, mid));
+    const legacy = this.fileMsgs.get(mid);
+    if (legacy && (!cid || !legacy.chatId || legacy.chatId === cid)) {
+      this.fileMsgs.delete(mid);
+    }
+  }
+
+  getPendingCard(chatId: string | null | undefined, msgId: string | null | undefined): PendingCard | null {
+    const mid = String(msgId ?? '').trim();
+    if (!mid) return null;
+    const cid = String(chatId ?? '').trim();
+    const card = this.pendingCards.get(mid) ?? null;
+    if (!card) return null;
+    if (cid && card.chatId && card.chatId !== cid) return null;
+    return card;
+  }
+
+  get pendingSendBack(): PendingSendBack | null {
+    const now = this.now();
+    for (const [k, v] of this.pendingSendBacks) {
+      if (!v || v.expiresAt <= now) this.pendingSendBacks.delete(k);
+    }
+    return [...this.pendingSendBacks.values()].at(-1) ?? null;
+  }
+
+  set pendingSendBack(val: PendingSendBack | null) {
+    if (!val) {
+      this.pendingSendBacks.clear();
+      return;
+    }
+    const id = val.id || val.draft?.id || 'default';
+    this.pendingSendBacks.set(id, { ...val, id });
   }
 
   clearPickers(): void {
     this.pendingTaskPick = null;
-    this.pendingSendBack = null;
+    this.pendingSendBacks.clear();
   }
 
   clearPendingMedia(): void {
@@ -397,6 +550,7 @@ export class OpenMausBotBridge {
   status() {
     let queuedCount = 0;
     for (const arr of this.queuedByThread.values()) queuedCount += arr.length;
+    const inbox = this.getCoordinatorInbox();
     const uniqueDrafts = new Set<string>();
     for (const d of this.privateDrafts.values()) if (d?.id) uniqueDrafts.add(d.id);
     return {
@@ -416,8 +570,11 @@ export class OpenMausBotBridge {
       multiBot: this.multiBotCache,
       chatThreads: this.chatThreads.size,
       chatPolicy: this.getChatPolicy(),
-      pendingSendBack: Boolean(this.pendingSendBack && this.now() < this.pendingSendBack.expiresAt),
+      pendingSendBack: Boolean(this.pendingSendBack),
+      pendingSendBacksCount: inbox.sendBacks.length,
+      pendingFollowUpsCount: inbox.followUps.length,
       privateDraftsCount: uniqueDrafts.size,
+      inbox,
       securityRedactions: this.securityRedactions,
       policyDenials: this.policyDenials,
       boundProjectsCount: this.chatProjects.size,
@@ -461,6 +618,14 @@ export class OpenMausBotBridge {
       this.pruneMemoryCaches();
     }, DAY_MS);
     this.cleanupTimer.unref?.();
+    if (this.reminderTimer) {
+      clearInterval(this.reminderTimer);
+      this.reminderTimer = null;
+    }
+    this.reminderTimer = setInterval(() => {
+      this.checkPendingReminders().catch(() => {});
+    }, 60_000);
+    this.reminderTimer.unref?.();
     await this.transport.start((ev) => Promise.resolve(this.onEvent(ev)).catch((e) => console.error('[omb-bridge]', e)));
     this.sseAc = new AbortController();
     this.sseTask = this.client.subscribeEvents((evt) => handleSseEvent(this, evt), {
@@ -506,6 +671,10 @@ export class OpenMausBotBridge {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
+    }
+    if (this.reminderTimer) {
+      clearInterval(this.reminderTimer);
+      this.reminderTimer = null;
     }
     this.clearPendingMedia();
     this.sseAc?.abort();
@@ -702,8 +871,11 @@ export class OpenMausBotBridge {
   }
   resolvePrivateDraft(opts?: { quotedId?: string | null; draftId?: string | null }) { return resolvePrivateDraft(this, opts); }
   requestSendBack(draft: PrivateDraft | null | undefined, overrideText = '') { return requestSendBack(this, draft, overrideText); }
-  confirmSendBack() { return confirmSendBack(this); }
-  buildExternalSummaryPrompt(targetChat: { id: string; type?: ChatType; name?: string }, opts?: { limit?: number; focusQuestion?: string }) {
+  confirmSendBack(targetRef?: string | null) { return confirmSendBack(this, targetRef); }
+  cancelSendBack(targetRef?: string | null) { return cancelSendBack(this, targetRef); }
+  getCoordinatorInbox() { return getCoordinatorInbox(this); }
+  checkPendingReminders() { return checkPendingReminders(this); }
+  buildExternalSummaryPrompt(targetChat: { id: string; type?: ChatType; name?: string }, opts?: { limit?: number; focusQuestion?: string; botId?: string }) {
     return buildExternalSummaryPrompt(this, targetChat, opts);
   }
 

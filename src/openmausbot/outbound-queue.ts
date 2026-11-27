@@ -5,7 +5,6 @@ import { scanAndRedactOutbound } from '../core/security.ts';
 import { hardBreaks, plain, stripSingleLineLeadingBold } from '../format.ts';
 import type { ChannelAction, ChannelSendOptions, OutboundMention } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
-import { rememberBounded, trimMapCap } from './mentions.ts';
 import type { MsgRoute, OutboundBufferItem } from './types.ts';
 
 export interface SendTextExtra {
@@ -112,7 +111,9 @@ export async function sendBridgeText(
   const senderName = msgRoute?.botName
     ? bridge.displayBotName(msgRoute.botId, msgRoute.botName, { isGroup: Boolean(msgRoute.isGroup) })
     : '';
+  const chatType = bridge.resolveChatType(chatId);
   const opts: ChannelSendOptions = {
+    ...(chatType ? { chatType } : {}),
     ...(replyTo && caps?.replyTo !== false ? { replyTo } : {}),
     ...(Array.isArray(actions) && actions.length && caps?.actions !== false ? { actions } : {}),
     ...(Array.isArray(extra?.mentions) && extra.mentions.length ? { mentions: extra.mentions } : {}),
@@ -123,6 +124,7 @@ export async function sendBridgeText(
     if (!extra?.noBuffer && isTransportDisconnected(bridge)) {
       bufferOutboundItem(bridge, {
         chatId,
+        ...(chatType ? { chatType } : {}),
         text,
         route: msgRoute,
         replyTo,
@@ -146,10 +148,9 @@ export async function sendBridgeText(
         const sentId = await bridge.transport.send(chatId, body, opts);
         if (sentId != null) {
           const sid = String(sentId);
-          rememberBounded(bridge.ownIds, sid, 2000);
+          bridge.rememberOwnId(sid, chatId);
           if (msgRoute?.botId) {
-            bridge.msgRoute.set(sid, msgRoute);
-            trimMapCap(bridge.msgRoute, 500);
+            bridge.setMsgRoute(chatId, sid, msgRoute);
             bridge.saveState();
           }
           return sid;
@@ -166,6 +167,7 @@ export async function sendBridgeText(
         if (!extra?.noBuffer && (isTransportDisconnected(bridge) || extra?.bufferOnFail)) {
           bufferOutboundItem(bridge, {
             chatId,
+            ...(chatType ? { chatType } : {}),
             text,
             route: msgRoute,
             replyTo,

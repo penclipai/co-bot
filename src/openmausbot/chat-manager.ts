@@ -4,10 +4,11 @@
 import { formatImContextBlock, sanitizeExternalMentions } from '../core/chat-context.ts';
 import { attachBotBadge, formatExternalBotPrefix } from '../core/security.ts';
 import { clip } from '../format.ts';
-import type { ChatType, ChatsMode } from '../types.ts';
+import type { ChannelAction, ChatType, ChatsMode } from '../types.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatDelegationResponse } from './delegation.ts';
-import type { KnownChatSummary, PrivateDraft } from './types.ts';
+import { trimMapCap } from './mentions.ts';
+import type { CoordinatorInboxSummary, KnownChatSummary, PendingSendBack, PrivateDraft } from './types.ts';
 
 export interface ChatPolicyView {
   mode: ChatsMode;
@@ -57,10 +58,11 @@ export function listKnownChats(bridge: OpenMausBotBridge): KnownChatSummary[] {
   const touch = (id: string, patch: Partial<KnownChatSummary> = {}): void => {
     if (!id) return;
     const cid = String(id);
+    const isSelfEntry = bridge.selfChat ? cid === bridge.selfChat : cid === 'self';
     const prev: KnownChatSummary = byId.get(cid) ?? {
       id: cid,
-      type: cid === bridge.selfChat || cid === 'self' ? 'self' : 'direct',
-      name: cid === bridge.selfChat || cid === 'self' ? '自聊' : cid,
+      type: isSelfEntry ? 'self' : 'direct',
+      name: isSelfEntry ? '自聊' : cid,
       cachedMessages: 0,
       updatedAt: 0,
     };
@@ -152,13 +154,40 @@ export async function compactExternalChat(
 export async function buildExternalSummaryPrompt(
   bridge: OpenMausBotBridge,
   targetChat: { id: string; type?: ChatType; name?: string },
-  { limit = 30, focusQuestion = '' }: { limit?: number; focusQuestion?: string } = {},
+  { limit = 30, focusQuestion = '', botId = '' }: { limit?: number; focusQuestion?: string; botId?: string } = {},
 ): Promise<{ count: number; header: string; text: string }> {
   const maxMsgs = Math.max(1, Math.min(200, Number(limit) || 30));
   const recentMsgs = bridge.imContext
     ? await bridge.imContext.getHistory(targetChat.id, { limit: maxMsgs })
     : bridge.localContextStore.getRecent(targetChat.id, { limit: maxMsgs });
   if (!recentMsgs.length) return { count: 0, header: '', text: '' };
+  const storeRef = bridge.imContext?.store ?? bridge.localContextStore;
+  const stats = storeRef.getAvailableStats(targetChat.id);
+  const pullHint = bridge.imContext?.getContextPullHint
+    ? bridge.imContext.getContextPullHint(targetChat.id, {
+        availableCount: Math.max(recentMsgs.length, stats.count),
+        availableFiles: stats.fileCount,
+        pullOnly: true,
+        botId: botId || bridge.chiefBotId || undefined,
+        readonly: false,
+      })
+    : '';
+  const extra = focusQuestion ? `\n\n请额外重点回答：${focusQuestion}` : '';
+  if (pullHint) {
+    const header = formatImContextBlock({
+      triggerEvent: {
+        id: 'summary_req',
+        chat: { id: targetChat.id, type: targetChat.type || 'group', name: targetChat.name || targetChat.id },
+        sender: { id: 'me', name: '我', isSelf: true },
+      },
+      chatMeta: targetChat,
+      recentMsgs: [],
+      privateReply: true,
+      historyPullHint: pullHint,
+    });
+    const text = `请通过 \`context_pull\` 按需拉取「${targetChat.name || targetChat.id}」最近最多 ${maxMsgs} 条对话（先用 \`&limit=${Math.min(20, maxMsgs)}&excludeBots=1\` 聚焦人类讨论，必要时用 \`&before=\` 向前翻页或 \`&onlyFiles=1\`/\`&msgId=\` 查转发与文件），用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
+    return { count: recentMsgs.length, header, text };
+  }
   const header = formatImContextBlock({
     triggerEvent: {
       id: 'summary_req',
@@ -170,7 +199,6 @@ export async function buildExternalSummaryPrompt(
     privateReply: true,
     maxRecentChars: Math.max(350, Number(bridge.chats.maxRecentMessageChars) || 280),
   });
-  const extra = focusQuestion ? `\n\n请额外重点回答：${focusQuestion}` : '';
   const text = `请基于上述 <im-context> 中的「${targetChat.name || targetChat.id}」最近 ${recentMsgs.length} 条对话，用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
   return { count: recentMsgs.length, header, text };
 }
@@ -195,6 +223,49 @@ export function resolvePrivateDraft(
   return [...bridge.privateDrafts.values()].at(-1) ?? null;
 }
 
+function resolvePendingSendBackEntry(
+  bridge: OpenMausBotBridge,
+  targetRef?: string | null,
+): { key: string; entry: PendingSendBack } | null {
+  const now = bridge.now();
+  for (const [k, v] of bridge.pendingSendBacks) {
+    if (!v || v.expiresAt <= now) bridge.pendingSendBacks.delete(k);
+  }
+  const ref = String(targetRef || '').trim();
+  if (ref) {
+    const direct = bridge.pendingSendBacks.get(ref);
+    if (direct) return { key: ref, entry: direct };
+    for (const [k, v] of bridge.pendingSendBacks) {
+      if (v.id === ref || v.imMsgId === ref || v.draft?.id === ref) {
+        return { key: k, entry: v };
+      }
+    }
+    return null;
+  }
+  const last = [...bridge.pendingSendBacks.entries()].at(-1);
+  return last ? { key: last[0], entry: last[1] } : null;
+}
+
+function purgePrivateDraft(bridge: OpenMausBotBridge, draft: PrivateDraft): void {
+  for (const [k, v] of bridge.privateDrafts) {
+    if (k === draft.id || k === draft.imMsgId || v?.id === draft.id) {
+      bridge.privateDrafts.delete(k);
+    }
+  }
+  for (const [k, v] of bridge.pendingSendBacks) {
+    if (k === draft.id || v?.draft?.id === draft.id) bridge.pendingSendBacks.delete(k);
+  }
+  if (bridge.lastPrivateDraftId === draft.id || bridge.lastPrivateDraftId === draft.imMsgId) {
+    bridge.lastPrivateDraftId = null;
+  }
+}
+
+export async function discardPrivateDraft(bridge: OpenMausBotBridge, draft: PrivateDraft): Promise<string | null> {
+  purgePrivateDraft(bridge, draft);
+  bridge.saveState();
+  return bridge.say(`❎ 已忽略来自「${draft.originChatName || draft.originChatId}」的草稿。`);
+}
+
 export async function requestSendBack(
   bridge: OpenMausBotBridge,
   draft: PrivateDraft | null | undefined,
@@ -205,13 +276,21 @@ export async function requestSendBack(
   const text = String(overrideText || draft.rawText || '').trim();
   if (!text) return null;
   const useBotPrefix = Boolean(!draft.delegationRe && (draft.forceBotPrefix || (!hasOverride && draft.addBotPrefix)));
-  bridge.clearPickers();
-  bridge.pendingSendBack = {
+  bridge.pendingTaskPick = null;
+  const entryId = draft.id || `sb_${bridge.now().toString(36)}`;
+  const entry: PendingSendBack = {
+    id: entryId,
     draft,
     text,
     useBotPrefix,
     expiresAt: bridge.now() + 2 * 60_000,
   };
+  const now = bridge.now();
+  for (const [k, v] of bridge.pendingSendBacks) {
+    if (!v || v.expiresAt <= now) bridge.pendingSendBacks.delete(k);
+  }
+  bridge.pendingSendBacks.set(entryId, entry);
+  trimMapCap(bridge.pendingSendBacks, 10);
   const safePreview = sanitizeExternalMentions(text, {
     mode: bridge.chats.externalSanitizeMentions ?? 'all',
     botNames: bridge.getKnownBotNames(),
@@ -233,19 +312,51 @@ export async function requestSendBack(
   const titleText = draft.followUp
     ? `**📤 确认向「${draft.originChatName || draft.originChatId}」追问 @${draft.followUp.targetName}**`
     : `**📤 确认发回到「${draft.originChatName || draft.originChatId}」**`;
-  return bridge.say(
+  const actions: ChannelAction[] = [
+    { label: '确认发送', text: `${bridge.trigger} sendback confirm ${entryId}`, kind: 'primary' },
+    { label: '取消', text: `${bridge.trigger} sendback cancel ${entryId}`, kind: 'danger' },
+  ];
+  const sentId = await bridge.say(
     `${titleText}（${attrLabel}${quoteHint}${askHint}）\n> ${clip(safePreview, 600)}\n\n回复 \`确认发送\` 立即发出，回复 \`改：<新内容>\` 修改后再发，或回复 \`取消\``,
+    null,
+    null,
+    actions,
   );
+  if (sentId) entry.imMsgId = sentId;
+  return sentId;
 }
 
-export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string | null> {
-  const pending = bridge.pendingSendBack;
-  if (!pending || bridge.now() >= pending.expiresAt) {
-    bridge.pendingSendBack = null;
+export async function confirmDraftDirect(bridge: OpenMausBotBridge, draft: PrivateDraft): Promise<string | null> {
+  const text = String(draft.rawText || '').trim();
+  if (!text) return null;
+  const entryId = draft.id || `sb_${bridge.now().toString(36)}`;
+  bridge.pendingSendBacks.set(entryId, {
+    id: entryId,
+    draft,
+    text,
+    useBotPrefix: Boolean(!draft.delegationRe && (draft.forceBotPrefix || draft.addBotPrefix)),
+    expiresAt: bridge.now() + 2 * 60_000,
+  });
+  return confirmSendBack(bridge, entryId);
+}
+
+export async function cancelSendBack(bridge: OpenMausBotBridge, targetRef?: string | null): Promise<string | null> {
+  const hit = resolvePendingSendBackEntry(bridge, targetRef);
+  if (!hit) {
+    return bridge.say('当前没有待取消的发回确认。');
+  }
+  bridge.pendingSendBacks.delete(hit.key);
+  return bridge.say('❎ 已取消发回原群。');
+}
+
+export async function confirmSendBack(bridge: OpenMausBotBridge, targetRef?: string | null): Promise<string | null> {
+  const hit = resolvePendingSendBackEntry(bridge, targetRef);
+  if (!hit) {
     await bridge.say('⌛ 待发回草稿已超时，请引用私密草稿重新发送 `@bot sendback`。');
     return null;
   }
-  bridge.pendingSendBack = null;
+  bridge.pendingSendBacks.delete(hit.key);
+  const pending = hit.entry;
   const { draft, text, useBotPrefix } = pending;
   const applyBotPrefix = useBotPrefix ?? Boolean(draft.addBotPrefix);
   let safeBody = sanitizeExternalMentions(text, {
@@ -266,7 +377,8 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
   }
   let pendingFpId: string | null = null;
   if (draft.followUp) {
-    pendingFpId = `fp_${bridge.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const nowTs = bridge.now();
+    pendingFpId = `fp_${nowTs.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     bridge.pendingFollowUps.set(pendingFpId, {
       id: pendingFpId,
       chatId: draft.originChatId,
@@ -280,7 +392,8 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
       threadId: draft.followUp.threadId,
       isGroup: draft.followUp.isGroup,
       question: text,
-      expiresAt: bridge.now() + 30 * 60_000,
+      createdAt: nowTs,
+      expiresAt: nowTs + 30 * 60_000,
     });
   }
   const sentId = await bridge.say(
@@ -303,7 +416,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     id: sentId,
     text: safeBody,
     replyTo: draft.replyToImMsgId ?? undefined,
-    senderId: 'me',
+    senderId: bridge.selfUserId || 'me',
     senderName: '我',
     isBotReply: Boolean(draft.delegationRe || applyBotPrefix),
     ...(applyBotPrefix ? { botId: draft.followUp?.botId || bridge.chiefBotId || undefined } : {}),
@@ -320,14 +433,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
     chatType: draft.originChatType,
     summary: safeBody,
   });
-  for (const [k, v] of bridge.privateDrafts) {
-    if (k === draft.id || k === draft.imMsgId || v?.id === draft.id) {
-      bridge.privateDrafts.delete(k);
-    }
-  }
-  if (bridge.lastPrivateDraftId === draft.id || bridge.lastPrivateDraftId === draft.imMsgId) {
-    bridge.lastPrivateDraftId = null;
-  }
+  purgePrivateDraft(bridge, draft);
   bridge.saveState();
   const awaitingFollowUp = Boolean(pendingFpId && bridge.pendingFollowUps.has(pendingFpId));
   await bridge.say(
@@ -336,4 +442,136 @@ export async function confirmSendBack(bridge: OpenMausBotBridge): Promise<string
       : `✅ 已发回「${draft.originChatName || draft.originChatId}」（已做防误艾特与安全脱敏处理）。`,
   );
   return sentId;
+}
+
+/** 汇总所有在途协调事项（审批卡、待发回确认、未处理草稿、待回追问、C2C 委托）。 */
+export function getCoordinatorInbox(bridge: OpenMausBotBridge): CoordinatorInboxSummary {
+  const now = bridge.now();
+  const draftCutoff = now - (Number(bridge.draftTtlMs) || 30 * 60_000);
+  const cards = [...bridge.pendingCards.values()].map((c) => ({
+    imMsgId: c.imMsgId,
+    title: c.title || '待确认操作',
+    botName: bridge.displayBotName(c.botId, c.botName, { isGroup: Boolean(c.isGroup) }),
+    kind: c.cardKind || 'card',
+  }));
+  const sendBacks: CoordinatorInboxSummary['sendBacks'] = [];
+  const sbDraftIds = new Set<string>();
+  for (const [k, v] of bridge.pendingSendBacks) {
+    if (!v || v.expiresAt <= now) {
+      bridge.pendingSendBacks.delete(k);
+      continue;
+    }
+    const did = v.draft?.id || k;
+    sbDraftIds.add(did);
+    sendBacks.push({
+      id: k,
+      imMsgId: v.imMsgId ?? null,
+      originName: v.draft?.originChatName || v.draft?.originChatId || '',
+      preview: clip(v.text.replace(/\s+/g, ' '), 40),
+      isFollowUp: Boolean(v.draft?.followUp),
+      expiresAt: v.expiresAt,
+    });
+  }
+  const drafts: CoordinatorInboxSummary['drafts'] = [];
+  const seenDrafts = new Set<string>();
+  for (const d of bridge.privateDrafts.values()) {
+    if (!d?.id || seenDrafts.has(d.id)) continue;
+    seenDrafts.add(d.id);
+    if ((d.createdAt || 0) < draftCutoff || sbDraftIds.has(d.id)) continue;
+    drafts.push({
+      id: d.id,
+      imMsgId: d.imMsgId ?? null,
+      originName: d.originChatName || d.originChatId,
+      preview: clip(d.rawText.replace(/\s+/g, ' '), 40),
+      createdAt: d.createdAt,
+    });
+  }
+  const followUps: CoordinatorInboxSummary['followUps'] = [];
+  for (const [k, fp] of bridge.pendingFollowUps) {
+    if (!fp || fp.expiresAt <= now) {
+      bridge.pendingFollowUps.delete(k);
+      continue;
+    }
+    followUps.push({
+      id: fp.id,
+      chatName: fp.chatName || fp.chatId,
+      targetName: fp.targetName,
+      question: clip(fp.question.replace(/\s+/g, ' '), 40),
+      createdAt: fp.createdAt || now,
+      expiresAt: fp.expiresAt,
+    });
+  }
+  const delegations = [...bridge.delegations.pendingOutbound.values()].map((d) => ({
+    id: d.id,
+    chatName: d.targetChatName || d.targetChatId,
+    ...(d.project ? { project: d.project } : {}),
+    question: clip((d.question || '').replace(/\s+/g, ' '), 40),
+    createdAt: d.createdAt || now,
+  }));
+  const total = cards.length + sendBacks.length + drafts.length + followUps.length + delegations.length;
+  return { cards, sendBacks, drafts, followUps, delegations, total };
+}
+
+export function formatCoordinatorInboxLines(inbox: CoordinatorInboxSummary): string[] {
+  const lines: string[] = [];
+  for (const c of inbox.cards.slice(0, 4)) {
+    lines.push(`- ⏸️ 审批/提问：**${c.botName}** · ${c.title}`);
+  }
+  for (const sb of inbox.sendBacks.slice(0, 4)) {
+    lines.push(`- 📤 待确认发回「${sb.originName}」：${sb.preview}`);
+  }
+  for (const d of inbox.drafts.slice(0, 4)) {
+    lines.push(`- 📝 私密草稿「${d.originName}」（\`${d.id}\`）：${d.preview}`);
+  }
+  for (const fp of inbox.followUps.slice(0, 4)) {
+    lines.push(`- 💬 等「${fp.chatName}」@${fp.targetName} 回复：${fp.question}`);
+  }
+  for (const dl of inbox.delegations.slice(0, 4)) {
+    lines.push(`- 🤝 C2C 委托「${dl.chatName}」（\`${dl.id}\`）：${dl.question || '处理中'}`);
+  }
+  return lines;
+}
+
+/** 对超时未获回复的 @同事追问与 C2C 委托向自聊发送单次提醒。 */
+export async function checkPendingReminders(bridge: OpenMausBotBridge): Promise<number> {
+  if (!bridge.selfChat) return 0;
+  const now = bridge.now();
+  const fpThreshold = Number(bridge.followUpRemindMs) || 0;
+  const delThreshold = Number(bridge.delegationRemindMs) || 0;
+  let sentCount = 0;
+  let changed = false;
+
+  for (const [k, fp] of bridge.pendingFollowUps) {
+    if (!fp || fp.expiresAt <= now) {
+      bridge.pendingFollowUps.delete(k);
+      changed = true;
+      continue;
+    }
+    const createdAt = fp.createdAt || now;
+    if (fpThreshold > 0 && !fp.remindedAt && (now - createdAt) >= fpThreshold) {
+      fp.remindedAt = now;
+      changed = true;
+      sentCount += 1;
+      const mins = Math.max(1, Math.round((now - createdAt) / 60_000));
+      await bridge.say(
+        `⏰ **追问超时提醒**：在「${fp.chatName || fp.chatId}」向 **${fp.targetName}** 的追问已等待 ${mins} 分钟尚未收到回复（\`${clip(fp.question.replace(/\s+/g, ' '), 50)}\`）。`,
+      );
+    }
+  }
+
+  for (const d of bridge.delegations.pendingOutbound.values()) {
+    const createdAt = d.createdAt || 0;
+    if (delThreshold > 0 && createdAt > 0 && !d.remindedAt && (now - createdAt) >= delThreshold) {
+      d.remindedAt = now;
+      changed = true;
+      sentCount += 1;
+      const mins = Math.max(1, Math.round((now - createdAt) / 60_000));
+      await bridge.say(
+        `⏰ **协作委托超时提醒**：向「${d.targetChatName || d.targetChatId}」发出的委托 \`${d.id}\` 已等待 ${mins} 分钟未回传（${clip((d.question || '').replace(/\s+/g, ' '), 50)}）。`,
+      );
+    }
+  }
+
+  if (changed) bridge.saveState();
+  return sentCount;
 }

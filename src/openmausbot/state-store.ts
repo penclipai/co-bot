@@ -12,6 +12,7 @@ import type {
   InFlightTurnMeta,
   MsgRoute,
   PendingCard,
+  PendingFollowUp,
   PrivateDraft,
   QuietQueueItem,
 } from './types.ts';
@@ -33,6 +34,7 @@ interface BridgeStateFile {
   inFlightTurns?: Array<[string, InFlightTurnMeta]>;
   privateDrafts?: PrivateDraft[];
   lastPrivateDraftId?: string | null;
+  pendingFollowUps?: PendingFollowUp[];
   chatProjects?: Array<[string, ProjectRef]>;
   delegations?: unknown;
 }
@@ -126,6 +128,19 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
         bridge.lastPrivateDraftId = String(raw.lastPrivateDraftId);
       }
     }
+    if (Array.isArray(raw?.pendingFollowUps)) {
+      const now = bridge.now();
+      for (const fp of raw.pendingFollowUps.slice(-40)) {
+        if (fp?.id && fp?.chatId && Number(fp.expiresAt) > now) {
+          bridge.pendingFollowUps.set(String(fp.id), {
+            ...fp,
+            id: String(fp.id),
+            chatId: String(fp.chatId),
+            createdAt: Number(fp.createdAt) || now,
+          });
+        }
+      }
+    }
     if (Array.isArray(raw?.chatProjects) && bridge.chatProjects) {
       for (const [k, v] of raw.chatProjects.slice(-200)) {
         if (k && v?.path) {
@@ -181,6 +196,9 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
       inFlightTurns: [...bridge.inFlightTurns.entries()].slice(-20),
       privateDrafts: uniqueDrafts.slice(-40),
       lastPrivateDraftId: bridge.lastPrivateDraftId || null,
+      pendingFollowUps: [...bridge.pendingFollowUps.values()]
+        .filter((fp) => fp?.id && Number(fp.expiresAt) > bridge.now())
+        .slice(-40),
       chatProjects: bridge.chatProjects ? [...bridge.chatProjects.entries()].slice(-200) : [],
       delegations: bridge.delegations ? bridge.delegations.snapshot() : undefined,
     });
@@ -222,5 +240,11 @@ export function pruneBridgeMemoryCaches(bridge: OpenMausBotBridge): void {
   const draftCutoff = now - (Number(bridge.draftTtlMs) || 30 * 60_000);
   for (const [k, v] of bridge.privateDrafts) {
     if ((v?.createdAt || 0) < draftCutoff) bridge.privateDrafts.delete(k);
+  }
+  for (const [k, v] of bridge.pendingFollowUps) {
+    if (!v || (v.expiresAt || 0) <= now) bridge.pendingFollowUps.delete(k);
+  }
+  for (const [k, v] of bridge.pendingSendBacks) {
+    if (!v || (v.expiresAt || 0) <= now) bridge.pendingSendBacks.delete(k);
   }
 }

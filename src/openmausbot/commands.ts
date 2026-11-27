@@ -2,6 +2,7 @@ import { matchProjectSpec } from '../core/projects.ts';
 import { clip } from '../format.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { formatOmbError, parseChoiceIndex } from './cards.ts';
+import { discardPrivateDraft, formatCoordinatorInboxLines } from './chat-manager.ts';
 import {
   botCommandTarget,
   buildHelpText,
@@ -167,6 +168,10 @@ async function handleStatusCommand(
       return `- **${g.name}**（${count} · ${g.busy ? '讨论中' : '空闲'}）`;
     });
     sections.push(`**👥 群组（${visibleGroups.length}）**\n${gLines.join('\n')}`);
+  }
+  const inbox = typeof bridge.getCoordinatorInbox === 'function' ? bridge.getCoordinatorInbox() : null;
+  if (inbox && inbox.total > 0) {
+    sections.push(`**📋 待处理事项（${inbox.total}）**\n${formatCoordinatorInboxLines(inbox).join('\n')}`);
   }
 
   const route = ctxSummary && ctxBot
@@ -390,15 +395,15 @@ async function handleDefaultCommand(
       focusQuestion = (limM[2] ?? '').trim();
     }
 
-    const built = await bridge.buildExternalSummaryPrompt(targetChat, { limit, focusQuestion });
-    if (!built.count) {
-      await sensSink.say(`会话「${targetChat.name || targetChat.id}」暂时没有可汇总的对话记录。`);
-      return true;
-    }
     if (isExternal && !bridge.selfChat) {
       return true;
     }
     const selfBot = await bridge.resolveSelfBotThread(targetBot);
+    const built = await bridge.buildExternalSummaryPrompt(targetChat, { limit, focusQuestion, botId: selfBot.id });
+    if (!built.count) {
+      await sensSink.say(`会话「${targetChat.name || targetChat.id}」暂时没有可汇总的对话记录。`);
+      return true;
+    }
     await bridge.dispatchToBot(
       selfBot,
       built.text,
@@ -430,12 +435,39 @@ async function handleDefaultCommand(
       return true;
     }
     const arg = (sendbackM[1] ?? '').trim();
-    if (/^(confirm|确认|发送|send)$/i.test(arg)) {
-      if (!bridge.pendingSendBack) {
+    const confirmM = arg.match(/^(?:confirm|确认|发送|send)(?:\s+(\S+))?$/i);
+    if (confirmM) {
+      const targetRef = (confirmM[1] ?? '').trim() || null;
+      if (targetRef && !bridge.pendingSendBacks.has(targetRef)) {
+        const directDraft = bridge.resolvePrivateDraft({ draftId: targetRef });
+        if (directDraft) {
+          await bridge.requestSendBack(directDraft);
+          await bridge.confirmSendBack(directDraft.id);
+          return true;
+        }
+      }
+      if (!targetRef && !bridge.pendingSendBack) {
         await sensSink.say(`当前没有待确认发回的草稿（请先使用 \`${bridge.trigger} sendback\` 选择草稿，或可能已发回）。`);
         return true;
       }
-      await bridge.confirmSendBack();
+      await bridge.confirmSendBack(targetRef);
+      return true;
+    }
+    const cancelM = arg.match(/^(?:cancel|取消|忽略)(?:\s+(\S+))?$/i);
+    if (cancelM) {
+      const targetRef = (cancelM[1] ?? '').trim() || null;
+      if (targetRef) {
+        if (bridge.pendingSendBacks.has(targetRef)) {
+          await bridge.cancelSendBack(targetRef);
+          return true;
+        }
+        const d = bridge.privateDrafts.get(targetRef);
+        if (d) {
+          await discardPrivateDraft(bridge, d);
+          return true;
+        }
+      }
+      await bridge.cancelSendBack(targetRef);
       return true;
     }
     let draftId: string | null = null;
