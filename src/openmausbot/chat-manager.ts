@@ -9,6 +9,7 @@ import type { OpenMausBotBridge } from './bridge.ts';
 import { formatDelegationResponse } from './delegation.ts';
 import { allocateInboxRef, formatCoordinatorInboxLines, getCoordinatorInbox, recordClosedInboxRef } from './inbox.ts';
 import { inQuietHours, trimMapCap } from './mentions.ts';
+import { invalidateBotListCache } from './thread-manager.ts';
 import type { KnownChatSummary, PendingSendBack, PrivateDraft } from './types.ts';
 
 export { formatCoordinatorInboxLines, getCoordinatorInbox };
@@ -144,6 +145,7 @@ export async function compactExternalChat(
   const compacted: CompactedChatResult[] = [];
   for (const entry of picked) {
     await bridge.client.compact(entry.botId, entry.threadId);
+    invalidateBotListCache(bridge);
     bridge.contextWarnedThreads.delete(entry.threadId);
     bridge.threadInjectedScope.delete(entry.threadId);
     const shownName = typeof bridge.displayBotName === 'function'
@@ -251,14 +253,7 @@ function resolvePendingSendBackEntry(
 
 function purgePrivateDraft(bridge: OpenMausBotBridge, draft: PrivateDraft): void {
   const extraIds = Array.isArray(draft.imMsgIds) ? draft.imMsgIds : [];
-  for (const [k, v] of bridge.privateDrafts) {
-    if (k === draft.id || k === draft.imMsgId || extraIds.includes(k) || v?.id === draft.id) {
-      bridge.privateDrafts.delete(k);
-    }
-  }
-  for (const [k, v] of bridge.pendingSendBacks) {
-    if (k === draft.id || v?.draft?.id === draft.id) bridge.pendingSendBacks.delete(k);
-  }
+  bridge.draftStore.purge(draft.id);
   if (bridge.lastPrivateDraftId === draft.id || bridge.lastPrivateDraftId === draft.imMsgId || extraIds.includes(bridge.lastPrivateDraftId || '')) {
     bridge.lastPrivateDraftId = null;
   }
@@ -330,7 +325,10 @@ export async function requestSendBack(
     null,
     actions,
   );
-  if (sentId) entry.imMsgId = sentId;
+  if (sentId) {
+    entry.imMsgId = sentId;
+    bridge.draftStore.setConfirmingImMsgId(entryId, sentId);
+  }
   bridge.lastExpiredSendBackAt = 0;
   bridge.saveState();
   return sentId;
@@ -446,7 +444,7 @@ export async function confirmSendBack(bridge: OpenMausBotBridge, targetRef?: str
   );
   if (!sentId) {
     if (pendingFpId) bridge.pendingFollowUps.delete(pendingFpId);
-    pending.expiresAt = Math.max(pending.expiresAt, bridge.now() + 2 * 60_000);
+    bridge.draftStore.extendConfirming(hit.key, bridge.now() + 2 * 60_000);
     bridge.saveState();
     await bridge.say(`❌ 发回「${draft.originChatName || draft.originChatId}」失败，已保留待发草稿${ref ? ` \`#${ref}\`` : ''}，请检查通道连接后重试。`);
     return null;

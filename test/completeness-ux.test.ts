@@ -552,12 +552,16 @@ test('Completeness 3: card TTL, startup reconcile, followUp/delegation cancel, r
     assert.equal(b2.getCoordinatorInbox().cards.some((c) => c.imMsgId === 'card_ttl'), false);
 
     let waitJobState: 'working' | 'needs-input' = 'needs-input';
-    b2.client.getJob = async () => ({
-      state: waitJobState,
-      since: 1,
-      version: waitJobState === 'needs-input' ? 'v_wait' : 'v_work',
-      needsInput: waitJobState === 'needs-input' ? [{ requestId: 'r1' }] : [],
-    });
+    let workingPolls = 0;
+    b2.client.getJob = async () => {
+      if (waitJobState === 'working') workingPolls += 1;
+      return {
+        state: waitJobState,
+        since: 1,
+        version: waitJobState === 'needs-input' ? 'v_wait' : 'v_work',
+        needsInput: waitJobState === 'needs-input' ? [{ requestId: 'r1' }] : [],
+      };
+    };
     const timeoutTurn = b2.trackTurn({ key: 't_to', botId: 'b1', botName: 'MausBot', threadId: 't1', reqMsgId: null, sendId: 's_to' });
     timeoutTurn.startWatcher();
     await new Promise((r) => setTimeout(r, 80));
@@ -566,7 +570,7 @@ test('Completeness 3: card TTL, startup reconcile, followUp/delegation cancel, r
     assert.equal(b2.activeTurns.has('t_to'), true, 'needs-input 期间应暂停 turnTimeoutMs 计时');
 
     waitJobState = 'working';
-    await new Promise((r) => setTimeout(r, 80));
+    await until(() => workingPolls >= 1);
     nowTs += 300;
     await until(() => !b2!.activeTurns.has('t_to') && sent2.some((m) => m.text.includes('处理超时')));
   } finally {

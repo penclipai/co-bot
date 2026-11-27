@@ -128,28 +128,10 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
         }
       }
     }
-    const draftCutoff = bridge.now() - (Number(bridge.draftTtlMs) || 30 * 60_000);
-    if (Array.isArray(raw?.privateDrafts)) {
-      for (const d of raw.privateDrafts.slice(-40)) {
-        if (d?.id && d?.originChatId && (!d.createdAt || d.createdAt >= draftCutoff)) {
-          bridge.privateDrafts.set(d.id, d);
-          if (d.imMsgId) bridge.privateDrafts.set(d.imMsgId, d);
-          if (Array.isArray(d.imMsgIds)) {
-            for (const sid of d.imMsgIds) if (sid) bridge.privateDrafts.set(String(sid), d);
-          }
-        }
-      }
-      if (raw.lastPrivateDraftId && bridge.privateDrafts.has(String(raw.lastPrivateDraftId))) {
-        bridge.lastPrivateDraftId = String(raw.lastPrivateDraftId);
-      }
-    }
-    if (Array.isArray(raw?.pendingSendBacks)) {
-      const now = bridge.now();
-      for (const [k, sb] of raw.pendingSendBacks.slice(-10)) {
-        if (k && sb?.draft?.originChatId && Number(sb.expiresAt) > now) {
-          bridge.pendingSendBacks.set(String(k), sb);
-        }
-      }
+    const draftTtl = Number(bridge.draftTtlMs) || 30 * 60_000;
+    bridge.draftStore.hydrateSnapshot(raw?.privateDrafts, raw?.pendingSendBacks, bridge.now(), draftTtl);
+    if (raw?.lastPrivateDraftId && bridge.privateDrafts.has(String(raw.lastPrivateDraftId))) {
+      bridge.lastPrivateDraftId = String(raw.lastPrivateDraftId);
     }
     if (Array.isArray(raw?.pendingFollowUps)) {
       const now = bridge.now();
@@ -197,16 +179,8 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
   }
   if (!bridge.stateFile) return;
   try {
-    const seenDrafts = new Set<string>();
-    const draftCutoff = bridge.now() - (Number(bridge.draftTtlMs) || 30 * 60_000);
-    const uniqueDrafts: PrivateDraft[] = [];
-    for (const d of bridge.privateDrafts.values()) {
-      if (!d?.id || seenDrafts.has(d.id)) continue;
-      if (d.createdAt && d.createdAt < draftCutoff) continue;
-      seenDrafts.add(d.id);
-      uniqueDrafts.push(d);
-    }
     const now = bridge.now();
+    const draftTtl = Number(bridge.draftTtlMs) || 30 * 60_000;
     const storeRef = bridge.imContext?.store ?? bridge.localContextStore;
     writeJsonAtomic(bridge.stateFile, {
       selfChatId: bridge.selfChat,
@@ -216,9 +190,6 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
       msgRoute: [...bridge.msgRoute.entries()].slice(-500),
       quietQueue: bridge.quietQueue.slice(-100),
       pendingCards: [...bridge.pendingCards.entries()].slice(-20),
-      pendingSendBacks: [...bridge.pendingSendBacks.entries()]
-        .filter(([, sb]) => sb && Number(sb.expiresAt) > now)
-        .slice(-10),
       deliveredOmbIds: [...bridge.deliveredOmbIds].slice(-200),
       chatThreads: [...bridge.chatThreads.entries()].slice(-200),
       selfThreads: [...bridge.selfThreads.entries()].slice(-100),
@@ -229,7 +200,7 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
         allowed: [...bridge.chatPolicyOverrides.allowed],
       },
       inFlightTurns: [...bridge.inFlightTurns.entries()].slice(-20),
-      privateDrafts: uniqueDrafts.slice(-40),
+      privateDrafts: bridge.draftStore.exportSnapshot(now, draftTtl),
       lastPrivateDraftId: bridge.lastPrivateDraftId || null,
       pendingFollowUps: [...bridge.pendingFollowUps.values()]
         .filter((fp) => fp?.id && Number(fp.expiresAt) > now)

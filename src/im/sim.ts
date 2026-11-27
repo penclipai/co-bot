@@ -57,7 +57,16 @@ interface SimHistoryItem {
   isForwarded?: boolean;
   forwarded?: ForwardedBundle;
   mentions?: InboundMention[];
+  mentionsMe?: boolean;
   actions?: ChannelAction[];
+}
+
+export interface SimNotifyItem {
+  title: string;
+  body: string;
+  chatId: string;
+  urgent: boolean;
+  ts: number;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -139,6 +148,7 @@ export class WebSimTransport {
   selfChatId: string;
   history: SimHistoryItem[];
   clients: Set<http.ServerResponse>;
+  recentNotifications: SimNotifyItem[];
   cleanupTimer: ReturnType<typeof setInterval> | null;
   n: number;
   boot: string;
@@ -165,6 +175,7 @@ export class WebSimTransport {
     this.selfChatId = 'self';
     this.history = [];
     this.clients = new Set();
+    this.recentNotifications = [];
     this.cleanupTimer = null;
     this.n = 0;
     this.boot = Date.now().toString(36);
@@ -251,6 +262,12 @@ export class WebSimTransport {
       const devKey = typeof body.device === 'string' && Object.hasOwn(DEVICES, body.device) ? body.device : 'mobile';
       const device = DEVICES[devKey];
       const mentions = Array.isArray(body.mentions) ? (body.mentions.filter(Boolean) as InboundMention[]) : [];
+      const explicitMentionsMe = typeof body.mentionsMe === 'boolean' ? body.mentionsMe : undefined;
+      const autoMentionMe = !sender.isSelf && chat.type !== 'self' && /(?:^|\s)@(?:me|我|owner|主人)(?:[\s:：,，.。!！?？]|$)/i.test(text);
+      const mentionsMe = explicitMentionsMe ?? (autoMentionMe || mentions.some((m) => m.id === 'me' || m.id === '__self__'));
+      if (mentionsMe && !mentions.length) {
+        mentions.push({ id: 'me', name: '我', idKind: 'platform' });
+      }
       const replyTo = body.replyTo != null ? String(body.replyTo) : null;
       const msg: SimHistoryItem = {
         id,
@@ -268,6 +285,7 @@ export class WebSimTransport {
         ...(isForwarded ? { isForwarded: true } : {}),
         ...(forwarded ? { forwarded } : {}),
         ...(mentions.length ? { mentions } : {}),
+        ...(mentionsMe ? { mentionsMe: true } : {}),
       };
       this.#push(msg);
       onEvent({
@@ -281,6 +299,7 @@ export class WebSimTransport {
         ...(isForwarded ? { isForwarded: true } : {}),
         ...(forwarded ? { forwarded } : {}),
         ...(mentions.length ? { mentions } : {}),
+        ...(mentionsMe ? { mentionsMe: true } : {}),
       });
       return { ok: true, id: msg.id, chatId: chat.id };
     });
@@ -437,10 +456,23 @@ export class WebSimTransport {
       replyTo: true,
       actions: true,
       history: true,
-      notify: false,
+      notify: true,
       maxChars: 0,
       multiDevice: true,
     };
+  }
+
+  async notify({ title = '', body = '', chatId = '', urgent = false }: { title?: string; body?: string; chatId?: string; urgent?: boolean } = {}): Promise<void> {
+    const item: SimNotifyItem = {
+      title: String(title || this.botName || 'co-bot'),
+      body: String(body || ''),
+      chatId: String(chatId || this.selfChatId || ''),
+      urgent: Boolean(urgent),
+      ts: Date.now(),
+    };
+    this.recentNotifications.push(item);
+    if (this.recentNotifications.length > 20) this.recentNotifications.shift();
+    this.#broadcastSse({ kind: 'notify', ...item });
   }
 
   async sendFile(chatId: string, { path: src, name }: ChannelSendFileInput, { replyTo }: ChannelSendOptions = {}): Promise<string> {
@@ -484,6 +516,7 @@ export class WebSimTransport {
       ...(m.isForwarded ? { isForwarded: true } : {}),
       ...(m.forwarded ? { forwarded: m.forwarded } : {}),
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
+      ...(m.mentionsMe ? { mentionsMe: true } : {}),
       ...(m.file ? {
         attachments: [{
           id: String(m.file.id),
@@ -538,6 +571,8 @@ export class WebSimTransport {
       connected: true,
       selfChatId: this.selfChatId,
       clients: this.clients.size,
+      notifications: this.recentNotifications.length,
+      recentNotifications: this.recentNotifications.slice(-10),
     };
   }
 

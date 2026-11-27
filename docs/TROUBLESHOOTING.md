@@ -9,7 +9,8 @@
 实现 [im-plugin.example.ts](../im-plugin.example.ts) 并接入真实 IM 后，建议重点核对以下 4 项：
 
 1. **返回真实消息 ID 与 ID 护栏**：`send()` 与 `sendFile()` 的 `Promise` 必须解析为通道实际消息 ID；建议在插件声明 `idPatterns` 与 `strictContract: true`，并用 `encodeScopedChatId` 隔离可能撞号的单聊与群聊 ID。
-2. **契约与实时全量体检**：执行 `npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "hello" --check-file --check-history`，核对回显的**字段映射核对表**确认群聊、引用快照、真 `@`、附件与历史翻页均合规。
+2. **契约与实时全量体检**：执行 `npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "hello" --check-file --check-history --check-notify --check-mentions`（或离线样本回归 `--replay ./samples.json`），核对回显的**字段映射核对表**确认群聊、引用快照、真 `@`、附件、桌面通知与历史翻页均合规。
+3. **离线部署安全与零依赖自检**：在内网打包/CI 或无网关连通环境可执行 `node scripts/check.ts --offline`（等价 `npm run check -- --offline`），校验配置合规性、部署安全基线与源码零三方运行时依赖，并对外部插件做 `--dry` 契约验证。
 3. **可选能力钩子**：按目标平台支持度补充 `quote` 快照、`getMessage` / `getHistory`（配 `capabilities.history: true`）、入站 `recall` 撤回事件、结构化 `mentions` 与 `download` 私有 `att.extra`。
 4. **自聊提醒与诊断台观察**：确认手机端能否收到“自己发给自己”的消息推送（若静默则实现 `notify` 并设 `capabilities.notify: true`）；上线初期在 `/debug` 筛选 `type=contract_warning` 确认零协议告警。
 

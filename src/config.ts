@@ -52,6 +52,7 @@ export const defaults: AppConfig = {
     stateSaveDebounceMs: 150,
     draftTtlMs: 30 * 60_000,
     cardTtlMs: 30 * 60_000,
+    queueTtlMs: 30 * 60_000,
     followUpRemindMs: 15 * 60_000,
     delegationRemindMs: 30 * 60_000,
     mutedHintCooldownMs: 10 * 60_000,
@@ -226,6 +227,12 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
     const ms = selfChat.cardTtlMs;
     if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
       errors.push(`selfChat.cardTtlMs 必须为非负数字，当前为「${String(ms)}」`);
+    }
+  }
+  if (selfChat?.queueTtlMs !== undefined) {
+    const ms = selfChat.queueTtlMs;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      errors.push(`selfChat.queueTtlMs 必须为非负数字，当前为「${String(ms)}」`);
     }
   }
 

@@ -90,6 +90,17 @@
     </section>
 
     <section class="card">
+      <h2>协调收件箱（#N 在途待办） &amp; 活跃/排队任务</h2>
+      <div id="inboxBox" class="kv">加载中…</div>
+      <div class="tbl" style="margin-top:8px"><table>
+        <thead>
+          <tr><th>编号</th><th>类别</th><th>会话 / Bot</th><th>摘要</th><th>状态</th></tr>
+        </thead>
+        <tbody id="inboxBody"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card">
       <h2>已挂载插件（Kernel）</h2>
       <div class="tbl"><table>
         <thead>
@@ -135,6 +146,10 @@
             <option value="state_save_error">state_save_error</option>
             <option value="context_pull">context_pull</option>
             <option value="followup_reply">followup_reply</option>
+            <option value="internal_leak_intercepted">internal_leak_intercepted</option>
+            <option value="passive_mention_triage">passive_mention_triage</option>
+            <option value="turn_timeout">turn_timeout</option>
+            <option value="queued_expired">queued_expired</option>
             <option value="contract_warning">contract_warning</option>
             <option value="plugin_reloaded">plugin_reloaded</option>
             <option value="state">state</option>
@@ -202,14 +217,19 @@
         if (omb?.error) addLine(ombBox, '错误', omb.error);
       }
       if (st.bridge) {
-        addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}`);
+        addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}（排队 ${st.bridge.queuedCount ?? 0}）`);
         addLine(ombBox, '连续对话粘性', st.bridge.stickyActive ? '激活中' : '未激活');
+        const qh = st.bridge.quietHours;
+        if (qh) {
+          addLine(ombBox, '免打扰时段', `${qh.enabled ? (qh.activeNow ? '生效中' : '已开启·非时段') : '关闭'}（${qh.start}~${qh.end} · 待汇总 ${st.bridge.quietPending ?? 0}）`);
+        }
+        addLine(ombBox, '被动@提醒 / 协作者Bot', `${st.bridge.passiveMentionAlert ? '开启' : '关闭'} / ${st.bridge.collaboratorBot || '默认主Bot'}`);
         if (st.bridge.inbox) {
           const inb = st.bridge.inbox;
           addLine(
             ombBox,
             '协调收件箱',
-            `审批 ${inb.cards?.length ?? 0} / 待发回 ${inb.sendBacks?.length ?? 0} / 草稿 ${inb.drafts?.length ?? 0} / 追问 ${inb.followUps?.length ?? 0} / 委托 ${inb.delegations?.length ?? 0}`,
+            `共 ${inb.total ?? 0} 项（审批 ${inb.cards?.length ?? 0} / 待发回 ${inb.sendBacks?.length ?? 0} / 草稿 ${inb.drafts?.length ?? 0} / 追问 ${inb.followUps?.length ?? 0} / 委托 ${inb.delegations?.length ?? 0}）`,
           );
         } else {
           addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : `无（缓存 ${st.bridge.privateDraftsCount ?? 0}）`);
@@ -227,6 +247,57 @@
       }
       if (st.context) {
         addLine(ombBox, '内存上下文', `${st.context.chatCount} 会话 / ${st.context.totalMessages} 条消息`);
+      }
+
+      const inboxBox = el('inboxBox');
+      const inboxBody = el('inboxBody');
+      if (inboxBox && inboxBody) {
+        inboxBox.replaceChildren();
+        inboxBody.replaceChildren();
+        const turns = st.bridge?.activeTurnsList || [];
+        const queued = st.bridge?.queuedItems || [];
+        const inb = st.bridge?.inbox || {};
+        const turnSummary = turns.length
+          ? turns.map((t) => `${t.botName}(${t.chatId || 'self'})`).join('、')
+          : '无';
+        addLine(inboxBox, '活跃轮次 / 排队消息', `${turnSummary} / 排队 ${queued.length} 条`);
+        const rows = [];
+        for (const c of (inb.cards || [])) {
+          rows.push({ ref: c.ref ? `#${c.ref}` : '-', kind: c.kind || '审批卡', target: c.botName || '-', summary: c.title || '-', state: '待回复' });
+        }
+        for (const sb of (inb.sendBacks || [])) {
+          rows.push({ ref: sb.ref ? `#${sb.ref}` : '-', kind: '待确认发回', target: sb.originName || '-', summary: sb.preview || '-', state: '等待 ok/取消' });
+        }
+        for (const d of (inb.drafts || [])) {
+          rows.push({ ref: d.ref ? `#${d.ref}` : '-', kind: '私密草稿', target: d.originName || '-', summary: d.preview || '-', state: '待发送/修改' });
+        }
+        for (const fp of (inb.followUps || [])) {
+          rows.push({ ref: fp.ref ? `#${fp.ref}` : '-', kind: '追问续写', target: `${fp.chatName || '-'} @${fp.targetName || '-'}`, summary: fp.question || '-', state: '等待输入' });
+        }
+        for (const dl of (inb.delegations || [])) {
+          rows.push({ ref: dl.ref ? `#${dl.ref}` : '-', kind: 'C2C 委托', target: dl.chatName || dl.id || '-', summary: dl.question || '-', state: dl.project ? `proj:${dl.project}` : '进行中' });
+        }
+        for (const q of queued) {
+          rows.push({ ref: '队列', kind: '排队消息', target: q.botName || '-', summary: q.text || '-', state: new Date(q.at).toLocaleTimeString() });
+        }
+        if (!rows.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.textContent = '当前收件箱与队列为空。';
+          tr.appendChild(td);
+          inboxBody.appendChild(tr);
+        } else {
+          for (const r of rows) {
+            const tr = document.createElement('tr');
+            for (const val of [r.ref, r.kind, r.target, r.summary, r.state]) {
+              const td = document.createElement('td');
+              td.textContent = String(val);
+              tr.appendChild(td);
+            }
+            inboxBody.appendChild(tr);
+          }
+        }
       }
 
       const policyBox = el('policyBox');

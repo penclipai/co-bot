@@ -12,7 +12,7 @@
 | `npm start` / `npm run sim` | 前台启动（`sim` 强制使用 Web 模拟器，访问 `http://127.0.0.1:8787/sim`） |
 | `npm run status` / `restart` / `stop` | 查看状态 / 平滑重启 / 停止 `co-bot`（`npm run stop -- --all` 连带停止托管的 OpenMausBot CLI） |
 | `npm run omb -- status` | 单独管理托管的 OpenMausBot CLI（支持 `ensure\|start\|stop\|restart\|status\|logs`） |
-| `npm run check` | 校验 `config.json` 与 Node / 全局 `openmausbot` CLI / `opencode` / OpenMausBot 状态（支持 `-- --fix-cli`） |
+| `npm run check` | 校验 `config.json`、部署安全基线、零三方依赖与 OpenMausBot 状态（支持 `-- --fix-cli` 与 `-- --offline` 离线审计） |
 | `npm run pair` | OpenMausBot 桌面端一次性配对（弹窗点 Allow，或传 `-- <12位配对码>`） |
 | `npm run daemon -- install-service` | 安装开机自启（先加 `--dry` 预览 `systemd --user` / `LaunchAgents` / Windows 启动项；`uninstall-service` 卸载） |
 | `npm run typecheck` | 运行 `tsc --noEmit` 静态严格类型检查 |
@@ -136,15 +136,15 @@
 | `sharedContextDir` | `""` | 团队共享 Git 仓库目录（后台防抖 `git pull --ff-only`） |
 | `plugins` / `dataDir` | `{}` / `"./data"` | 插件启停与运行状态持久化目录 |
 
-> 高级调优参数（通常保持默认即可）：`selfChat.turnTimeoutMs`（默认 `600000`，硬超时自动中止）、`selfChat.cardTtlMs`（`1800000`）、`selfChat.draftTtlMs`（`1800000`）、`selfChat.followUpRemindMs`（`900000`）、`selfChat.delegationRemindMs`（`1800000`）、`selfChat.resultChars`/`softSplitChars`（`1500`/`2800`）、`chats.injectRecentContext`（`false`）、`chats.autoCompactThreshold`（`0.75`）、`chats.externalBotPrefix`（`"🤖 "`）、`chats.externalSanitizeMentions`（`"all"`）。完整字段校验以 [src/config.ts](../src/config.ts) 为准。
+> 高级调优参数（通常保持默认即可）：`selfChat.turnTimeoutMs`（默认 `600000`，硬超时自动中止）、`selfChat.cardTtlMs`（`1800000`）、`selfChat.draftTtlMs`（`1800000`）、`selfChat.queueTtlMs`（`1800000`，排队超时自动清理）、`selfChat.followUpRemindMs`（`900000`）、`selfChat.delegationRemindMs`（`1800000`）、`selfChat.resultChars`/`softSplitChars`（`1500`/`2800`）、`chats.injectRecentContext`（`false`）、`chats.autoCompactThreshold`（`0.75`）、`chats.externalBotPrefix`（`"🤖 "`）、`chats.externalSanitizeMentions`（`"all"`）。完整字段校验以 [src/config.ts](../src/config.ts) 为准。
 
 ---
 
 ## 七、Web 模拟器（`/sim`）、诊断台（`/debug`）与热插拔插件（`plugins/`）
 
-- **`/sim`（`http://127.0.0.1:8787/sim`）**：模拟自聊、`研发架构群` 与外部私聊；支持粘贴/上传图片、放大灯箱预览、通用 Markdown 文本与草稿/解除静音快捷操作胶囊、单条「转发到自聊」与右上角「多选 → 逐条→自聊 / 合并→自聊 / 合并→当前群」、超长转发原文与合并转发记录卡折叠展开、出站真 `@同事` 徽章展示、气泡一键撤回及历史持久化（`data/sim-history.json`）。
-- **`/debug`（`http://127.0.0.1:8787/debug`）**：本机诊断台（含应急静音/放行开关），展示协调收件箱待办计数、`idPatterns`/`strictContract`/契约告警数、`dead` 异常预警、插件能力声明与 `plugins/` 扩展状态、会话策略与一键**静音/允许**（内置防误静音 `self` 保护）、项目绑定/共享目录/C2C 委托统计、**一键导出脱敏诊断包**（`/api/debug/bundle`），以及按 `chatId` / `source` / `type` / `limit`（默认最近 250 条，含 `contract_warning`、`context_pull`、`followup_reply`、`security_redacted`、`internal_leak_intercepted`、`policy_denied`、`delegation_req`、`delegation_res`、`recall`、`sendback`、`turn_timeout`、`turn_failed` 等）筛选的实时事件流。
-- **即插即用扩展（`plugins/`）**：把自定义通道插件、命令、出站脱敏器、钩子或音频转写扩展放到 `./plugins/` 目录即可自动扫描加载（`pluginsStrict: false` 时单插件异常自动隔离不影响主链路）；非通道扩展插件支持通过 `/api/debug/action` 执行 `reload_plugin` 热重载。
+- **`/sim`（`http://127.0.0.1:8787/sim`）**：模拟自聊、`研发架构群` 与外部私聊；支持粘贴/上传图片、放大灯箱预览、通用 Markdown 文本与草稿/解除静音快捷操作胶囊、单条「转发到自聊」与右上角「多选 → 逐条→自聊 / 合并→自聊 / 合并→当前群」、超长转发原文与合并转发记录卡折叠展开、非本人身份一键 `@我`（自动推导 `mentionsMe`）、`notify()` SSE 右上角气泡提醒（`capabilities.notify = true`）、气泡一键撤回及历史持久化（`data/sim-history.json`）。
+- **`/debug`（`http://127.0.0.1:8787/debug`）**：本机诊断台（含应急静音/放行开关），展示协调收件箱 `#N` 待办明细与活跃/排队任务、免打扰时段/被动`@提醒`/协作者 Bot 配置、`idPatterns`/`strictContract`/契约告警数、`dead` 异常预警、插件能力声明与 `plugins/` 扩展状态、会话策略与一键**静音/允许**（内置防误静音 `self` 保护）、项目绑定/共享目录/C2C 委托统计、**一键导出脱敏诊断包**（`/api/debug/bundle`），以及按 `chatId` / `source` / `type` / `limit`（默认最近 250 条，含 `contract_warning`、`context_pull`、`followup_reply`、`passive_mention_triage`、`queued_expired`、`security_redacted`、`internal_leak_intercepted`、`policy_denied`、`delegation_req`、`delegation_res`、`recall`、`sendback`、`turn_timeout`、`turn_failed` 等）筛选的实时事件流。
+- **即插即用扩展（`plugins/`）**：把自定义通道插件、命令、出站脱敏器、钩子或音频转写扩展放到 `./plugins/` 目录即可自动扫描加载（`pluginsStrict: false` 时单插件异常自动隔离不影响主链路）；`plugins/` 下内置内网自定义脱敏模板 [plugins/_custom-redactor.example.ts](../plugins/_custom-redactor.example.ts) 与语音转写模板 [plugins/_audio-transcriber.example.ts](../plugins/_audio-transcriber.example.ts)（`*.example.*` 与 `_` 开头文件默认忽略）；非通道扩展插件支持通过 `/api/debug/action` 执行 `reload_plugin` 热重载。
 
 ---
 

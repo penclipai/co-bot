@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_ROOT, loadConfig } from '../src/config.ts';
 import {
+  normalizeInboundEvent,
   validateChannelAdapter,
   validateConfigIdsAgainstPatterns,
   validateIdsAgainstPatterns,
@@ -38,6 +39,9 @@ function parseArgs(argv: string[]) {
   let strict = false;
   let checkFile = false;
   let checkHistory = false;
+  let checkNotify = false;
+  let checkMentions = false;
+  let replayFile = '';
   let help = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -46,18 +50,24 @@ function parseArgs(argv: string[]) {
     if (a === '--strict') { strict = true; continue; }
     if (a === '--check-file') { checkFile = true; continue; }
     if (a === '--check-history') { checkHistory = true; continue; }
+    if (a === '--check-notify') { checkNotify = true; continue; }
+    if (a === '--check-mentions') { checkMentions = true; continue; }
     if (a === '--config' && argv[i + 1]) { configFile = argv[++i]; continue; }
     if (a === '--channel' && argv[i + 1]) { channelUse = argv[++i]; continue; }
+    if (a === '--replay' && argv[i + 1]) { replayFile = argv[++i]; continue; }
     if (a === '--wait' && argv[i + 1]) { waitSec = Math.max(0, Number(argv[++i]) || 0); waitExplicit = true; continue; }
     if (a === '--send' && argv[i + 1]) { sendText = String(argv[++i]); continue; }
     if (a === '--expect-events' && argv[i + 1]) { expectEvents = Math.max(1, Number(argv[++i]) || 1); continue; }
   }
-  return { configFile, channelUse, waitSec, waitExplicit, sendText, expectEvents, dry, strict, checkFile, checkHistory, help };
+  return {
+    configFile, channelUse, waitSec, waitExplicit, sendText, expectEvents,
+    dry, strict, checkFile, checkHistory, checkNotify, checkMentions, replayFile, help,
+  };
 }
 
 function usage(): void {
   console.log([
-    '用法：npm run channel:test -- [--channel <名称或路径>] [--config config.json] [--dry] [--strict] [--wait 15] [--expect-events 1] [--send "你好"] [--check-file] [--check-history]',
+    '用法：npm run channel:test -- [--channel <名称或路径>] [--config config.json] [--dry] [--strict] [--wait 15] [--expect-events 1] [--send "你好"] [--check-file] [--check-history] [--check-notify] [--check-mentions] [--replay <samples.json>]',
     '  --channel        指定待检通道插件（如 sim、./im-plugin.ts；默认读取 config.json）',
     '  --dry            仅做静态加载、方法导出与 capabilities 契约校验（不实际建立长连接）',
     '  --strict         严格契约模式：将 ID 规范/混合字段/回退 mentions 告警升级为失败',
@@ -66,6 +76,9 @@ function usage(): void {
     '  --send T         实时模式：拿到 selfChatId 后回发一条测试文本验证 send() 与回声 ID 一致性',
     '  --check-file     实时模式：发送一个极小 .txt 文件验证 sendFile()',
     '  --check-history  实时模式：对观察到的会话执行 getHistory() 升序校验与 getMessage() 回环验证',
+    '  --check-notify   实时模式：当通道声明 notify 能力时测试 notify() 桌面通知下发',
+    '  --check-mentions 实时模式：核对入站事件中的 mentionsMe 与结构化 mentions 映射',
+    '  --replay <file>  离线样本回放：读取 JSON 样本数组并对每条事件执行归一化与契约检查',
   ].join('\n'));
 }
 
@@ -99,10 +112,117 @@ interface ContractChannelInstance extends Omit<Partial<ChannelAdapter>, 'idPatte
   getMessage?: (chatId: string, msgId: string) => Promise<InboundEvent | null>;
 }
 
+export interface ChannelReplayResult {
+  ok: boolean;
+  total: number;
+  passed: number;
+  failed: number;
+  errors: string[];
+  warnings: string[];
+  summary: {
+    mentionsObserved: number;
+    mentionsMeCount: number;
+    quoteCount: number;
+    forwardedCount: number;
+  };
+}
+
+/** 离线回放通道消息样本数组，验证归一化与字段契约一致性。 */
+export function replayChannelSamples(
+  samples: unknown[],
+  {
+    idPatterns = null,
+    strict = false,
+    selfId = '',
+    selfChatId = '',
+  }: {
+    idPatterns?: ChannelIdPatterns | null;
+    strict?: boolean;
+    selfId?: string;
+    selfChatId?: string;
+  } = {},
+): ChannelReplayResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const pushIssue = (msg: string): void => {
+    if (strict) errors.push(msg);
+    else warnings.push(msg);
+  };
+  if (!Array.isArray(samples) || !samples.length) {
+    errors.push('回放样本为空（需提供非空 JSON 事件数组）');
+    return {
+      ok: false,
+      total: 0,
+      passed: 0,
+      failed: 1,
+      errors,
+      warnings,
+      summary: { mentionsObserved: 0, mentionsMeCount: 0, quoteCount: 0, forwardedCount: 0 },
+    };
+  }
+  const seenKeys = new Set<string>();
+  let passed = 0;
+  let failed = 0;
+  let mentionsObserved = 0;
+  let mentionsMeCount = 0;
+  let quoteCount = 0;
+  let forwardedCount = 0;
+
+  for (let i = 0; i < samples.length; i += 1) {
+    const label = `sample[${i}]`;
+    try {
+      const ev = normalizeInboundEvent(samples[i], {
+        selfId,
+        selfChatId,
+        idPatterns,
+        strict,
+        onWarning: (w) => pushIssue(`${label}: ${w}`),
+      });
+      const checked = validateInboundEvent(ev);
+      if (!checked.ok) {
+        errors.push(`${label}: ${checked.errors.join('；')}`);
+        failed += 1;
+        continue;
+      }
+      if (idPatterns) {
+        for (const err of validateIdsAgainstPatterns(ev, idPatterns)) {
+          pushIssue(`${label}: ${err}`);
+        }
+      }
+      const key = `${ev.chat.id}:${ev.id}`;
+      if (seenKeys.has(key)) {
+        pushIssue(`${label}: 发现重复消息键 ${key}（回声或游标未去重可能导致重复处理）`);
+      } else {
+        seenKeys.add(key);
+      }
+      if (Array.isArray(ev.mentions) && ev.mentions.length > 0) mentionsObserved += 1;
+      if (ev.mentionsMe) mentionsMeCount += 1;
+      if (ev.quote || ev.replyTo) quoteCount += 1;
+      if (ev.forwarded || ev.isForwarded) forwardedCount += 1;
+      passed += 1;
+    } catch (e) {
+      errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+      failed += 1;
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    total: samples.length,
+    passed,
+    failed,
+    errors,
+    warnings,
+    summary: { mentionsObserved, mentionsMeCount, quoteCount, forwardedCount },
+  };
+}
+
 export interface ChannelContractObservations {
   events: number;
   warnings: string[];
   historyChecked: boolean;
+  notifyChecked: boolean;
+  mentionsObserved: number;
+  mentionsMeCount: number;
   echoMatched: boolean | null;
   idSamples: Array<{
     msgId: string;
@@ -142,6 +262,8 @@ export async function runChannelContractTest(
     expectEvents = 1,
     checkFile = false,
     checkHistory = false,
+    checkNotify = false,
+    checkMentions = false,
     log = console.log,
   }: {
     overrideUse?: string;
@@ -154,6 +276,8 @@ export async function runChannelContractTest(
     expectEvents?: number;
     checkFile?: boolean;
     checkHistory?: boolean;
+    checkNotify?: boolean;
+    checkMentions?: boolean;
     log?: (msg: string) => void;
   } = {},
 ): Promise<ChannelContractTestResult> {
@@ -164,6 +288,9 @@ export async function runChannelContractTest(
     events: 0,
     warnings: [],
     historyChecked: false,
+    notifyChecked: false,
+    mentionsObserved: 0,
+    mentionsMeCount: 0,
     echoMatched: null,
     idSamples: [],
   };
@@ -288,7 +415,9 @@ export async function runChannelContractTest(
           pushContractIssue(err);
         }
       }
-      if (Array.isArray(ev?.mentions)) {
+      if (ev?.mentionsMe) observations.mentionsMeCount += 1;
+      if (Array.isArray(ev?.mentions) && ev.mentions.length > 0) {
+        observations.mentionsObserved += 1;
         for (const m of ev.mentions) {
           if (m?.idKind === 'name_fallback') {
             pushContractIssue(`mentions 中「@${m.name || m.id}」缺少真实用户 id，真实 IM 无法构造真 @提醒`);
@@ -408,6 +537,33 @@ export async function runChannelContractTest(
       }
     }
 
+    if (checkNotify) {
+      if (!check.capabilities.notify || typeof channel.notify !== 'function') {
+        pushContractIssue('通道未声明 capabilities.notify=true 或未实现 notify()');
+      } else {
+        const targetNotifyChat = channel.selfChatId || [...observedChatIds][0] || '';
+        try {
+          await channel.notify({
+            title: 'co-bot channel-test',
+            body: 'notify capability probe',
+            chatId: targetNotifyChat,
+            urgent: false,
+          });
+          observations.notifyChecked = true;
+          log(`🔔 notify() 探针调用成功（chatId=${targetNotifyChat || '-'}）`);
+        } catch (e) {
+          errors.push(`notify() 调用异常：${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    if (checkMentions) {
+      log(`@ 提及探测结果：mentionsMe=${observations.mentionsMeCount}, structuredMentionsEvents=${observations.mentionsObserved}`);
+      if (observations.events > 0 && observations.mentionsMeCount === 0 && observations.mentionsObserved === 0) {
+        pushContractIssue('已启用 --check-mentions，但采样事件均未携带 mentionsMe 或结构化 mentions');
+      }
+    }
+
     if (observations.idSamples.length > 0) {
       log('--- 字段映射核对表 ---');
       for (const s of observations.idSamples) {
@@ -435,12 +591,34 @@ export async function runChannelContractTest(
 }
 
 async function main(): Promise<void> {
-  const { configFile, channelUse, waitSec, waitExplicit, sendText, expectEvents, dry, strict, checkFile, checkHistory, help } = parseArgs(process.argv.slice(2));
+  const {
+    configFile, channelUse, waitSec, waitExplicit, sendText, expectEvents,
+    dry, strict, checkFile, checkHistory, checkNotify, checkMentions, replayFile, help,
+  } = parseArgs(process.argv.slice(2));
   if (help) {
     usage();
     return;
   }
   const cfg = loadConfig(process.argv.slice(2), configFile);
+  if (replayFile) {
+    const absReplay = path.resolve(replayFile);
+    const raw = JSON.parse(fs.readFileSync(absReplay, 'utf8')) as unknown;
+    const samples = Array.isArray(raw)
+      ? raw
+      : (raw && typeof raw === 'object' && Array.isArray((raw as { samples?: unknown }).samples)
+        ? (raw as { samples: unknown[] }).samples
+        : []);
+    const res = replayChannelSamples(samples, {
+      strict,
+      selfId: String(cfg.channel?.options?.selfId ?? ''),
+      selfChatId: String(cfg.channel?.options?.selfChatId ?? ''),
+    });
+    console.log(`✓ 回放完成：共 ${res.total} 条，通过 ${res.passed} 条，失败 ${res.failed} 条（mentionsMe=${res.summary.mentionsMeCount}，mentions=${res.summary.mentionsObserved}，quote=${res.summary.quoteCount}，forwarded=${res.summary.forwardedCount}）`);
+    for (const w of res.warnings) console.log(`⚠ ${w}`);
+    for (const e of res.errors) console.error(`✗ ${e}`);
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
   const res = await runChannelContractTest(cfg, {
     overrideUse: channelUse,
     baseDir: channelUse ? process.cwd() : APP_ROOT,
@@ -452,6 +630,8 @@ async function main(): Promise<void> {
     expectEvents,
     checkFile,
     checkHistory,
+    checkNotify,
+    checkMentions,
   });
   if (!res.ok) {
     process.exitCode = 1;

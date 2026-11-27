@@ -115,6 +115,10 @@
   header .dev, .sbtn { border: 1px solid var(--line); background: var(--bubble); border-radius: 999px; padding: 2px 9px; font-size: 12px; color: var(--ink); cursor: pointer; white-space: nowrap; }
   .sbtn { padding: 6px 10px; border-radius: 6px; flex: none; height: 36px; }
   textarea#box { flex: 1; resize: none; max-height: 120px; min-height: 38px; padding: 8px 10px; border: 0; border-radius: 6px; background: var(--bubble); }
+  #toasts { position: fixed; top: 56px; right: 12px; z-index: 90; display: flex; flex-direction: column; gap: 6px; max-width: 300px; pointer-events: none; }
+  .toast { background: rgba(24,24,27,.92); color: #fff; border-radius: 10px; padding: 9px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.22); font-size: 12.5px; line-height: 1.4; border-left: 3px solid #07c160; }
+  .toast.urgent { border-left-color: #ef4444; }
+  .toast strong { display: block; font-size: 13px; margin-bottom: 2px; }
 </style>
 </head>
 <body>
@@ -141,6 +145,7 @@
   <form class="bar" id="form">
     <input type="file" id="fileIn" hidden>
     <button class="sbtn" id="senderBtn" type="button" title="切换发送成员身份（模拟同事发言构造上下文）" hidden>我</button>
+    <button class="sbtn" id="atMeBtn" type="button" title="插入 @我 以触发被动提及提醒/协作测试" hidden>@我</button>
     <textarea id="box" rows="1" placeholder="发 @bot …（支持 Ctrl+V 粘贴截图）" autocomplete="off" aria-label="输入消息"></textarea>
     <button class="round" id="pickBtn" type="button" title="发送文件或截图" aria-label="发送文件">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>
@@ -148,6 +153,7 @@
     <button class="sendbtn" id="sendBtn" type="submit" hidden>发送</button>
   </form>
 </div>
+  <div id="toasts" aria-live="polite"></div>
   <div id="lightbox" hidden><img id="lbImg" alt=""><div class="lbbar"><span id="lbName"></span><a id="lbRaw" href="#" target="_blank" rel="noopener">原图</a><button type="button" id="lbClose">关闭</button></div></div>
 <script src="/md.js"></script>
 <script>
@@ -205,6 +211,7 @@
     $('#senderBtn').hidden = isSelf;
     if (isSelf) sender = 'me';
     $('#senderBtn').textContent = SENDER_LABELS[sender] || '我';
+    $('#atMeBtn').hidden = isSelf || sender === 'me';
     box.placeholder = isSelf
       ? '发 @bot …（支持 Ctrl+V 粘贴截图）'
       : (sender === 'me'
@@ -572,6 +579,27 @@
     sender = SENDER_CYCLE[(idx + 1) % SENDER_CYCLE.length];
     updateChatChrome();
   };
+  $('#atMeBtn').onclick = () => {
+    if (!/(?:^|\s)@我(?:\s|$)/.test(box.value)) {
+      box.value = `@我 ${box.value}`.replace(/\s+$/, ' ');
+    }
+    grow();
+    box.focus();
+  };
+
+  function showToast(note) {
+    const wrap = $('#toasts');
+    if (!wrap) return;
+    const item = document.createElement('div');
+    item.className = `toast${note?.urgent ? ' urgent' : ''}`;
+    const strong = document.createElement('strong');
+    strong.textContent = String(note?.title || brandName || '通知');
+    const bodyEl = document.createElement('div');
+    bodyEl.textContent = String(note?.body || '');
+    item.append(strong, bodyEl);
+    wrap.append(item);
+    setTimeout(() => item.remove(), 5000);
+  }
 
   function openLightbox(f) {
     $('#lbImg').src = f.url;
@@ -761,6 +789,7 @@
       return;
     }
     if (msg.kind === 'recall') { handleRecall(msg); return; }
+    if (msg.kind === 'notify') { showToast(msg); return; }
     if (replayingHistory) {
       replayBuf.push(msg);
       return;

@@ -4,14 +4,14 @@ import { ChatContextStore } from '../core/chat-context.ts';
 import type { CommandRegistry } from '../core/extensions.ts';
 import { normalizeCollaborators } from '../core/inbound-policy.ts';
 import { normalizeProjectsConfig } from '../core/projects.ts';
-import { hasBotBadgePrefix } from '../core/security.ts';
 import { SharedContextManager } from '../core/shared-context.ts';
-import { clip, pruneExpiredFiles, safeAttachmentName } from '../format.ts';
+import { clip } from '../format.ts';
 import type {
   ChannelAction, ChannelCapabilities, ChatType, ChatsConfig, ChatsMode,
   InboundAttachment, InboundEvent, ProjectConfig, ProjectRef, QuietHoursConfig, TelemetryEvent,
 } from '../types.ts';
-import { extractCardInfo, formatOmbError } from './cards.ts';
+import { buildBridgeStatus, startBridgeLifecycle, stopBridgeLifecycle, syncBridgeQuietTimer } from './bridge-lifecycle.ts';
+import { extractCardInfo } from './cards.ts';
 import {
   buildExternalSummaryPrompt, cancelSendBack, checkPendingReminders, compactExternalChat,
   confirmSendBack, getChatPolicy, getCoordinatorInbox, listKnownChats, requestSendBack,
@@ -19,22 +19,23 @@ import {
 } from './chat-manager.ts';
 import { type OpenMausBotClient } from './client.ts';
 import { DelegationTracker } from './delegation.ts';
+import { DraftStore } from './draft-store.ts';
+import { BridgeMessageCache } from './message-cache.ts';
 import {
   deliverBotReply, emitCard, flushQuietDigest, forwardBotMedia,
   maybeWarnHighContext, sendOutboundFile, type SendOutboundFileOpts,
 } from './delivery.ts';
 import {
   cancelLatestQueue, cancelThreadQueue, collectBotTasks, dispatchSteerSupplement,
-  dispatchToBot, handleSseEvent, steerLatestQueue, switchTask,
+  dispatchToBot, steerLatestQueue, switchTask,
 } from './dispatch.ts';
 import { handleInboundEvent, sendDelegation } from './inbound-router.ts';
-import { inQuietHours, rememberBounded, scopedMsgKey, trimMapCap } from './mentions.ts';
+import { inQuietHours, trimMapCap } from './mentions.ts';
 import {
   drainOutboundQueue, flushOutboundBuffer as flushOutboundQueueBuffer,
   isTransportDisconnected, sendBridgeText, type SendTextExtra,
 } from './outbound-queue.ts';
 import { flushBridgeState, loadBridgeState, pruneBridgeMemoryCaches, saveBridgeState } from './state-store.ts';
-import { reconcilePendingCards } from './inbox.ts';
 import {
   ensureChatThread, getChatThread, refreshMultiBot,
   resolveOwnerByThread, resolveSelfBotThread, setChatThread, setSelfThread, syncChiefBotIdentity,
@@ -49,9 +50,6 @@ import type {
 } from './types.ts';
 
 export { extractCardInfo, inQuietHours };
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-const norm = (s: unknown): string => String(s ?? '').replace(/\s+/g, ' ').trim();
 
 /**
  * 极薄 IM <-> OpenMausBot 桥接器（co-bot / Coordinator Bot 手机端协调助手体验）：
@@ -83,6 +81,8 @@ export class OpenMausBotBridge {
   stateSaveDebounceMs: number;
   draftTtlMs: number;
   cardTtlMs: number;
+  queueTtlMs: number;
+  botListCacheTtlMs: number;
   followUpRemindMs: number;
   delegationRemindMs: number;
   mutedHintCooldownMs: number;
@@ -117,16 +117,7 @@ export class OpenMausBotBridge {
   warnedMissingSelfChat = false;
   inDir: string;
   stateFile: string | null;
-  ownIds = new Set<string>();
-  ownReqIds = new Set<string>();
-  deliveredOmbIds = new Set<string>();
-  deliveredCards = new Set<string>();
-  deliveredMedia = new Set<string>();
-  pendingOutFiles = new Map<string, number>();
-  recent = new Map<string, number>();
-  seen = new Set<string>();
-  fileMsgs = new Map<string, FileMsgEntry>();
-  msgRoute = new Map<string, MsgRoute>();
+  msgCache: BridgeMessageCache;
   pendingCards = new Map<string, PendingCard>();
   activeTurns = new Map<string, TurnTrackerHandle>();
   activeBursts = new Map<string, ActiveBurstWatch>();
@@ -140,9 +131,8 @@ export class OpenMausBotBridge {
   contextWarnedThreads = new Set<string>();
   threadInjectedScope = new Map<string, string>();
   lastAutoCompactAt = new Map<string, number>();
-  privateDrafts = new Map<string, PrivateDraft>();
+  draftStore: DraftStore;
   lastPrivateDraftId: string | null = null;
-  pendingSendBacks = new Map<string, PendingSendBack>();
   inboxSeq = 0;
   recentClosedInboxRefs = new Map<number, { label: string; at: number }>();
   expiredSendBackIds = new Map<string, number>();
@@ -188,6 +178,7 @@ export class OpenMausBotBridge {
   consecutiveSseErrors = 0;
   lastAutoHealAt = 0;
   multiBotCache: boolean | null = null;
+  botListCache: { at: number; bots: OmbBot[]; groups: OmbGroup[] } | null = null;
 
   constructor({
     client,
@@ -209,6 +200,8 @@ export class OpenMausBotBridge {
     stateSaveDebounceMs = 150,
     draftTtlMs = 30 * 60_000,
     cardTtlMs = 30 * 60_000,
+    queueTtlMs = 30 * 60_000,
+    botListCacheTtlMs = 3000,
     followUpRemindMs = 15 * 60_000,
     delegationRemindMs = 30 * 60_000,
     mutedHintCooldownMs = 10 * 60_000,
@@ -256,6 +249,8 @@ export class OpenMausBotBridge {
     this.stateSaveDebounceMs = stateSaveDebounceMs;
     this.draftTtlMs = draftTtlMs;
     this.cardTtlMs = cardTtlMs;
+    this.queueTtlMs = queueTtlMs;
+    this.botListCacheTtlMs = botListCacheTtlMs;
     this.followUpRemindMs = followUpRemindMs;
     this.delegationRemindMs = delegationRemindMs;
     this.mutedHintCooldownMs = mutedHintCooldownMs;
@@ -295,6 +290,8 @@ export class OpenMausBotBridge {
       onTelemetry: (type, p) => this.emitTelemetry(type, p),
     });
     this.delegations = new DelegationTracker({ now: () => this.now() });
+    this.draftStore = new DraftStore(() => this.now());
+    this.msgCache = new BridgeMessageCache(() => this.now());
     this.localContextStore = imContext?.store ?? new ChatContextStore({
       maxPerChat: this.chats.contextMaxMessagesPerChat,
       ttlMs: this.chats.contextTtlMs,
@@ -333,127 +330,34 @@ export class OpenMausBotBridge {
   flushState(): void { flushBridgeState(this); }
   pruneMemoryCaches(): void { pruneBridgeMemoryCaches(this); }
 
+  get ownIds() { return this.msgCache.ownIds; }
+  get ownReqIds() { return this.msgCache.ownReqIds; }
+  get deliveredOmbIds() { return this.msgCache.deliveredOmbIds; }
+  get deliveredCards() { return this.msgCache.deliveredCards; }
+  get deliveredMedia() { return this.msgCache.deliveredMedia; }
+  get pendingOutFiles() { return this.msgCache.pendingOutFiles; }
+  get recent() { return this.msgCache.recent; }
+  get seen() { return this.msgCache.seen; }
+  get fileMsgs() { return this.msgCache.fileMsgs; }
+  get msgRoute() { return this.msgCache.msgRoute; }
+
   syncQuietTimer(): void {
-    this.#syncQuietTimer();
+    syncBridgeQuietTimer(this);
     if (!this.quietHours?.enabled && this.quietQueue.length) {
       this.flushQuietDigest().catch(() => {});
     }
   }
 
-  #syncQuietTimer(): void {
-    if (this.quietTimer) {
-      clearInterval(this.quietTimer);
-      this.quietTimer = null;
-    }
-    if (this.quietHours?.enabled) {
-      this.quietTimer = setInterval(() => {
-        if (this.quietQueue.length && !inQuietHours(this.now(), this.quietHours)) {
-          this.flushQuietDigest().catch(() => {});
-        }
-      }, 60_000);
-      this.quietTimer.unref?.();
-    }
-  }
-
-  rememberOwnId(id: unknown, chatId?: string | null): void {
-    if (id == null) return;
-    const mid = String(id).trim();
-    if (!mid) return;
-    const key = scopedMsgKey(chatId, mid);
-    rememberBounded(this.ownIds, key, 2000);
-  }
-
-  isOwnId(chatId: string | null | undefined, msgId: string | null | undefined): boolean {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return false;
-    const scoped = scopedMsgKey(chatId, mid);
-    return Boolean((scoped && this.ownIds.has(scoped)) || this.ownIds.has(mid));
-  }
-
-  hasSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): boolean {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return false;
-    const scoped = scopedMsgKey(chatId, mid);
-    return Boolean((scoped && this.seen.has(scoped)) || this.seen.has(mid));
-  }
-
-  markSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): void {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return;
-    const scoped = scopedMsgKey(chatId, mid);
-    rememberBounded(this.seen, scoped || mid, 5000);
-  }
-
-  setMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined, route: MsgRoute): void {
-    const mid = String(msgId ?? '').trim();
-    if (!mid || !route?.botId) return;
-    const cid = String(chatId || route.targetChatId || '').trim();
-    const key = scopedMsgKey(cid, mid);
-    this.msgRoute.set(key, route);
-    trimMapCap(this.msgRoute, 500);
-  }
-
-  getMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): MsgRoute | null {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return null;
-    const cid = String(chatId ?? '').trim();
-    if (cid) {
-      const hit = this.msgRoute.get(scopedMsgKey(cid, mid));
-      if (hit) return hit;
-    }
-    const legacy = this.msgRoute.get(mid) ?? null;
-    if (!legacy) return null;
-    const routeChat = legacy.targetChatId || legacy.originChatId || '';
-    if (cid && routeChat && routeChat !== cid) return null;
-    return legacy;
-  }
-
-  deleteMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): void {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return;
-    const cid = String(chatId ?? '').trim();
-    if (cid) this.msgRoute.delete(scopedMsgKey(cid, mid));
-    const legacy = this.msgRoute.get(mid);
-    if (legacy) {
-      const routeChat = legacy.targetChatId || legacy.originChatId || '';
-      if (!cid || !routeChat || routeChat === cid) this.msgRoute.delete(mid);
-    }
-  }
-
-  setFileMsg(chatId: string, msgId: string, atts: InboundAttachment[]): void {
-    const mid = String(msgId ?? '').trim();
-    const cid = String(chatId ?? '').trim();
-    if (!mid) return;
-    const key = scopedMsgKey(cid, mid);
-    this.fileMsgs.set(key, { chatId: cid, atts, at: this.now(), used: false });
-    trimMapCap(this.fileMsgs, 50);
-  }
-
-  getFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): { key: string; entry: FileMsgEntry } | null {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return null;
-    const cid = String(chatId ?? '').trim();
-    if (cid) {
-      const sk = scopedMsgKey(cid, mid);
-      const hit = this.fileMsgs.get(sk);
-      if (hit) return { key: sk, entry: hit };
-    }
-    const legacy = this.fileMsgs.get(mid);
-    if (!legacy) return null;
-    if (cid && legacy.chatId && legacy.chatId !== cid) return null;
-    return { key: mid, entry: legacy };
-  }
-
-  deleteFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): void {
-    const mid = String(msgId ?? '').trim();
-    if (!mid) return;
-    const cid = String(chatId ?? '').trim();
-    if (cid) this.fileMsgs.delete(scopedMsgKey(cid, mid));
-    const legacy = this.fileMsgs.get(mid);
-    if (legacy && (!cid || !legacy.chatId || legacy.chatId === cid)) {
-      this.fileMsgs.delete(mid);
-    }
-  }
+  rememberOwnId(id: unknown, chatId?: string | null): void { this.msgCache.rememberOwnId(id, chatId); }
+  isOwnId(chatId: string | null | undefined, msgId: string | null | undefined): boolean { return this.msgCache.isOwnId(chatId, msgId); }
+  hasSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): boolean { return this.msgCache.hasSeenMsg(chatId, msgId); }
+  markSeenMsg(chatId: string | null | undefined, msgId: string | null | undefined): void { this.msgCache.markSeenMsg(chatId, msgId); }
+  setMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined, route: MsgRoute): void { this.msgCache.setMsgRoute(chatId, msgId, route); }
+  getMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): MsgRoute | null { return this.msgCache.getMsgRoute(chatId, msgId); }
+  deleteMsgRoute(chatId: string | null | undefined, msgId: string | null | undefined): void { this.msgCache.deleteMsgRoute(chatId, msgId); }
+  setFileMsg(chatId: string, msgId: string, atts: InboundAttachment[]): void { this.msgCache.setFileMsg(chatId, msgId, atts); }
+  getFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): { key: string; entry: FileMsgEntry } | null { return this.msgCache.getFileMsg(chatId, msgId); }
+  deleteFileMsg(chatId: string | null | undefined, msgId: string | null | undefined): void { this.msgCache.deleteFileMsg(chatId, msgId); }
 
   getPendingCard(chatId: string | null | undefined, msgId: string | null | undefined): PendingCard | null {
     const mid = String(msgId ?? '').trim();
@@ -465,21 +369,25 @@ export class OpenMausBotBridge {
     return card;
   }
 
+  get privateDrafts(): Map<string, PrivateDraft> {
+    return this.draftStore.draftsView;
+  }
+
+  get pendingSendBacks(): Map<string, PendingSendBack> {
+    return this.draftStore.sendBacksView;
+  }
+
   get pendingSendBack(): PendingSendBack | null {
-    const now = this.now();
-    for (const [k, v] of this.pendingSendBacks) {
-      if (!v || v.expiresAt <= now) this.pendingSendBacks.delete(k);
-    }
-    return [...this.pendingSendBacks.values()].at(-1) ?? null;
+    return this.draftStore.latestConfirming();
   }
 
   set pendingSendBack(val: PendingSendBack | null) {
     if (!val) {
-      this.pendingSendBacks.clear();
+      this.draftStore.clearAllConfirming();
       return;
     }
     const id = val.id || val.draft?.id || 'default';
-    this.pendingSendBacks.set(id, { ...val, id });
+    this.draftStore.setConfirmingFromEntry(id, { ...val, id });
   }
 
   clearPickers(): void {
@@ -564,192 +472,21 @@ export class OpenMausBotBridge {
     return `🤖 **[${shown}]**`;
   }
 
-  status() {
-    let queuedCount = 0;
-    for (const arr of this.queuedByThread.values()) queuedCount += arr.length;
-    const inbox = this.getCoordinatorInbox();
-    const uniqueDrafts = new Set<string>();
-    for (const d of this.privateDrafts.values()) if (d?.id) uniqueDrafts.add(d.id);
-    return {
-      connected: this.sseConnected,
-      sseAuthFailed: Boolean(this.sseAuthError),
-      proactive: this.proactive !== false,
-      quietPending: this.quietQueue.length,
-      activeTurns: this.activeTurns.size,
-      inFlightTurns: this.inFlightTurns.size,
-      queuedCount,
-      pendingCards: this.pendingCards.size,
-      stickyActive: this.isStickyActive(),
-      botName: this.botName,
-      focus: this.focus
-        ? { ...this.focus, botName: this.displayBotName(this.focus.botId, this.focus.botName, { isGroup: Boolean(this.focus.isGroup) }) }
-        : null,
-      multiBot: this.multiBotCache,
-      chatThreads: this.chatThreads.size,
-      chatPolicy: this.getChatPolicy(),
-      pendingSendBack: Boolean(this.pendingSendBack),
-      pendingSendBacksCount: inbox.sendBacks.length,
-      pendingFollowUpsCount: inbox.followUps.length,
-      privateDraftsCount: uniqueDrafts.size,
-      inbox,
-      securityRedactions: this.securityRedactions,
-      policyDenials: this.policyDenials,
-      boundProjectsCount: this.chatProjects.size,
-      sharedContext: this.sharedContext.status(),
-      delegations: this.delegations.stats(),
-      outboundBuffered: this.disconnectedBuffer.length,
-      outboundFailures: this.outboundFailures,
-      outboundReplayed: this.outboundReplayed,
-      sseReconnects: this.sseReconnects,
-      stateSaveErrors: this.stateSaveErrors,
-      stateCorruptRecoveries: this.stateCorruptRecoveries,
-      uptimeSec: Math.max(0, Math.round((this.now() - this.startedAt) / 1000)),
-      context: this.imContext?.stats?.() ?? this.localContextStore.stats(),
-    };
-  }
-
-  #resumeInFlightTurns(): void {
-    if (!this.inFlightTurns.size) return;
-    const cutoff = this.now() - 30 * 60_000;
-    for (const [key, meta] of [...this.inFlightTurns.entries()]) {
-      if (!meta?.botId || !meta?.threadId || (meta.startedAt && meta.startedAt < cutoff)) {
-        this.inFlightTurns.delete(key);
-        continue;
-      }
-      if (this.activeTurns.has(key)) continue;
-      const turn = this.trackTurn(meta);
-      turn.startWatcher();
-      this.emitTelemetry('turn_resumed', {
-        botName: this.displayBotName(meta.botId, meta.botName, { isGroup: Boolean(meta.isGroup) }),
-        chatId: meta.chatCtx?.originChatId || this.selfChat || null,
-        summary: `thread=${meta.threadId}`,
-      });
-    }
-  }
-
-  async start(): Promise<void> {
-    const ttlMs = this.fileRetentionDays > 0 ? this.fileRetentionDays * DAY_MS : 0;
-    const pullCacheDir = this.dataDir ? path.join(this.dataDir, 'in', 'pull') : '';
-    if (ttlMs > 0) {
-      pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
-      if (pullCacheDir) pruneExpiredFiles(pullCacheDir, ttlMs, { now: this.now() });
-    }
-    this.cleanupTimer = setInterval(() => {
-      if (ttlMs > 0) {
-        pruneExpiredFiles(this.inDir, ttlMs, { now: this.now() });
-        if (pullCacheDir) pruneExpiredFiles(pullCacheDir, ttlMs, { now: this.now() });
-      }
-      this.pruneMemoryCaches();
-    }, DAY_MS);
-    this.cleanupTimer.unref?.();
-    if (this.reminderTimer) {
-      clearInterval(this.reminderTimer);
-      this.reminderTimer = null;
-    }
-    this.reminderTimer = setInterval(() => {
-      this.checkPendingReminders().catch(() => {});
-    }, 60_000);
-    this.reminderTimer.unref?.();
-    await this.transport.start((ev) => Promise.resolve(this.onEvent(ev)).catch((e) => console.error('[omb-bridge]', e)));
-    this.sseAc = new AbortController();
-    this.sseTask = this.client.subscribeEvents((evt) => handleSseEvent(this, evt), {
-      signal: this.sseAc.signal,
-      onError: (e) => {
-        if (this.sseConnected) this.sseReconnects += 1;
-        this.sseConnected = false;
-        if (e?.status === 401 || e?.status === 403) {
-          this.consecutiveSseErrors = 0;
-          if (!this.sseAuthError) console.error(`[omb-sse] 认证失败（${e.status}）：${formatOmbError(e)}`);
-          this.sseAuthError = e.message || `HTTP ${e.status}`;
-          return;
-        }
-        this.consecutiveSseErrors += 1;
-        if (
-          this.consecutiveSseErrors >= 2
-          && typeof this.autoHealOmb === 'function'
-          && (this.now() - this.lastAutoHealAt) >= this.autoHealCooldownMs
-        ) {
-          this.lastAutoHealAt = this.now();
-          const heal = this.autoHealOmb;
-          Promise.resolve().then(() => heal()).catch((err) => {
-            console.warn('[omb-autoheal]', err instanceof Error ? err.message : err);
-          });
-        }
-      },
-    }).catch((e) => { if (!this.sseAc?.signal.aborted) console.error('[omb-sse]', e); });
-    this.#syncQuietTimer();
-    await this.refreshMultiBot();
-    reconcilePendingCards(this).catch(() => {});
-    this.#resumeInFlightTurns();
-    if (!this.isTransportDisconnected() && this.disconnectedBuffer.length) {
-      this.flushOutboundBuffer().catch(() => {});
-    }
-  }
-
-  async stop(): Promise<void> {
-    this.sseConnected = false;
-    this.sseAuthError = null;
-    if (this.quietTimer) {
-      clearInterval(this.quietTimer);
-      this.quietTimer = null;
-    }
-    if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
-      this.cleanupTimer = null;
-    }
-    if (this.reminderTimer) {
-      clearInterval(this.reminderTimer);
-      this.reminderTimer = null;
-    }
-    this.clearPendingMedia();
-    this.sseAc?.abort();
-    await this.drainOutbound(2000).catch(() => {});
-    for (const turn of [...this.activeTurns.values()]) turn.dispose();
-    this.activeTurns.clear();
-    this.flushState();
-    await this.sseTask?.catch(() => {});
-    await this.transport.stop?.();
-  }
+  status() { return buildBridgeStatus(this); }
+  async start(): Promise<void> { return startBridgeLifecycle(this); }
+  async stop(): Promise<void> { return stopBridgeLifecycle(this); }
 
   async syncChiefBotIdentity(bots: OmbBot[] | null = null): Promise<boolean> { return syncChiefBotIdentity(this, bots); }
-  async refreshMultiBot(): Promise<OmbBot[]> { return refreshMultiBot(this); }
+  async refreshMultiBot(opts?: { force?: boolean }): Promise<OmbBot[]> { return refreshMultiBot(this, opts); }
   async resolveOwnerByThread(threadId: string): Promise<OmbTargetBot | null> { return resolveOwnerByThread(this, threadId); }
 
-  rememberEcho(text: string): void {
-    const key = norm(text);
-    if (!key) return;
-    const now = this.now();
-    this.recent.set(key, now);
-    for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
-  }
-
-  isEcho(text: string): boolean {
-    if (this.outPrefix && text.startsWith(this.outPrefix.trim())) return true;
-    if (hasBotBadgePrefix(text)) return true;
-    const now = this.now();
-    for (const [k, at] of this.recent) if (now - at > 3 * 60 * 1000) this.recent.delete(k);
-    return this.recent.has(norm(text));
-  }
-
+  rememberEcho(text: string): void { this.msgCache.rememberEcho(text); }
+  isEcho(text: string): boolean { return this.msgCache.isEcho(text, this.outPrefix); }
   channelCaps(): Partial<ChannelCapabilities> | null {
     const caps = this.transport?.capabilities;
     return caps && typeof caps === 'object' ? caps : null;
   }
-
-  isPendingOutFile(att: Partial<InboundAttachment> | null | undefined): boolean {
-    if (!this.pendingOutFiles.size) return false;
-    const now = this.now();
-    for (const [k, exp] of this.pendingOutFiles) {
-      if (exp <= now) this.pendingOutFiles.delete(k);
-    }
-    const safe = safeAttachmentName(att?.name, '');
-    if (!safe) return false;
-    const keys = att?.size ? [`${safe}:${att.size}`, safe] : [safe];
-    const hit = keys.find((k) => this.pendingOutFiles.has(k));
-    if (!hit) return false;
-    for (const k of keys) this.pendingOutFiles.delete(k);
-    return true;
-  }
+  isPendingOutFile(att: Partial<InboundAttachment> | null | undefined): boolean { return this.msgCache.isPendingOutFile(att); }
 
   effectiveResultChars(): number {
     const maxChars = Number(this.channelCaps()?.maxChars ?? 0);

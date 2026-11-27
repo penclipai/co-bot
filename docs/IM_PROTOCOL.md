@@ -197,11 +197,14 @@ interface InboundAttachment {
    npm run channel:test -- --channel ./im-plugin.ts --dry --strict
    ```
    确认零错误并核对打印出的 `capabilities`（特别检查 `history`、`files`、`replyTo` 与真实实现一致）以及 `idPatterns` 配置检查通过。
-2. **真机收发、引用/@/历史全量体检**：
+2. **真机收发、引用/@/通知/历史全量体检**：
    ```bash
-   npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "co-bot 通道联通自检" --check-file --check-history
+   npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "co-bot 通道联通自检" --check-file --check-history --check-notify --check-mentions
    ```
-   在等待窗内依次从手机自聊、外部群**引用回复**和 **`@` 同事** 各发 1 条消息，核对末尾打印的 **字段映射核对表** 中 `chat.id` / `sender.id` / `quote.senderId` / `mentions` 均为预期平台真实 ID。
+   在等待窗内依次从手机自聊、外部群**引用回复**和 **`@` 同事** 各发 1 条消息，核对末尾打印的 **字段映射核对表** 中 `chat.id` / `sender.id` / `quote.senderId` / `mentions` 均为预期平台真实 ID；同时支持使用离线样本回放做免连机回归校验：
+   ```bash
+   npm run channel:test -- --channel ./im-plugin.ts --strict --replay ./samples.json
+   ```
 3. **6 项端到端场景实测清单**：
    - [ ] **单条长文本/多条逐条转发**：群里转发 1 段 >5KB 日志和 2 条零散消息后 `@bot 总结`，能调取完整末尾内容且密钥片段被脱敏。
    - [ ] **合并转发（含嵌套附件）**：群里发送包含 ≥5 条消息及附件的聊天记录合并转发，能展开末尾结论并自动下载上传嵌套附件。

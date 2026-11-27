@@ -353,6 +353,15 @@ export interface CompactChatContext {
   polishDraft?: PolishDraftInfo;
 }
 
+export interface DraftConfirmingState {
+  id?: string;
+  inboxRef?: number;
+  imMsgId?: string | null;
+  text: string;
+  useBotPrefix?: boolean;
+  expiresAt: number;
+}
+
 export interface PrivateDraft {
   id: string;
   inboxRef?: number;
@@ -377,6 +386,7 @@ export interface PrivateDraft {
     targetName: string;
     question: string;
   };
+  confirming?: DraftConfirmingState;
   createdAt: number;
 }
 
@@ -648,6 +658,8 @@ export interface BridgeOptions {
   stateSaveDebounceMs?: number;
   draftTtlMs?: number;
   cardTtlMs?: number;
+  queueTtlMs?: number;
+  botListCacheTtlMs?: number;
   followUpRemindMs?: number;
   delegationRemindMs?: number;
   mutedHintCooldownMs?: number;

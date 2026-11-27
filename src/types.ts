@@ -64,6 +64,7 @@ export interface SelfChatConfig {
   stateSaveDebounceMs: number;
   draftTtlMs: number;
   cardTtlMs: number;
+  queueTtlMs: number;
   followUpRemindMs: number;
   delegationRemindMs: number;
   mutedHintCooldownMs: number;

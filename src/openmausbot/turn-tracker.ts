@@ -5,6 +5,7 @@ import { attachBotBadge } from '../core/security.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { extractWidgetFallbackText, formatActivity, formatGoalProgress, formatOmbError } from './cards.ts';
 import { messageNeedsInput } from './client.ts';
+import { getCachedBotRoster } from './thread-manager.ts';
 import { botCommandTarget, formatOriginBanner } from './command-helpers.ts';
 import { compactChatCtx, rememberBounded, trimMapCap } from './mentions.ts';
 import type {
@@ -561,7 +562,7 @@ export function createTurnTracker(
           const hasMediaMsg = matched.some((m) => m.kind === 'screen' || m.hasImage || (Array.isArray(m.attachments) && m.attachments.length > 0));
           const hasBurstCard = matched.some((m) => m.kind === 'burst');
           if (!forwardedMedia && !hasMediaMsg && !hasBurstCard && !stoppedByUser) {
-            const listed = typeof bridge.client.listBots === 'function' ? await bridge.client.listBots().catch(() => null) : null;
+            const listed = typeof bridge.client.listBots === 'function' ? await getCachedBotRoster(bridge, { force: true }).catch(() => null) : null;
             const curBot = (listed?.bots ?? []).find((b) => b.id === botId);
             const isDead = curBot?.activity === 'dead';
             const shownName = bridge.displayBotName(botId, botName, { isGroup });

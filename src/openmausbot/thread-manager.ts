@@ -11,7 +11,29 @@ import {
   COBOT_COORDINATOR_TITLE,
   isManagedCobotSoul,
 } from './persona.ts';
-import type { OmbBot, OmbHttpError, OmbTargetBot, OmbTaskSummary } from './types.ts';
+import type { OmbBot, OmbGroup, OmbHttpError, OmbTargetBot, OmbTaskSummary } from './types.ts';
+
+/** 使短时 Bot 列表缓存失效（在 SSE Bot/群变更或任务增改后调用）。 */
+export function invalidateBotListCache(bridge: OpenMausBotBridge): void {
+  bridge.botListCache = null;
+}
+
+/** 读取 OpenMausBot Bot/群列表，默认复用 `botListCacheTtlMs` 内的短期缓存（可 `force: true` 强刷）。 */
+export async function getCachedBotRoster(
+  bridge: OpenMausBotBridge,
+  { force = false }: { force?: boolean } = {},
+): Promise<{ bots: OmbBot[]; groups: OmbGroup[] }> {
+  const ttl = Number(bridge.botListCacheTtlMs ?? 3000);
+  const cached = bridge.botListCache;
+  if (!force && ttl > 0 && cached && (bridge.now() - cached.at) < ttl) {
+    return { bots: cached.bots, groups: cached.groups };
+  }
+  const res = await bridge.client.listBots();
+  const bots = Array.isArray(res?.bots) ? res.bots : [];
+  const groups = Array.isArray(res?.groups) ? res.groups : [];
+  bridge.botListCache = { at: bridge.now(), bots, groups };
+  return { bots, groups };
+}
 
 /** 幂等同步 OpenMausBot 主 Bot 的 co-bot 名称、职责标题与受管 Soul。 */
 export async function syncChiefBotIdentity(
@@ -24,7 +46,7 @@ export async function syncChiefBotIdentity(
   if (bridge.syncingChiefPromise) return bridge.syncingChiefPromise;
   bridge.syncingChiefPromise = (async () => {
     try {
-      const list = Array.isArray(bots) ? bots : ((await bridge.client.listBots())?.bots ?? []);
+      const list = Array.isArray(bots) ? bots : ((await getCachedBotRoster(bridge))?.bots ?? []);
       const visible = list.filter((b) => b && !b.hidden);
       const chief = visible.find((b) => b.chiefOfStaff) ?? visible[0];
       if (!chief?.id) return false;
@@ -44,6 +66,7 @@ export async function syncChiefBotIdentity(
       }
       if (Object.keys(patch).length > 0) {
         await bridge.withCliLoopbackFallback((c) => c.patchBot(chief.id, patch));
+        invalidateBotListCache(bridge);
         const updated = { ...chief, ...patch };
         bridge.botById.set(chief.id, updated);
         for (const [tid, entry] of bridge.botByThread) {
@@ -65,9 +88,12 @@ export async function syncChiefBotIdentity(
 }
 
 /** 拉取 OpenMausBot Bot/协作群组列表并刷新按 ID 与 Thread 的双向索引。 */
-export async function refreshMultiBot(bridge: OpenMausBotBridge): Promise<OmbBot[]> {
+export async function refreshMultiBot(
+  bridge: OpenMausBotBridge,
+  { force = false }: { force?: boolean } = {},
+): Promise<OmbBot[]> {
   try {
-    const { bots = [], groups = [] } = await bridge.client.listBots();
+    const { bots = [], groups = [] } = await getCachedBotRoster(bridge, { force });
     const visible = bots.filter((b) => !b.hidden);
     const visibleGroups = groups.filter((g) => !g.hidden && !g.dm);
     bridge.multiBotCache = visible.length > 1 || visibleGroups.length > 0;
@@ -105,7 +131,7 @@ export async function refreshMultiBot(bridge: OpenMausBotBridge): Promise<OmbBot
 export async function resolveOwnerByThread(bridge: OpenMausBotBridge, threadId: string): Promise<OmbTargetBot | null> {
   if (bridge.botByThread.has(threadId)) return bridge.botByThread.get(threadId) ?? null;
   if (bridge.groupByThread.has(threadId)) return bridge.groupByThread.get(threadId) ?? null;
-  await refreshMultiBot(bridge);
+  await refreshMultiBot(bridge, { force: true });
   return bridge.botByThread.get(threadId) ?? bridge.groupByThread.get(threadId) ?? null;
 }
 
@@ -171,6 +197,7 @@ export async function resolveSelfBotThread(bridge: OpenMausBotBridge, targetBot:
         : null);
     const newTid = created?.task?.threadId ?? created?.bot?.threadId ?? created?.group?.threadId;
     if (newTid && !isExternalThread(bridge, newTid)) {
+      invalidateBotListCache(bridge);
       registerThreadTarget(bridge, targetBot, newTid);
       const next = { ...targetBot, threadId: newTid };
       setSelfThread(bridge, next);
@@ -234,6 +261,7 @@ export async function ensureChatThread(
     if (!newTid) {
       throw new Error(`创建外部会话「${chatName || chatId}」隔离上下文失败：未返回 threadId`);
     }
+    invalidateBotListCache(bridge);
     registerThreadTarget(bridge, targetBot, newTid);
     const nextTarget = { ...targetBot, threadId: newTid };
     setChatThread(bridge, chatId, nextTarget);

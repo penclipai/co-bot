@@ -6,6 +6,7 @@ import type { OpenMausBotBridge } from './bridge.ts';
 import { parseMultiChoiceAnswer } from './cards.ts';
 import { cancelSendBack, confirmDraftDirect, confirmSendBack, discardPrivateDraft, requestSendBack } from './chat-manager.ts';
 import { trimMapCap } from './mentions.ts';
+import { pruneExpiredQueues } from './queue-and-sse.ts';
 import type { CoordinatorInboxSummary, OmbMessage, PendingCard, PendingSendBack, PrivateDraft } from './types.ts';
 
 const CLOSED_REF_TTL_MS = 10 * 60_000;
@@ -103,35 +104,24 @@ export function pruneExpiredInboxItems(bridge: OpenMausBotBridge): boolean {
     }
   }
 
-  for (const [k, sb] of bridge.pendingSendBacks) {
-    if (!sb || sb.expiresAt <= now) {
-      if (sb) {
-        const ref = sb.inboxRef ?? sb.draft?.inboxRef;
-        recordClosedInboxRef(bridge, ref, `发回预览「${sb.draft?.originChatName || sb.draft?.originChatId || ''}」`);
-        if (sb.imMsgId) bridge.expiredSendBackIds.set(sb.imMsgId, now);
-        bridge.lastExpiredSendBackAt = now;
-      }
-      bridge.pendingSendBacks.delete(k);
-      changed = true;
-    }
+  const draftTtl = Number(bridge.draftTtlMs) || 30 * 60_000;
+  if (bridge.draftStore.pruneExpired(now, draftTtl, {
+    onConfirmExpired: (d, conf) => {
+      const ref = conf.inboxRef ?? d.inboxRef;
+      recordClosedInboxRef(bridge, ref, `发回预览「${d.originChatName || d.originChatId || ''}」`);
+      if (conf.imMsgId) bridge.expiredSendBackIds.set(conf.imMsgId, now);
+      bridge.lastExpiredSendBackAt = now;
+    },
+    onDraftExpired: (d) => {
+      recordClosedInboxRef(bridge, d.inboxRef, `私密草稿「${d.originChatName || d.originChatId}」`);
+    },
+  })) {
+    changed = true;
   }
   for (const [mid, at] of bridge.expiredSendBackIds) {
     if ((now - at) > CLOSED_REF_TTL_MS) bridge.expiredSendBackIds.delete(mid);
   }
   trimMapCap(bridge.expiredSendBackIds, 40);
-
-  const draftCutoff = now - (Number(bridge.draftTtlMs) || 30 * 60_000);
-  const recordedDrafts = new Set<string>();
-  for (const [k, d] of bridge.privateDrafts) {
-    if (!d || (d.createdAt || 0) < draftCutoff) {
-      if (d?.id && !recordedDrafts.has(d.id)) {
-        recordedDrafts.add(d.id);
-        recordClosedInboxRef(bridge, d.inboxRef, `私密草稿「${d.originChatName || d.originChatId}」`);
-      }
-      bridge.privateDrafts.delete(k);
-      changed = true;
-    }
-  }
 
   for (const [k, fp] of bridge.pendingFollowUps) {
     if (!fp || fp.expiresAt <= now) {
@@ -147,6 +137,7 @@ export function pruneExpiredInboxItems(bridge: OpenMausBotBridge): boolean {
   for (const [k, v] of bridge.recentClosedInboxRefs) {
     if (!v || (now - v.at) > CLOSED_REF_TTL_MS) bridge.recentClosedInboxRefs.delete(k);
   }
+  pruneExpiredQueues(bridge);
   return changed;
 }
 

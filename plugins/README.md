@@ -6,7 +6,7 @@
 
 - **单文件插件**：`plugins/<name>.ts`（或 `.js` / `.mjs`）
 - **子目录插件**：`plugins/<name>/index.ts`（或通过 `package.json` 的 `main` / `exports['.']` 指定入口）
-- **自动忽略**：以 `_` 或 `.` 开头的文件/目录（如 `_example-extension.ts`）、`README.md`、`*.d.ts`、`*.test.*`、`node_modules`
+- **自动忽略**：以 `_` 或 `.` 开头的文件/目录（如 `_example-extension.ts`）、`*.example.*`（如 `_custom-redactor.example.ts`、`_audio-transcriber.example.ts`）、`README.md`、`*.d.ts`、`*.test.*`、`node_modules`
 
 ## 编写方式（Cordis 同构契约）
 
@@ -48,3 +48,8 @@ export function apply(ctx: KernelContext) {
 
 - 在 `config.json` 的 `"plugins"` 下可为插件单独配置启用开关与参数，例如：`"plugins": { "my-ext": false }` 或 `{ "my-ext": { "enabled": true, "endpoint": "..." } }`。
 - 在本地只读诊断台 `/debug` 中可查看全部插件状态及报错，并对外部扩展插件一键点击 **重载** 实现热更新。
+
+## 内网可复用模板
+
+- [**`_custom-redactor.example.ts`**](./_custom-redactor.example.ts)：通过 `security.registerRedactor()` 注册内网工号、内部令牌、内网 URL ticket 脱敏规则。复制为 `plugins/custom-redactor.ts` 即可生效。
+- [**`_audio-transcriber.example.ts`**](./_audio-transcriber.example.ts)：通过 `hooks.registerAudioTranscriber()` 对接内网语音识别（ASR）HTTP 接口，收到的语音消息将自动附带转写文本注入上下文。复制为 `plugins/audio-transcriber.ts` 并配置 `endpoint` 即可生效。

@@ -43,11 +43,11 @@ function asPlainObj(val: unknown): Record<string, unknown> | null {
   return val && typeof val === 'object' && !Array.isArray(val) ? (val as Record<string, unknown>) : null;
 }
 
-/** 判断文件名是否为合法的插件模块文件（排除类型声明与测试文件）。 */
+/** 判断文件名是否为合法的插件模块文件（排除类型声明、示例与测试文件）。 */
 function isPluginFileName(name: string): boolean {
   const lower = String(name || '').toLowerCase();
   if (!lower || lower.startsWith('.') || lower.startsWith('_')) return false;
-  if (lower.endsWith('.d.ts') || lower.includes('.test.') || lower.includes('.spec.')) return false;
+  if (lower.endsWith('.d.ts') || lower.includes('.test.') || lower.includes('.spec.') || lower.includes('.example.')) return false;
   return /\.(?:[cm]?[jt]s)$/i.test(lower);
 }
 
