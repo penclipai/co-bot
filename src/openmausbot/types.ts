@@ -544,6 +544,7 @@ export interface BridgeTransport {
   capabilities?: Partial<ChannelCapabilities>;
   canFiles?: boolean;
   idPatterns?: ChannelIdPatterns;
+  strictContract?: boolean;
   start: (onEvent: (ev: InboundEvent) => unknown) => Promise<void> | void;
   stop?: () => Promise<void> | void;
   status?: () => Partial<ChannelStatus> | null;

@@ -314,9 +314,12 @@ export class ManagedChannel {
     } catch { /* ignore telemetry errors */ }
   }
 
-  #warnContract(message: string): void {
+  #warnContract(message: string, chatId?: string): void {
     this.logger.warn?.(`[channel:${this.name}] ${message}`);
-    this.#emit('channel:contract_warning', { summary: clipSummary(message, 160) });
+    this.#emit('channel:contract_warning', {
+      summary: clipSummary(message, 160),
+      ...(chatId ? { chatId: String(chatId) } : {}),
+    });
   }
 
   #rememberChatType(chatId: string, chatType: ChatType): void {
@@ -360,7 +363,7 @@ export class ManagedChannel {
       }
     }
     if (!errs.length) return;
-    for (const err of errs) this.#warnContract(err);
+    for (const err of errs) this.#warnContract(err, chatId);
     if (this.strictContract) {
       throw new Error(errs.join('；'));
     }
@@ -374,6 +377,10 @@ export class ManagedChannel {
     await this.adapter.start(
       (rawMsg) => {
         if (this.stopped || gen !== this.#connGen) return;
+        const rawRec = rawMsg && typeof rawMsg === 'object' ? (rawMsg as AnyRecord) : null;
+        const rawChatObj = rawRec?.chat && typeof rawRec.chat === 'object' ? (rawRec.chat as AnyRecord) : null;
+        const rawCid = rawChatObj?.id ?? rawRec?.chatId;
+        const warnCid = typeof rawCid === 'string' || typeof rawCid === 'number' ? String(rawCid).trim() : '';
         let ev: InboundEvent;
         try {
           ev = normalizeInboundEvent(rawMsg, {
@@ -382,7 +389,7 @@ export class ManagedChannel {
             atAllCountsAsMention: this.atAllCountsAsMention,
             idPatterns: this.idPatterns,
             strict: this.strictContract,
-            onWarning: (w) => this.#warnContract(w),
+            onWarning: (w) => this.#warnContract(w, warnCid || undefined),
           });
         } catch (e) {
           this.logger.error?.(`[channel:${this.name}] 无法识别的消息，已跳过：`, e instanceof Error ? e.message : e);
@@ -489,9 +496,9 @@ export class ManagedChannel {
     const id = await this.adapter.send(cid, text, outOpts);
     const idStr = id != null ? String(id).trim() : '';
     if (!idStr) {
-      this.#warnContract('adapter.send() 未返回非空 msgId，引用路由与回声去重可能失效');
+      this.#warnContract('adapter.send() 未返回非空 msgId，引用路由与回声去重可能失效', cid);
     } else if (this.idPatterns?.msgId && !matchIdPattern(this.idPatterns.msgId, idStr)) {
-      this.#warnContract(`adapter.send() 返回的 msgId=${JSON.stringify(idStr)} 不符合 msgId 规范 ${this.idPatterns.msgId}`);
+      this.#warnContract(`adapter.send() 返回的 msgId=${JSON.stringify(idStr)} 不符合 msgId 规范 ${this.idPatterns.msgId}`, cid);
     }
     this.#emit('channel:outbound', {
       kind: 'text',
@@ -513,7 +520,7 @@ export class ManagedChannel {
     const id = await this.adapter.sendFile(cid, file, outOpts);
     const idStr = id != null ? String(id).trim() : '';
     if (!idStr) {
-      this.#warnContract('adapter.sendFile() 未返回非空 msgId，文件回声防环可能失效');
+      this.#warnContract('adapter.sendFile() 未返回非空 msgId，文件回声防环可能失效', cid);
     }
     this.#emit('channel:outbound', {
       kind: 'file',

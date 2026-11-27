@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import type http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -22,6 +24,7 @@ import { Kernel } from '../src/core/kernel.ts';
 import { OpenMausBotBridge } from '../src/openmausbot/bridge.ts';
 import type { OmbMessage } from '../src/openmausbot/types.ts';
 import { imContextPlugin } from '../src/plugins/im-context.ts';
+import { inspectorPlugin } from '../src/plugins/inspector.ts';
 import { webPlugin } from '../src/plugins/web.ts';
 import type { ChannelDownloadContext, ChannelGetHistoryOptions, ChannelGetMessageOptions, ChannelSendOptions, InboundAttachment } from '../src/types.ts';
 import { makeMockHarness } from './helpers/mock-im-context.ts';
@@ -479,6 +482,83 @@ test('protocol hardening: runChannelContractTest --strict & --check-history catc
     assert.ok(badCfgRes.errors.some((e) => e.includes('selfId')));
     assert.ok(badCfgRes.errors.some((e) => e.includes('collaborators')));
   } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('protocol hardening: inspector captures channel:contract_warning with chatId, idPatterns metadata, and /debug exposes it', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cobot-proto-insp-'));
+  let push: ((raw: unknown) => void) | null = null;
+  const plugin = defineChannelPlugin({
+    name: 'warn-im',
+    capabilities: { markdown: true, files: false },
+    idPatterns: { userId: /^u_/, chatId: /^(?:self|dm|grp)_/ },
+    create() {
+      return {
+        async start(onEvent) { push = onEvent; },
+        async send() { return 'out_w1'; },
+        async stop() {},
+      };
+    },
+  });
+
+  const kernel = new Kernel({
+    config: {
+      channel: { use: 'warn-im', options: { selfId: 'u_me', selfChatId: 'self_main' } },
+      web: { host: '127.0.0.1', port: 0 },
+      dataDir: tmpDir,
+      chats: { collaborators: [] },
+    },
+    logger: { warn: () => {}, error: () => {} },
+  });
+  kernel.use(webPlugin);
+  kernel.use(plugin, { selfId: 'u_me', selfChatId: 'self_main' });
+  kernel.use(inspectorPlugin);
+
+  try {
+    await kernel.start();
+    const channel = kernel.get<{ start: (fn: (ev: unknown) => void) => Promise<void> }>('channel');
+    const web = kernel.get<{ server: http.Server | null }>('web');
+    const baseUrl = `http://127.0.0.1:${(web.server!.address() as AddressInfo).port}`;
+
+    await channel.start(() => {});
+    // Emit non-strict inbound message that violates userId pattern and uses name_fallback mention
+    push!({
+      id: 'm_warn_1',
+      chat: { id: 'grp_warn', type: 'group', name: '告警测试群' },
+      sender: { id: 'bad_user_no_prefix', name: 'BadUser', isSelf: false },
+      mentions: ['Alice'],
+      text: 'hi',
+    });
+
+    const stRes = await fetch(`${baseUrl}/api/status`).then((r) => r.json()) as {
+      channel?: { contractWarnings?: number; idPatterns?: string[]; strictContract?: boolean };
+    };
+    assert.equal((stRes.channel?.contractWarnings ?? 0) >= 2, true);
+    assert.deepEqual(stRes.channel?.idPatterns, ['userId', 'chatId']);
+    assert.equal(stRes.channel?.strictContract, false);
+
+    const evRes = await fetch(`${baseUrl}/api/debug/events?type=contract_warning&chatId=grp_warn`).then((r) => r.json()) as {
+      events: Array<{ source: string; type: string; chatId?: string; summary: string }>;
+    };
+    assert.equal(evRes.events.length >= 2, true);
+    assert.equal(evRes.events[0].source, 'channel');
+    assert.equal(evRes.events[0].type, 'contract_warning');
+    assert.equal(evRes.events[0].chatId, 'grp_warn');
+    assert.ok(evRes.events.some((e) => e.summary.includes('userId')));
+
+    const bundleRes = await fetch(`${baseUrl}/api/debug/bundle`).then((r) => r.json()) as {
+      events: Array<{ type: string }>;
+    };
+    assert.ok(bundleRes.events.some((e) => e.type === 'contract_warning'));
+
+    const debugHtml = fs.readFileSync(path.join(APP_ROOT, 'public', 'debug.html'), 'utf8');
+    assert.match(debugHtml, /<option value="contract_warning">contract_warning<\/option>/);
+    assert.match(debugHtml, /契约告警/);
+    assert.match(debugHtml, /ID 格式护栏/);
+    assert.match(debugHtml, /协调收件箱/);
+  } finally {
+    await kernel.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

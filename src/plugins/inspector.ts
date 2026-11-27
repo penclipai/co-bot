@@ -54,6 +54,7 @@ export const inspectorPlugin: KernelPlugin = {
     const web = ctx.get<WebServer>('web');
     const channel = ctx.get<BridgeTransport>('channel');
     const events: InspectorEventEntry[] = [];
+    let contractWarnings = 0;
 
     const pushEvent = (source: string, type: string, payload: Record<string, unknown> = {}): void => {
       const entry: InspectorEventEntry = {
@@ -80,6 +81,10 @@ export const inspectorPlugin: KernelPlugin = {
     ctx.on('channel:outbound', (p) => pushEvent('channel', 'outbound', (p ?? {}) as Record<string, unknown>));
     ctx.on('channel:state', (p) => pushEvent('channel', 'state', (p ?? {}) as Record<string, unknown>));
     ctx.on('channel:notify', (p) => pushEvent('channel', 'notify', (p ?? {}) as Record<string, unknown>));
+    ctx.on('channel:contract_warning', (p) => {
+      contractWarnings += 1;
+      pushEvent('channel', 'contract_warning', (p ?? {}) as Record<string, unknown>);
+    });
     ctx.on('bridge:event', (p) => {
       const rec = (p ?? {}) as Record<string, unknown>;
       pushEvent('bridge', typeof rec.type === 'string' ? rec.type : 'event', rec);
@@ -94,6 +99,9 @@ export const inspectorPlugin: KernelPlugin = {
         name: st?.kind || chPlugin?.name || cfg.channel?.use || 'sim',
         capabilities: caps,
         status: st,
+        idPatterns: channel.idPatterns ? Object.keys(channel.idPatterns) : [],
+        strictContract: Boolean(channel.strictContract),
+        contractWarnings,
         plugins: kernelStatus.plugins,
       };
     };
@@ -122,6 +130,9 @@ export const inspectorPlugin: KernelPlugin = {
           name: snap.name,
           capabilities: snap.capabilities,
           status: snap.status,
+          idPatterns: snap.idPatterns,
+          strictContract: snap.strictContract,
+          contractWarnings: snap.contractWarnings,
         },
         plugins: snap.plugins,
         recentEventsCount: events.length,
@@ -222,7 +233,14 @@ export const inspectorPlugin: KernelPlugin = {
           type: typeFilter || null,
           ...(limit > 0 ? { limit } : {}),
         },
-        channel: { name: snap.name, capabilities: snap.capabilities, status: snap.status },
+        channel: {
+          name: snap.name,
+          capabilities: snap.capabilities,
+          status: snap.status,
+          idPatterns: snap.idPatterns,
+          strictContract: snap.strictContract,
+          contractWarnings: snap.contractWarnings,
+        },
         plugins: snap.plugins,
         events: list,
       };
@@ -233,6 +251,6 @@ export const inspectorPlugin: KernelPlugin = {
       web.page('/', 'debug.html');
     }
 
-    ctx.status(() => ({ recentEvents: events.length }));
+    ctx.status(() => ({ recentEvents: events.length, contractWarnings }));
   },
 };

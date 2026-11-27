@@ -8,10 +8,10 @@
 
 实现 [im-plugin.example.ts](../im-plugin.example.ts) 并接入真实 IM 后，建议重点核对以下 4 项：
 
-1. **返回真实消息 ID**：`send()` 与 `sendFile()` 的 `Promise` 必须解析为通道实际消息 ID，以便桥接层写入 `ownIds` 精确去重，防止本人账号发送后回环重触。
-2. **契约与实时收发验收**：执行 `npm run channel:test -- --wait 15 --send "hello" --check-file`，确认收发文本、回复引用与附件上传/下载均正常。
-3. **可选能力钩子**：按目标平台支持度补充 `getMessage` / `getHistory`（配 `capabilities.history: true`）、入站 `recall` 撤回事件与结构化 `mentions`。
-4. **自聊提醒校验**：确认手机端能否收到“自己发给自己”的消息推送；若 IM 默认静音自发消息，请实现插件可选的 `notify` 钩子并声明 `capabilities.notify: true`。
+1. **返回真实消息 ID 与 ID 护栏**：`send()` 与 `sendFile()` 的 `Promise` 必须解析为通道实际消息 ID；建议在插件声明 `idPatterns` 与 `strictContract: true`，并用 `encodeScopedChatId` 隔离可能撞号的单聊与群聊 ID。
+2. **契约与实时全量体检**：执行 `npm run channel:test -- --channel ./im-plugin.ts --strict --wait 30 --expect-events 3 --send "hello" --check-file --check-history`，核对回显的**字段映射核对表**确认群聊、引用快照、真 `@`、附件与历史翻页均合规。
+3. **可选能力钩子**：按目标平台支持度补充 `quote` 快照、`getMessage` / `getHistory`（配 `capabilities.history: true`）、入站 `recall` 撤回事件、结构化 `mentions` 与 `download` 私有 `att.extra`。
+4. **自聊提醒与诊断台观察**：确认手机端能否收到“自己发给自己”的消息推送（若静默则实现 `notify` 并设 `capabilities.notify: true`）；上线初期在 `/debug` 筛选 `type=contract_warning` 确认零协议告警。
 
 ---
 
@@ -25,7 +25,8 @@
 | 外部群回复里 `@同事` 或 `@所有人` 真艾特了别人 | 手动关闭了 `externalSanitizeMentions` | 将 `chats.externalSanitizeMentions` 保持为 `"all"`（默认）或 `"dangerous"`。只有 `@bot!` 发回自聊的私密草稿保留原始 `@`。 |
 | 成员撤回消息后 Bot 仍答出撤回内容 | 通道插件未推送标准撤回事件 | 在入站回调推送 `{ kind: 'recall', id, chat, sender, recalledMsgId }`，并在 `/debug` 筛选 `type=recall` 核对。 |
 | 在外部群触发后自聊串了话题（`focus` 漂移） | 手动在桌面端切错线程或关闭了隔离 | 确认 `chats.isolateThreadsByChat: true`（默认），通过 `/api/status` 核对 `chatThreads` 与 `focus.threadId` 分离；必要时自聊发 `@bot task` 切回。 |
-| 群里引用较早消息显示 `[unavailable]` | 超出内存窗口或通道未实现历史接口 | 调大 `chats.contextWindow`，或在插件实现 `getMessage`、`getHistory` 与 `download`。 |
+| 群里引用较早消息显示 `[unavailable]` | 超出内存窗口或通道未实现历史接口 | 优先在入站事件填充 `quote` 快照（`msgId` / `senderId` / `senderName` / `text`）做零 RPC 兜底，并按需实现 `getMessage`、`getHistory` 与 `download`。 |
+| 不同群消息/路由互串、雪花 ID 尾数失真或字段混写不触发 | `msgId` 撞号、64 位数字精度丢失或混写标准/扁平字段 | 使用 `createInboundMessage` + `encodeScopedChatId` 构造事件，声明 `idPatterns` 并运行 `npm run channel:test -- --strict`，或在 `/debug` 查看 `type=contract_warning`。 |
 | 提示 `尚未获知 selfChatId` | 首次启动未配置 `selfChatId` 且未收到自聊消息 | 用本人 IM 账号在**自聊窗口**发一条消息，系统会自动学习并持久化到 `data/bridge-state.json`。 |
 
 ---

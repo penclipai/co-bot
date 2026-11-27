@@ -34,7 +34,7 @@ npm run verify              # 一键全量校验：tsc 类型检查 + ESLint + �
 
 1. 阅读 [内网 IM 通道接入协议规范](./docs/IM_PROTOCOL.md)，复制 [im-plugin.example.ts](./im-plugin.example.ts) 为根目录 `im-plugin.ts`（已忽略提交；亦可使用 `.js`/`.mjs` 或放到 `plugins/`），实现 `start`、`send`（含 `mentions`）及可选媒体/`getMessage`/`getHistory`/`notify` 钩子。
 2. 在 `config.json` 配置 `"channel": { "use": "./im-plugin.ts", "options": { "selfId": "<用户ID>", "selfChatId": "" } }`。
-3. 运行契约与收发验证：`npm run channel:test -- --dry` 与 `--wait 15 --send "hello" --check-file`。
+3. 运行契约与收发验证：`npm run channel:test -- --dry --strict` 与 `--strict --wait 30 --expect-events 3 --send "hello" --check-file --check-history`。
 
 ## 项目结构
 
