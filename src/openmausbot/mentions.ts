@@ -7,21 +7,26 @@ import type { BridgeChatContext, CompactChatContext, MentionParseResult } from '
 export function compactChatCtx(chatCtx: BridgeChatContext | CompactChatContext | null | undefined): CompactChatContext | null {
   if (!chatCtx) return null;
   if (!chatCtx.isExternal) {
-    if (chatCtx.polishDraft?.originChatId) {
+    if (chatCtx.polishDraft?.originChatId || chatCtx.silentProgress) {
       return {
         isExternal: false,
-        polishDraft: {
-          originChatId: chatCtx.polishDraft.originChatId,
-          originChatName: chatCtx.polishDraft.originChatName || '',
-          originChatType: chatCtx.polishDraft.originChatType || 'group',
-          replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
-          addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
-          ...(chatCtx.polishDraft.forceBotPrefix ? { forceBotPrefix: true } : {}),
-          ...(chatCtx.polishDraft.delegationRe ? { delegationRe: chatCtx.polishDraft.delegationRe } : {}),
-          ...(chatCtx.polishDraft.mentions?.length ? { mentions: chatCtx.polishDraft.mentions.map((m) => ({ ...m })) } : {}),
-          ...(chatCtx.polishDraft.allowMentionNames?.length ? { allowMentionNames: [...chatCtx.polishDraft.allowMentionNames] } : {}),
-          ...(chatCtx.polishDraft.followUp ? { followUp: { ...chatCtx.polishDraft.followUp } } : {}),
-        },
+        ...(chatCtx.silentProgress ? { silentProgress: true } : {}),
+        ...(chatCtx.polishDraft?.originChatId
+          ? {
+              polishDraft: {
+                originChatId: chatCtx.polishDraft.originChatId,
+                originChatName: chatCtx.polishDraft.originChatName || '',
+                originChatType: chatCtx.polishDraft.originChatType || 'group',
+                replyToImMsgId: chatCtx.polishDraft.replyToImMsgId ?? null,
+                addBotPrefix: Boolean(chatCtx.polishDraft.addBotPrefix),
+                ...(chatCtx.polishDraft.forceBotPrefix ? { forceBotPrefix: true } : {}),
+                ...(chatCtx.polishDraft.delegationRe ? { delegationRe: chatCtx.polishDraft.delegationRe } : {}),
+                ...(chatCtx.polishDraft.mentions?.length ? { mentions: chatCtx.polishDraft.mentions.map((m) => ({ ...m })) } : {}),
+                ...(chatCtx.polishDraft.allowMentionNames?.length ? { allowMentionNames: [...chatCtx.polishDraft.allowMentionNames] } : {}),
+                ...(chatCtx.polishDraft.followUp ? { followUp: { ...chatCtx.polishDraft.followUp } } : {}),
+              },
+            }
+          : {}),
       };
     }
     return null;

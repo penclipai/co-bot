@@ -383,7 +383,7 @@ export async function handleGovernanceCommand(
         replyToImMsgId: null,
         originQuoteId: null,
         privateReply: false,
-        silentProgress: false,
+        silentProgress: true,
         preformattedHeader: built.header,
         ev: null,
       },

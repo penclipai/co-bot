@@ -74,6 +74,31 @@ export async function syncChiefBotIdentity(
         }
         console.log(`[co-bot] 已同步主 Bot 身份为 ${updated.name || bridge.botName}（${updated.title || COBOT_COORDINATOR_TITLE}）`);
       }
+      const chiefShown = bridge.displayBotName(chief.id, patch.name || rawName || bridge.botName, { isGroup: false });
+      let stateNormDirty = false;
+      if (bridge.focus?.botId === chief.id && !bridge.focus.isGroup && bridge.focus.botName !== chiefShown) {
+        bridge.focus = { ...bridge.focus, botName: chiefShown };
+        stateNormDirty = true;
+      }
+      for (const entry of bridge.chatThreads.values()) {
+        if (entry?.botId === chief.id && !entry.isGroup && entry.botName !== chiefShown) {
+          entry.botName = chiefShown;
+          stateNormDirty = true;
+        }
+      }
+      for (const entry of bridge.selfThreads.values()) {
+        if (entry?.botId === chief.id && !entry.isGroup && entry.botName !== chiefShown) {
+          entry.botName = chiefShown;
+          stateNormDirty = true;
+        }
+      }
+      for (const card of bridge.pendingCards.values()) {
+        if (card?.botId === chief.id && !card.isGroup && card.botName !== chiefShown) {
+          card.botName = chiefShown;
+          stateNormDirty = true;
+        }
+      }
+      if (stateNormDirty) bridge.saveState();
       bridge.chiefIdentitySynced = true;
       return true;
     } catch (e) {
@@ -145,7 +170,7 @@ export function setSelfThread(bridge: OpenMausBotBridge, targetBot: OmbTargetBot
   if (!targetBot?.id || !targetBot?.threadId || isExternalThread(bridge, targetBot.threadId)) return;
   bridge.selfThreads.set(String(targetBot.id), {
     botId: targetBot.id,
-    botName: targetBot.name,
+    botName: bridge.displayBotName(targetBot.id, targetBot.name, { isGroup: Boolean(targetBot.isGroup) }),
     threadId: targetBot.threadId,
     ...(targetBot.isGroup ? { isGroup: true } : {}),
   });
@@ -215,7 +240,7 @@ export function setChatThread(bridge: OpenMausBotBridge, chatId: string, targetB
   bridge.chatThreads.set(key, {
     threadId: targetBot.threadId,
     botId: targetBot.id,
-    botName: targetBot.name,
+    botName: bridge.displayBotName(targetBot.id, targetBot.name, { isGroup: Boolean(targetBot.isGroup) }),
     isGroup: Boolean(targetBot.isGroup),
     chatId: cid,
     chatName: meta?.name || '',

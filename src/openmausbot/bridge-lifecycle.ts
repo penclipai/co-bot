@@ -110,7 +110,8 @@ export function buildBridgeStatus(bridge: OpenMausBotBridge) {
 
 function resumeInFlightTurns(bridge: OpenMausBotBridge): void {
   if (!bridge.inFlightTurns.size) return;
-  const cutoff = bridge.now() - 30 * 60_000;
+  const maxTurnResumeMs = Math.min(30 * 60_000, Math.max(60_000, Number(bridge.turnTimeoutMs) || 600_000));
+  const cutoff = bridge.now() - maxTurnResumeMs;
   for (const [key, meta] of [...bridge.inFlightTurns.entries()]) {
     if (!meta?.botId || !meta?.threadId || (meta.startedAt && meta.startedAt < cutoff)) {
       bridge.inFlightTurns.delete(key);

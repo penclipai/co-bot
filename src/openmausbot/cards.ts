@@ -3,7 +3,8 @@ import type { ChannelAction } from '../types.ts';
 import type { NormalizedCardQuestion, OmbCardQuestion, OmbHttpError, OmbMessage } from './types.ts';
 
 const SIMPLE_ALLOW_RE = /^(ok|okay|yes|y|allow|allow once|always|always allow|apply|approve|save|confirm|create|deny|no|cancel|reject|允许|仅此一次|总是允许|应用|保存|确认|拒绝|取消)$/i;
-const GENERIC_SPOKEN_RE = /^(running a command|reading a file|searching|searching files|editing a file|writing a file|thinking|working)\.?$/i;
+const GENERIC_SPOKEN_RE = /^(?:running(?: a)? command|reading(?: a)? file|reading files?|searching(?: code| files?)?|editing(?: a)? file|writing(?: a)? file|checking|inspecting|analyzing|fetching|running tests?|executing|updating(?: a)? file|modifying(?: a)? file|thinking|working|正在执行命令|正在读取文件|正在搜索代码|正在修改文件|正在写入文件|正在处理)\.?$/i;
+const NOISY_COMMAND_SPOKEN_RE = /[\\/`]|(?:^|\s)--?[a-z0-9][a-z0-9-]*\b|&&|\|\||\b(?:npm|pnpm|yarn|node|npx|git|rg|grep|awk|sed|cat|ls|dir|cd|pwd|curl|wget|tsc|eslint|pytest|python|pwsh|powershell|bash|sh)\b/i;
 
 const CHOICE_DIGIT_MAP: Record<string, number> = {
   '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
@@ -66,20 +67,42 @@ export function formatMultiQuestionAnswers(questions: NormalizedCardQuestion[], 
 const TOOL_LABELS: Record<string, string> = {
   bash: '执行命令',
   shell: '执行命令',
+  run_shell: '执行命令',
   run_command: '执行命令',
+  execute: '执行命令',
+  exec: '执行命令',
+  terminal: '执行命令',
+  powershell: '执行命令',
+  pwsh: '执行命令',
   read: '读取文件',
   read_file: '读取文件',
+  read_many_files: '读取文件',
+  read_multiple_files: '读取文件',
+  view_file: '读取文件',
   grep: '搜索代码',
+  grep_search: '搜索代码',
   ripgrep: '搜索代码',
   search: '搜索代码',
+  search_files: '搜索代码',
+  search_content: '搜索代码',
   glob: '查找文件',
+  glob_files: '查找文件',
   find: '查找文件',
+  find_files: '查找文件',
+  find_by_name: '查找文件',
   list_dir: '查看目录',
+  list_files: '查看目录',
+  list_directory: '查看目录',
   edit: '修改文件',
   edit_file: '修改文件',
   patch: '修改文件',
+  apply_patch: '修改文件',
+  replace_file_content: '修改文件',
+  multi_replace_file_content: '修改文件',
   write: '写入文件',
   write_file: '写入文件',
+  write_to_file: '写入文件',
+  create_file: '写入文件',
   webfetch: '抓取网页',
   fetch: '抓取网页',
   websearch: '联网搜索',
@@ -105,14 +128,20 @@ function toolLabel(rawName: unknown): { label: string; mapped: boolean } {
   const low = raw.toLowerCase();
   if (TOOL_LABELS[low]) return { label: TOOL_LABELS[low], mapped: true };
   if (/^(browser_|playwright_)/.test(low)) return { label: '操作浏览器', mapped: true };
+  if (/^(?:mcp[_:.]|tools?[_:.])|^[a-z0-9]+_[a-z0-9_]+$/i.test(raw)) return { label: '处理中', mapped: true };
   return { label: raw, mapped: false };
+}
+
+function sanitizeActivitySpoken(rawSpoken: string): string {
+  const s = rawSpoken.replace(/\s+/g, ' ').trim();
+  if (!s || GENERIC_SPOKEN_RE.test(s) || NOISY_COMMAND_SPOKEN_RE.test(s)) return '';
+  return s;
 }
 
 /** 将 OpenMausBot 工具活动消息格式化为去噪后的中文进度摘要。 */
 export function formatActivity(msg: OmbMessage | null | undefined): string {
   const { label, mapped } = toolLabel(msg?.tool?.name);
-  const rawSpoken = String(msg?.tool?.spoken ?? '').trim();
-  const spoken = rawSpoken && !GENERIC_SPOKEN_RE.test(rawSpoken) ? rawSpoken : '';
+  const spoken = sanitizeActivitySpoken(String(msg?.tool?.spoken ?? ''));
   const verb = mapped ? `正在${label}` : (label ? `正在调用 ${label}` : '');
   if (spoken && verb) return `⚙️ ${verb}（${clip(spoken, 40)}）…`;
   if (spoken) return `⚙️ ${clip(spoken, 50)}…`;

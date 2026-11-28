@@ -71,7 +71,12 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       bridge.learnedSelfChatId = raw.selfChatId;
       if (bridge.transport && !bridge.transport.selfChatId) bridge.transport.selfChatId = raw.selfChatId;
     }
-    if (raw?.focus?.botId) bridge.focus = raw.focus;
+    if (raw?.focus?.botId) {
+      bridge.focus = {
+        ...raw.focus,
+        botName: bridge.displayBotName(raw.focus.botId, raw.focus.botName, { isGroup: Boolean(raw.focus.isGroup) }),
+      };
+    }
     if (typeof raw?.lastBotReplyAt === 'number' && raw.lastBotReplyAt > 0) {
       bridge.lastBotReplyAt = raw.lastBotReplyAt;
     }
@@ -79,15 +84,31 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       bridge.inboxSeq = raw.inboxSeq;
     }
     if (Array.isArray(raw?.msgRoute)) {
-      for (const [k, v] of raw.msgRoute.slice(-500)) if (k && v?.botId) bridge.msgRoute.set(String(k), v);
+      for (const [k, v] of raw.msgRoute.slice(-500)) {
+        if (k && v?.botId) {
+          bridge.msgRoute.set(String(k), {
+            ...v,
+            botName: bridge.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+          });
+        }
+      }
     }
     if (Array.isArray(raw?.quietQueue)) {
-      bridge.quietQueue = raw.quietQueue.filter((it) => it && it.botId && it.threadId).slice(-100);
+      bridge.quietQueue = raw.quietQueue
+        .filter((it) => it && it.botId && it.threadId)
+        .slice(-100)
+        .map((it) => ({ ...it, botName: bridge.displayBotName(it.botId, it.botName, { isGroup: false }) }));
     }
+    const hydratedAt = bridge.now();
     if (Array.isArray(raw?.pendingCards)) {
       for (const [k, v] of raw.pendingCards.slice(-20)) {
         if (k && v?.botId && v?.threadId) {
-          bridge.pendingCards.set(String(k), v);
+          const normalized: PendingCard = {
+            ...v,
+            botName: bridge.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+            createdAt: Number(v.createdAt) || hydratedAt,
+          };
+          bridge.pendingCards.set(String(k), normalized);
           rememberBounded(bridge.deliveredCards, v.requestId || (v.burstId ? `burst:${v.burstId}` : v.ombMsgId));
         }
       }
@@ -101,7 +122,10 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
     if (Array.isArray(raw?.chatThreads)) {
       for (const [k, v] of raw.chatThreads.slice(-200)) {
         if (k && v?.botId && v?.threadId) {
-          bridge.chatThreads.set(String(k), v);
+          bridge.chatThreads.set(String(k), {
+            ...v,
+            botName: bridge.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+          });
           rememberBounded(bridge.externalThreadIds, v.threadId, 500);
         }
       }
@@ -109,7 +133,10 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
     if (Array.isArray(raw?.selfThreads)) {
       for (const [k, v] of raw.selfThreads.slice(-100)) {
         if (k && v?.threadId && !bridge.externalThreadIds.has(String(v.threadId))) {
-          bridge.selfThreads.set(String(k), v);
+          bridge.selfThreads.set(String(k), {
+            ...v,
+            botName: bridge.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+          });
         }
       }
     }
@@ -120,7 +147,8 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       for (const id of raw.chatPolicy.muted ?? []) if (id) bridge.chatPolicyOverrides.muted.add(String(id));
       for (const id of raw.chatPolicy.allowed ?? []) if (id) bridge.chatPolicyOverrides.allowed.add(String(id));
     }
-    const turnCutoff = bridge.now() - 30 * 60_000;
+    const maxTurnResumeMs = Math.min(30 * 60_000, Math.max(60_000, Number(bridge.turnTimeoutMs) || 600_000));
+    const turnCutoff = bridge.now() - maxTurnResumeMs;
     if (Array.isArray(raw?.inFlightTurns)) {
       for (const [k, v] of raw.inFlightTurns.slice(-20)) {
         if (k && v?.botId && v?.threadId && (!v.startedAt || v.startedAt >= turnCutoff)) {
@@ -169,6 +197,7 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
       bridge.focus = recovered ? { ...recovered } : null;
     }
     ensureInboxRefs(bridge);
+    pruneExpiredInboxItems(bridge);
   } catch { /* 状态恢复兼容降级 */ }
 }
 

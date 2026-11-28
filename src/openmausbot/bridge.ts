@@ -554,7 +554,13 @@ export class OpenMausBotBridge {
   }
 
   getChatPolicy() { return getChatPolicy(this); }
-  listChatThreads() { return [...this.chatThreads.entries()].map(([key, v]) => ({ key, ...v })); }
+  listChatThreads() {
+    return [...this.chatThreads.entries()].map(([key, v]) => ({
+      key,
+      ...v,
+      botName: this.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+    }));
+  }
   listKnownChats(): KnownChatSummary[] { return listKnownChats(this); }
   resolveKnownChat(query: unknown, opts?: { includeSelf?: boolean }) { return resolveKnownChat(this, query, opts); }
 

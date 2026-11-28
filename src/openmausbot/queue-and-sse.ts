@@ -6,6 +6,7 @@ import { botCommandTarget } from './command-helpers.ts';
 import { deliverBotReply, emitCard, forwardBotMedia } from './delivery.ts';
 import { buildExternalChatCtx } from './collaborator-router.ts';
 import { dispatchToBot } from './dispatch.ts';
+import { reconcilePendingCards } from './inbox.ts';
 import { inQuietHours, rememberBounded, trimMapCap } from './mentions.ts';
 import { invalidateBotListCache } from './thread-manager.ts';
 import type {
@@ -456,9 +457,13 @@ export async function cancelLatestQueue(
 /** 消费来自 OpenMausBot `/api/events` SSE 推送的消息与状态变更事件。 */
 export async function handleSseEvent(bridge: OpenMausBotBridge, evt: OmbSseEvent): Promise<void> {
   if (!evt || typeof evt !== 'object') return;
+  const wasConnected = bridge.sseConnected;
   bridge.sseConnected = true;
   bridge.sseAuthError = null;
   bridge.consecutiveSseErrors = 0;
+  if (!wasConnected && bridge.pendingCards.size > 0) {
+    void reconcilePendingCards(bridge).catch(() => {});
+  }
   if ((evt.kind === 'message' || evt.kind === 'message.patch') && evt.message) {
     const threadId = evt.threadId ?? evt.message.threadId;
     if (!threadId) return;

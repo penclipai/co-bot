@@ -22,11 +22,11 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .app { height: 100dvh; max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; background: var(--bg); position: relative; border-inline: 1px solid var(--line); }
 
-  header { display: grid; grid-template-columns: 110px 1fr 110px; align-items: center; padding: calc(8px + env(safe-area-inset-top)) 12px 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header { display: grid; grid-template-columns: 76px minmax(0, 1fr) 112px; align-items: center; padding: calc(8px + env(safe-area-inset-top)) 12px 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
   header .back { color: var(--ink); text-decoration: none; font-size: 14px; display: flex; align-items: center; gap: 2px; white-space: nowrap; }
   header .back b { font-size: 22px; font-weight: 300; line-height: 1; }
-  header h1 { margin: 0; font-size: 16px; font-weight: 600; text-align: center; }
-  header h1 small { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; text-align: center; min-width: 0; }
+  header h1 small { display: block; font-size: 11px; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header .more { justify-self: end; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #c0392b; }
   .dot.on { background: #27ae60; }
@@ -171,6 +171,7 @@
   const unread = { self: 0, grp_dev: 0, dm_alice: 0 };
   let activeChat = 'self', sender = 'me', replyTo = null, lastTs = 0, device = 'mobile', brandName = 'co-bot';
   let selectMode = false;
+  let activeDraftIds = null;
   const selectedIds = new Set();
   const DEV = { mobile: '手机发', desktop: '电脑发' };
 
@@ -343,7 +344,12 @@
         btn.type = 'button';
         btn.className = 'act' + (act.kind ? ' ' + act.kind : '');
         btn.textContent = act.label;
-        if (/\bsendback\s+draft_/i.test(act.text || '')) btn.dataset.keepActive = '1';
+        const dm = /\b(draft_[a-z0-9_-]+)\b/i.exec(act.text || '');
+        if (dm) {
+          btn.dataset.keepActive = '1';
+          btn.dataset.draftId = dm[1];
+          if (activeDraftIds && !activeDraftIds.has(dm[1])) btn.disabled = true;
+        }
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           for (const sibling of wrap.querySelectorAll('button')) sibling.disabled = true;
@@ -435,12 +441,28 @@
     if (nearBottom) list.scrollTop = list.scrollHeight;
   }
 
+  function syncDraftButtons(inbox) {
+    if (!inbox) return;
+    activeDraftIds = new Set([
+      ...(inbox.drafts || []).map((d) => d.id),
+      ...(inbox.sendBacks || []).map((sb) => sb.id),
+    ].filter(Boolean));
+    for (const btn of list.querySelectorAll('.actions button[data-draft-id]')) {
+      if (!activeDraftIds.has(btn.dataset.draftId)) btn.disabled = true;
+    }
+  }
+
   function renderActiveChat() {
     list.innerHTML = '';
     lastTs = 0;
     const msgs = allMsgs.filter((m) => (m.chatId || 'self') === activeChat);
     if (!msgs.length) renderEmptyHint();
     else for (const m of msgs) appendMsgDom(m, true);
+    if (activeDraftIds) {
+      for (const btn of list.querySelectorAll('.actions button[data-draft-id]')) {
+        if (!activeDraftIds.has(btn.dataset.draftId)) btn.disabled = true;
+      }
+    }
   }
 
   function add(msg) {
@@ -745,12 +767,13 @@
           $('#sub').textContent = `连续对话中 · ${focusName}`;
           box.placeholder = '连续对话中，直接回复即可（# 开头只记笔记）';
         } else {
-          $('#sub').textContent = `${brandName} · ${chiefDisplay}`;
+          $('#sub').textContent = chiefDisplay === brandName ? `${brandName} · 个人协调助手` : `${brandName} · ${chiefDisplay}`;
           box.placeholder = '发 @bot …（支持 Ctrl+V 粘贴截图）';
         }
       } else if (omb?.error) {
         $('#sub').textContent = '未连上后台服务';
       }
+      if (br?.inbox) syncDraftButtons(br.inbox);
     } catch { /* ignore polling error */ }
   }
 

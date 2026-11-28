@@ -100,7 +100,12 @@ export function listKnownChats(bridge: OpenMausBotBridge): KnownChatSummary[] {
   const threadMap = new Map<string, NonNullable<KnownChatSummary['threads']>>();
   for (const entry of bridge.chatThreads.values()) {
     const list = threadMap.get(entry.chatId) ?? [];
-    list.push({ botId: entry.botId, botName: entry.botName, threadId: entry.threadId, isGroup: Boolean(entry.isGroup) });
+    list.push({
+      botId: entry.botId,
+      botName: bridge.displayBotName(entry.botId, entry.botName, { isGroup: Boolean(entry.isGroup) }),
+      threadId: entry.threadId,
+      isGroup: Boolean(entry.isGroup),
+    });
     threadMap.set(entry.chatId, list);
   }
 
@@ -190,7 +195,7 @@ export async function buildExternalSummaryPrompt(
       privateReply: true,
       historyPullHint: pullHint,
     });
-    const text = `请通过 \`context_pull\` 按需拉取「${targetChat.name || targetChat.id}」最近最多 ${maxMsgs} 条对话（先用 \`&limit=${Math.min(20, maxMsgs)}&excludeBots=1\` 聚焦人类讨论，必要时用 \`&before=\` 向前翻页或 \`&onlyFiles=1\`/\`&msgId=\` 查转发与文件），用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
+    const text = `请通过 \`context_pull\` 按需拉取「${targetChat.name || targetChat.id}」最近最多 ${maxMsgs} 条对话（先用 \`&limit=${Math.min(20, maxMsgs)}&excludeBots=1\` 聚焦人类讨论，必要时用 \`&before=\` 向前翻页或 \`&onlyFiles=1\`/\`&msgId=\` 查转发与文件），用中文输出一份精炼清晰的只读纪要（仅总结给本人看），请静默完成拉取后直接输出纪要正文，不要输出“我先拉取/拉完了/共拉到 N 条”等工具调用过程说明：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
     return { count: recentMsgs.length, header, text };
   }
   const header = formatImContextBlock({
@@ -204,7 +209,7 @@ export async function buildExternalSummaryPrompt(
     privateReply: true,
     maxRecentChars: Math.max(350, Number(bridge.chats.maxRecentMessageChars) || 280),
   });
-  const text = `请基于上述 <im-context> 中的「${targetChat.name || targetChat.id}」最近 ${recentMsgs.length} 条对话，用中文输出一份精炼清晰的只读纪要（仅总结给本人看）：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
+  const text = `请基于上述 <im-context> 中的「${targetChat.name || targetChat.id}」最近 ${recentMsgs.length} 条对话，用中文输出一份精炼清晰的只读纪要（仅总结给本人看），请直接输出纪要正文，不要输出多余开场白或过程说明：\n1. 核心议题与背景\n2. 已达成结论 / 关键数据\n3. 待办事项、风险阻塞与负责人${extra}`;
   return { count: recentMsgs.length, header, text };
 }
 

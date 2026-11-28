@@ -409,11 +409,10 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     }
   }
 
-  // 1d. 裸回复待处理 OpenMausBot 审批/提问/阻塞卡（多卡提示编号或引用，单卡直接作答）
-  if (isSelfChat && !quotedCard && bridge.pendingCards.size > 1 && !rawText.startsWith('@')) {
+  // 1d. 裸回复待处理 OpenMausBot 审批/提问/阻塞卡（多卡提示编号或引用，单卡直接作答；不劫持连续对话与退出指令）
+  const isCardDecisionText = ((): boolean => {
     const looksLikeMultiSelect = /^\d+(?:\s*[,，、\s]\s*\d+)+$/.test(rawText);
-    const hasQuestionCard = [...bridge.pendingCards.values()].some((c) => c.isQuestion);
-    if (
+    return (
       APPROVE_RE.test(rawText)
       || ALWAYS_RE.test(rawText)
       || DENY_RE.test(rawText)
@@ -421,15 +420,30 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
       || /^[0-9]$/.test(rawText)
       || looksLikeMultiSelect
       || parseChoiceIndex(rawText) !== null
-      || (hasQuestionCard && !SELF_NOTE_PREFIX_RE.test(rawText))
+      || /^(?:答|回答|回复)[:：\s]/i.test(rawText)
+    );
+  })();
+  if (isSelfChat && !quotedCard && bridge.pendingCards.size > 1 && !rawText.startsWith('@') && !BYE_RE.test(rawText)) {
+    const hasQuestionCard = [...bridge.pendingCards.values()].some((c) => c.isQuestion);
+    if (
+      isCardDecisionText
+      || (hasQuestionCard && !SELF_NOTE_PREFIX_RE.test(rawText) && !bridge.isStickyActive())
     ) {
       return replyMultiCardHint(bridge);
     }
   }
   const bareCard = !quotedCard && isSelfChat && bridge.pendingCards.size === 1 ? [...bridge.pendingCards.values()][0] : null;
-  if (bareCard && !rawText.startsWith('@')) {
-    const res = handleCardReply(bareCard, false);
-    if (res) return res;
+  if (bareCard && !rawText.startsWith('@') && !BYE_RE.test(rawText)) {
+    const skipQuestionForSticky = Boolean(
+      bareCard.isQuestion
+      && !isCardDecisionText
+      && bridge.isStickyActive()
+      && (bareCard.threadId !== bridge.focus?.threadId || bridge.lastBotReplyAt > (bareCard.createdAt || 0)),
+    );
+    if (!skipQuestionForSticky) {
+      const res = handleCardReply(bareCard, false);
+      if (res) return res;
+    }
   }
 
   // 1e. 有排队中消息时，允许在自聊裸回复 steer/插队 或 cancel/取消排队

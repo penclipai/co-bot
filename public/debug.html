@@ -31,8 +31,10 @@
     .wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 14px; }
     header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
     h1 { margin: 0; font-size: 18px; }
-    .toolbar { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
-    button, select { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+    button, select { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+    .nowrap { white-space: nowrap; }
+    .detail-cell { max-width: 340px; }
     button:hover, select:hover { border-color: var(--accent); }
     .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
     .card-head h2 { margin: 0; }
@@ -204,7 +206,7 @@
           ombBox.appendChild(badge(`异常: ${deadBots.map((b) => b.displayName || b.name).join('、')} (dead)`, 'err'));
         }
         const waitCount = (omb.bots || []).filter((b) => b.waitingForTeammates).length;
-        addLine(ombBox, '可见 Bot / 群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}${waitCount ? `（${waitCount} 个等待队友）` : ''}`);
+        addLine(ombBox, '可见 Bot / OMB 协作群组', `${omb.bots?.length ?? 0} / ${omb.groups?.length ?? 0}${waitCount ? `（${waitCount} 个等待队友）` : ''}`);
         if (chief?.approvalMode) {
           addLine(ombBox, '主 Bot 审批模式', `${chief.displayName || chief.name} · ${chief.approvalMode}`);
         }
@@ -226,10 +228,13 @@
         addLine(ombBox, '被动@提醒 / 协作者Bot', `${st.bridge.passiveMentionAlert ? '开启' : '关闭'} / ${st.bridge.collaboratorBot || '默认主Bot'}`);
         if (st.bridge.inbox) {
           const inb = st.bridge.inbox;
+          const burstCount = (inb.cards || []).filter((c) => c.kind === 'burst').length;
+          const approvalCount = (inb.cards?.length ?? 0) - burstCount;
+          const burstPart = burstCount > 0 ? ` / 并发 ${burstCount}` : '';
           addLine(
             ombBox,
             '协调收件箱',
-            `共 ${inb.total ?? 0} 项（审批 ${inb.cards?.length ?? 0} / 待发回 ${inb.sendBacks?.length ?? 0} / 草稿 ${inb.drafts?.length ?? 0} / 追问 ${inb.followUps?.length ?? 0} / 委托 ${inb.delegations?.length ?? 0}）`,
+            `共 ${inb.total ?? 0} 项（审批 ${approvalCount}${burstPart} / 待发回 ${inb.sendBacks?.length ?? 0} / 草稿 ${inb.drafts?.length ?? 0} / 追问 ${inb.followUps?.length ?? 0} / 委托 ${inb.delegations?.length ?? 0}）`,
           );
         } else {
           addLine(ombBox, '待确认回发草稿', st.bridge.pendingSendBack ? '等待确认中' : `无（缓存 ${st.bridge.privateDraftsCount ?? 0}）`);
@@ -400,14 +405,17 @@
         const td1 = document.createElement('td');
         td1.textContent = p.name;
         const td2 = document.createElement('td');
+        td2.className = 'nowrap';
         td2.textContent = p.kind;
         const td3 = document.createElement('td');
+        td3.className = 'nowrap';
         if (p.error) {
           td3.appendChild(badge('error', 'err'));
         } else {
           td3.appendChild(badge(p.active ? 'active' : 'inactive', p.active ? 'ok' : 'off'));
         }
         const tdSrc = document.createElement('td');
+        tdSrc.className = 'nowrap';
         const srcCode = document.createElement('code');
         srcCode.textContent = p.source && p.source !== 'builtin' ? p.source.split(/[\\/]/).slice(-2).join('/') : 'builtin';
         tdSrc.appendChild(srcCode);
@@ -417,6 +425,7 @@
         const deps = [...(p.inject || []), ...((p.optionalInject || []).map((x) => `${x}?`))];
         td5.textContent = deps.join(', ') || '-';
         const td6 = document.createElement('td');
+        td6.className = 'detail-cell';
         if (p.error) {
           const errSpan = document.createElement('code');
           errSpan.style.color = 'var(--err)';
@@ -428,6 +437,7 @@
           td6.appendChild(code);
         }
         const tdAct = document.createElement('td');
+        tdAct.className = 'nowrap';
         if (p.reloadable) {
           const reloadBtn = document.createElement('button');
           reloadBtn.type = 'button';
@@ -482,12 +492,15 @@
       for (const ev of list) {
         const tr = document.createElement('tr');
         const td1 = document.createElement('td');
+        td1.className = 'nowrap';
         td1.textContent = new Date(ev.ts).toLocaleTimeString();
         const td2 = document.createElement('td');
+        td2.className = 'nowrap';
         td2.textContent = ev.source || '-';
         const tdChat = document.createElement('td');
         tdChat.textContent = ev.chatId || ev.chatType || '-';
         const td3 = document.createElement('td');
+        td3.className = 'nowrap';
         td3.textContent = ev.type || '-';
         const td4 = document.createElement('td');
         td4.textContent = ev.summary || '-';

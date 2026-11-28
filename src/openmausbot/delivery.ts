@@ -611,15 +611,16 @@ export async function deliverBotReply(
         fs.mkdirSync(bridge.inDir, { recursive: true });
         const mdName = `${fileSafe(shownName) || 'reply'}.md`;
         const mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
-        if (fullScan.redacted) {
-          bridge.securityRedactions += fullScan.totalHits;
+        const mdScan = scanAndRedactOutbound(`${privHead}${proHead}${bodyCore}${delegationTagSuffix}`);
+        if (mdScan.redacted) {
+          bridge.securityRedactions += mdScan.totalHits;
           bridge.emitTelemetry('security_redacted', {
             chatId: targetChatId || bridge.selfChat,
             kind: 'file',
-            summary: `${mdName} count=${fullScan.totalHits} types=${fullScan.hits.map((h) => h.type).join(',')}`,
+            summary: `${mdName} count=${mdScan.totalHits} types=${mdScan.hits.map((h) => h.type).join(',')}`,
           });
         }
-        fs.writeFileSync(mdPath, `${fullScan.text}\n`);
+        fs.writeFileSync(mdPath, `${mdScan.text}\n`);
         await sendOutboundFile(bridge, mdPath, mdName, {
           chatId: targetChatId,
           ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
@@ -670,11 +671,11 @@ export async function deliverBotReply(
     id: firstSentId ?? undefined,
     text: safeFull,
     replyTo: quoteReplyId ?? undefined,
-    senderName: speakerName || botName,
+    senderName: shownSpeaker || shownName,
     botId: speakerBotId || botId,
   });
   bridge.emitTelemetry(proactive ? 'proactive' : 'reply', {
-    botName: speakerName || botName,
+    botName: shownSpeaker || shownName,
     isGroup,
     chatId: targetChatId || null,
     chatType: isExternal ? (chatCtx?.privateReply ? 'self' : chatCtx?.chatType) : 'self',

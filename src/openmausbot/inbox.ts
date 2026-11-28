@@ -214,22 +214,32 @@ export function getCoordinatorInbox(bridge: OpenMausBotBridge): CoordinatorInbox
 }
 
 export function formatCoordinatorInboxLines(inbox: CoordinatorInboxSummary): string[] {
+  const LIMIT = 6;
   const tag = (ref?: number) => (ref ? `\`#${ref}\` ` : '');
   const lines: string[] = [];
-  for (const c of inbox.cards.slice(0, 4)) {
+  let omitted = 0;
+  for (const c of inbox.cards.slice(0, LIMIT)) {
     lines.push(`- ${tag(c.ref)}⏸️ 审批/提问：**${c.botName}** · ${c.title}`);
   }
-  for (const sb of inbox.sendBacks.slice(0, 4)) {
+  omitted += Math.max(0, inbox.cards.length - LIMIT);
+  for (const sb of inbox.sendBacks.slice(0, LIMIT)) {
     lines.push(`- ${tag(sb.ref)}📤 待确认发回「${sb.originName}」：${sb.preview}`);
   }
-  for (const d of inbox.drafts.slice(0, 4)) {
+  omitted += Math.max(0, inbox.sendBacks.length - LIMIT);
+  for (const d of inbox.drafts.slice(0, LIMIT)) {
     lines.push(`- ${tag(d.ref)}📝 私密草稿「${d.originName}」（\`${d.id}\`）：${d.preview}`);
   }
-  for (const fp of inbox.followUps.slice(0, 4)) {
+  omitted += Math.max(0, inbox.drafts.length - LIMIT);
+  for (const fp of inbox.followUps.slice(0, LIMIT)) {
     lines.push(`- ${tag(fp.ref)}💬 等「${fp.chatName}」@${fp.targetName} 回复：${fp.question}`);
   }
-  for (const dl of inbox.delegations.slice(0, 4)) {
+  omitted += Math.max(0, inbox.followUps.length - LIMIT);
+  for (const dl of inbox.delegations.slice(0, LIMIT)) {
     lines.push(`- ${tag(dl.ref)}🤝 C2C 委托「${dl.chatName}」（\`${dl.id}\`）：${dl.question || '处理中'}`);
+  }
+  omitted += Math.max(0, inbox.delegations.length - LIMIT);
+  if (omitted > 0) {
+    lines.push(`- … 另有 ${omitted} 项未展开（发 \`#编号 ...\` 或看 \`/debug\`）`);
   }
   if (lines.length > 0) {
     lines.push('💡 快捷操作：`#编号 1/0/确认/取消` 或 `#编号 改：<新内容>`');
@@ -292,24 +302,48 @@ export async function reconcilePendingCards(bridge: OpenMausBotBridge): Promise<
   const msgById = new Map<string, OmbMessage>();
   const msgByReqId = new Map<string, OmbMessage>();
   const msgByBurstId = new Map<string, OmbMessage>();
+  const countByThread = new Map<string, number>();
+  const jobByThread = new Map<string, { state?: string; needsInput?: unknown[]; conversation?: unknown } | null>();
   for (const tid of threadIds) {
     try {
-      const res = await bridge.client.getMessages(tid, 20);
-      for (const m of res?.messages ?? []) {
+      const res = await bridge.client.getMessages(tid, 50);
+      const msgs = res?.messages ?? [];
+      countByThread.set(tid, msgs.length);
+      for (const m of msgs) {
         if (m.id) msgById.set(m.id, m);
         if (m.card?.requestId) msgByReqId.set(m.card.requestId, m);
         if (m.burst?.burstId) msgByBurstId.set(m.burst.burstId, m);
       }
     } catch { /* 对账失败时保留本地卡片由人工响应时再清理 */ }
+    if (typeof bridge.client?.getJob === 'function') {
+      try {
+        const job = await bridge.client.getJob(tid, { scope: 'turn' });
+        if (job) jobByThread.set(tid, job as { state?: string; needsInput?: unknown[]; conversation?: unknown });
+      } catch { /* ignore */ }
+    }
   }
   let removed = 0;
   for (const [k, card] of bridge.pendingCards) {
     const matched = (card.ombMsgId ? msgById.get(card.ombMsgId) : undefined)
       ?? (card.requestId ? msgByReqId.get(card.requestId) : undefined)
       ?? (card.burstId ? msgByBurstId.get(card.burstId) : undefined);
-    if (isOmbCardMessageResolved(matched)) {
+    const job = jobByThread.get(card.threadId);
+    const jobIdle = Boolean(
+      job
+      && ['idle', 'completed', 'failed'].includes(String(job.state || ''))
+      && (!Array.isArray(job.needsInput) || job.needsInput.length === 0),
+    );
+    const missingButScrolledIdle = Boolean(
+      !matched
+      && jobIdle
+      && (card.cardKind === 'burst' || (countByThread.get(card.threadId) ?? 0) >= 50 || Boolean(job?.conversation)),
+    );
+    if (isOmbCardMessageResolved(matched) || (matched && jobIdle) || missingButScrolledIdle) {
       recordClosedInboxRef(bridge, card.inboxRef, card.title || '审批/提问卡');
       bridge.pendingCards.delete(k);
+      if (card.requestId) bridge.deliveredCards.delete(card.requestId);
+      if (card.burstId) bridge.deliveredCards.delete(`burst:${card.burstId}`);
+      if (card.ombMsgId) bridge.deliveredCards.delete(card.ombMsgId);
       removed += 1;
     }
   }

@@ -237,7 +237,9 @@ export function createTurnTracker(
 
   const pushProgress = async (force = false): Promise<void> => {
     if (silentProgress) return;
-    if (settled || !latestActivity || latestActivity === lastSentActivity || progressCount >= bridge.maxProgressUpdates) return;
+    if (settled || !latestActivity || progressCount >= bridge.maxProgressUpdates) return;
+    const repeatedActivity = latestActivity === lastSentActivity;
+    if (repeatedActivity && !lastProgressAt) return;
     const now = bridge.now();
     if (!force && now - startedAt < bridge.progressDelayMs) return;
     if (lastProgressAt && now - lastProgressAt < bridge.progressIntervalMs) return;
@@ -247,17 +249,22 @@ export function createTurnTracker(
     progressCount += 1;
     const elapsed = Math.max(1, Math.round((now - startedAt) / 1000));
     const who = bridge.botPrefix(botId, botName, { isGroup });
-    const progressText = `${latestActivity}（已 ${elapsed}秒）`;
+    const progressText = repeatedActivity
+      ? `⏳ 仍在处理中（已 ${elapsed}秒）…`
+      : `${latestActivity}（已 ${elapsed}秒）`;
     const targetChatId = chatCtx?.replyChatId || bridge.selfChat;
     await enqueueEmit(() => bridge.say(who ? attachBotBadge(who, progressText) : progressText, {
       botId, botName, threadId, ...(isGroup ? { isGroup: true } : {}), ...(targetChatId ? { targetChatId } : {}),
     }));
+    if (!settled && progressCount < bridge.maxProgressUpdates) {
+      scheduleProgress();
+    }
   };
 
   const scheduleProgress = (): void => {
     if (silentProgress) return;
     if (settled || progressTimer || progressCount >= bridge.maxProgressUpdates || bridge.progressDelayMs <= 0) return;
-    if (!latestActivity || latestActivity === lastSentActivity) return;
+    if (!latestActivity || (latestActivity === lastSentActivity && !lastProgressAt)) return;
     const now = bridge.now();
     const untilDelay = Math.max(0, startedAt + bridge.progressDelayMs - now);
     const untilInterval = lastProgressAt ? Math.max(0, lastProgressAt + bridge.progressIntervalMs - now) : 0;
@@ -673,14 +680,14 @@ export function createTurnTracker(
         const mid = msg.id ? String(msg.id) : null;
         if (!trimmed || (mid && (bridge.deliveredOmbIds.has(mid) || deliveredIntermediateIds.has(mid)))) return;
         if (pendingIntermediates.some((m) => mid && String(m.id) === mid) || heldIntermediates.some((m) => mid && String(m.id) === mid)) return;
+        if (msg.kind !== 'widget' && (silentProgress || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles))) {
+          heldIntermediates.push(msg);
+          return;
+        }
         lastHumanTextAt = bridge.now();
         if (progressTimer) {
           clearTimeout(progressTimer);
           progressTimer = null;
-        }
-        if (msg.kind !== 'widget' && (silentProgress || (bridge.maxIntermediateBubbles > 0 && intermediateBubbleCount >= bridge.maxIntermediateBubbles))) {
-          heldIntermediates.push(msg);
-          return;
         }
         pendingIntermediates.push(msg);
         const delayMs = Number(bridge.intermediateCoalesceMs) || 0;
