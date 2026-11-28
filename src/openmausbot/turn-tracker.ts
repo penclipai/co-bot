@@ -21,17 +21,21 @@ const FINAL_JOB_STATES = new Set(['completed', 'idle', 'failed', 'stalled']);
 const isDeliverableTextKind = (kind: unknown): boolean => kind === 'text' || kind === 'widget';
 const deliverableTextOf = (m: OmbMessage): string => (m.kind === 'widget' ? extractWidgetFallbackText(m) : String(m.text ?? '').trim());
 
-function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, sendId: string | null): OmbMessage[] {
-  const uIdx = messages.findLastIndex(
-    (m) => m.role === 'user' && Boolean((reqMsgId && m.id === reqMsgId) || (sendId && m.sendId === sendId)),
+function collectTurnMessages(messages: OmbMessage[], reqMsgIds: Set<string>, sendIds: Set<string>): OmbMessage[] {
+  const isTrackedUser = (m: OmbMessage): boolean => (
+    m.role === 'user'
+    && Boolean((m.id && reqMsgIds.has(String(m.id))) || (m.sendId && sendIds.has(String(m.sendId))))
   );
+  const uIdx = messages.findIndex(isTrackedUser);
   let endIdx = messages.length;
   if (uIdx >= 0) {
-    const nextUserIdx = messages.findIndex((m, idx) => idx > uIdx && m.role === 'user');
+    const nextUserIdx = messages.findIndex((m, idx) => idx > uIdx && m.role === 'user' && !isTrackedUser(m));
     if (nextUserIdx >= 0) endIdx = nextUserIdx;
   }
   const windowBots = uIdx >= 0 ? messages.slice(uIdx + 1, endIdx).filter((m) => m.role === 'bot') : [];
-  const direct = reqMsgId ? messages.filter((m) => m.role === 'bot' && m.requestMessageId === reqMsgId) : [];
+  const direct = reqMsgIds.size
+    ? messages.filter((m) => m.role === 'bot' && m.requestMessageId && reqMsgIds.has(String(m.requestMessageId)))
+    : [];
   if (!direct.length) return windowBots;
 
   const turnIds = new Set<string>();
@@ -42,7 +46,7 @@ function collectTurnMessages(messages: OmbMessage[], reqMsgId: string | null, se
   const seen = new Set<OmbMessage>(direct);
   for (const m of messages) {
     if (m.role !== 'bot' || seen.has(m)) continue;
-    if (m.requestMessageId && reqMsgId && m.requestMessageId !== reqMsgId) continue;
+    if (m.requestMessageId && reqMsgIds.size && !reqMsgIds.has(String(m.requestMessageId))) continue;
     if ((m.sentInTurn && turnIds.has(String(m.sentInTurn))) || (m.turnId && turnIds.has(String(m.turnId)))) {
       seen.add(m);
     }
@@ -139,6 +143,8 @@ export function createTurnTracker(
   const deliveredIntermediateIds = new Set<string>();
   const pendingIntermediates: OmbMessage[] = [];
   const heldIntermediates: OmbMessage[] = [];
+  const trackedReqIds = new Set<string>(reqMsgId ? [String(reqMsgId)] : []);
+  const trackedSendIds = new Set<string>(sendId ? [String(sendId)] : []);
   const compactCtx = compactChatCtx(chatCtx);
 
   if (bridge.inFlightTurns) {
@@ -449,7 +455,7 @@ export function createTurnTracker(
 
       let messages: OmbMessage[];
       try {
-        const res = await bridge.client.getMessages(threadId, 25);
+        const res = await bridge.client.getMessages(threadId, 80);
         messages = Array.isArray(res.messages) ? res.messages : [];
       } catch (e) {
         if (settled || stoppedByUser) return;
@@ -461,7 +467,7 @@ export function createTurnTracker(
 
       if (settled || stoppedByUser) return;
 
-      const matched = collectTurnMessages(messages, reqMsgId, sendId);
+      const matched = collectTurnMessages(messages, trackedReqIds, trackedSendIds);
 
       const pendingMsg = matched.find((m) => messageNeedsInput(m));
       const earlyTexts = matched.filter((m) => isDeliverableTextKind(m.kind));
@@ -487,10 +493,9 @@ export function createTurnTracker(
       if (pendingMsg && awaitsTurnResume) {
         waitingForInput = true;
         await emitChain.catch(() => {});
-        if (stoppedByUser) return;
+        if (settled || stoppedByUser) return;
         await emitCard(botId, botName, threadId, pendingMsg, { isGroup, chatCtx });
-        if (!settled && !stoppedByUser) {
-          bridge.activeTurns.set(key, turn);
+        if (!settled && !stoppedByUser && bridge.activeTurns.get(key) === turn) {
           startWatcher();
         }
         return;
@@ -650,9 +655,14 @@ export function createTurnTracker(
     isGroup,
     chatCtx: compactCtx,
     sawBusy: false,
+    addSteeredRequest: (steeredReqId: string | null, steeredSendId: string | null = null) => {
+      if (steeredReqId) trackedReqIds.add(String(steeredReqId));
+      if (steeredSendId) trackedSendIds.add(String(steeredSendId));
+      touchActivity();
+    },
     onMessage: (msg: OmbMessage) => {
       if (settled || !msg || msg.role !== 'bot') return;
-      if (msg.requestMessageId && reqMsgId && msg.requestMessageId !== reqMsgId) return;
+      if (msg.requestMessageId && trackedReqIds.size > 0 && !trackedReqIds.has(String(msg.requestMessageId))) return;
       touchActivity();
       waitingForInput = false;
       if (msg.kind === 'digest') return;

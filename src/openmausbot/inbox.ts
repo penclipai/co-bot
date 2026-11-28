@@ -354,13 +354,22 @@ export async function reconcilePendingCards(bridge: OpenMausBotBridge): Promise<
 /** 当多类或多条待办同时激活导致裸回复语义碰撞时，输出精确的 `#编号` 消歧指引。 */
 export async function replyDisambiguationHint(
   bridge: OpenMausBotBridge,
-  reason: 'multi_sendback' | 'sendback_card_collision' | 'task_card_collision' | 'multi_card',
+  reason: 'multi_sendback' | 'multi_draft' | 'sendback_card_collision' | 'task_card_collision' | 'multi_card',
 ): Promise<string | null> {
   const lines: string[] = [];
   for (const sb of bridge.pendingSendBacks.values()) {
     const ref = sb.inboxRef ?? sb.draft?.inboxRef;
     const tag = ref ? `\`#${ref}\` ` : '';
     lines.push(`- ${tag}📤 待发回「${sb.draft?.originChatName || sb.draft?.originChatId || ''}」：${clip(sb.text.replace(/\s+/g, ' '), 36)}`);
+  }
+  if (reason === 'multi_draft') {
+    const seen = new Set<string>();
+    for (const d of bridge.privateDrafts.values()) {
+      if (!d?.id || seen.has(d.id)) continue;
+      seen.add(d.id);
+      const tag = d.inboxRef ? `\`#${d.inboxRef}\` ` : '';
+      lines.push(`- ${tag}📝 私密草稿「${d.originChatName || d.originChatId}」：${clip(d.rawText.replace(/\s+/g, ' '), 36)}`);
+    }
   }
   for (const c of bridge.pendingCards.values()) {
     const tag = c.inboxRef ? `\`#${c.inboxRef}\` ` : '';
@@ -372,6 +381,7 @@ export async function replyDisambiguationHint(
   }
   const titleMap: Record<typeof reason, string> = {
     multi_sendback: '⚠️ 当前有多个待确认发回草稿，请指定编号或引用对应气泡：',
+    multi_draft: '⚠️ 当前有多条待发私密草稿，请指定编号或引用对应气泡：',
     sendback_card_collision: '⚠️ 当前同时有**待发回草稿**与**待处理审批卡**，为防误操作已暂停裸回复：',
     task_card_collision: '⚠️ 当前同时有**待选会话列表**与**待处理审批卡**，为防误操作已暂停裸数字：',
     multi_card: '⚠️ 当前有多张待处理审批/提问卡，请指定编号或引用对应气泡：',

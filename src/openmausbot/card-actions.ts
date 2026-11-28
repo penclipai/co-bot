@@ -138,6 +138,7 @@ export async function handleBurstCardAction(
         chatCtx: card.chatCtx ?? null,
         startedAt: bridge.now(),
       });
+      bridge.saveState({ immediate: true });
       await bridge.say(withBadge(who, '✅ 已启动并发拆分任务，完成后会自动汇总回复。'), route);
     } else {
       await bridge.say(withBadge(who, '❎ 已取消该并发拆分任务。'), route);

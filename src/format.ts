@@ -91,7 +91,53 @@ export function hardBreaks(md: unknown): string {
   return lines.join('\n');
 }
 
-/** 截断 Markdown：尽量在换行处断开；若断在代码块中间则补上闭合围栏。 */
+interface OpenTableState {
+  headerLine: string;
+  sepLine: string;
+  bodyRows: number;
+}
+
+const TABLE_HEAD_RE = /^\s*\|.*\|\s*$/;
+const TABLE_SEP_RE = /^\s*\|?\s*:?-{2,}[-|:\s]*$/;
+
+function analyzeTrailingMarkdown(piece: string): {
+  openFence: OpenFenceState | null;
+  openTable: OpenTableState | null;
+  endsWithTableHeaderOnly: boolean;
+} {
+  const lines = piece.split('\n');
+  let openFence: OpenFenceState | null = null;
+  let openTable: OpenTableState | null = null;
+  let endsWithTableHeaderOnly = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const f = nextFenceState(line, openFence);
+    openFence = f.openFence;
+    if (f.isFenceLine || openFence) {
+      openTable = null;
+      endsWithTableHeaderOnly = false;
+      continue;
+    }
+    if (!openTable && i + 1 < lines.length && TABLE_HEAD_RE.test(line) && TABLE_SEP_RE.test(lines[i + 1])) {
+      openTable = { headerLine: line, sepLine: lines[i + 1], bodyRows: 0 };
+      endsWithTableHeaderOnly = false;
+      i += 1;
+      continue;
+    }
+    if (!openTable && i === lines.length - 1 && TABLE_HEAD_RE.test(line)) {
+      endsWithTableHeaderOnly = true;
+      continue;
+    }
+    endsWithTableHeaderOnly = false;
+    if (openTable) {
+      if (/^\s*\|/.test(line)) openTable.bodyRows += 1;
+      else openTable = null;
+    }
+  }
+  return { openFence, openTable, endsWithTableHeaderOnly };
+}
+
+/** 截断 Markdown：尽量在换行处断开；若断在代码块中间则补上闭合围栏，并清理末尾孤立标题或空表头。 */
 export function mdClip(text: unknown, n: number): { text: string; cut: boolean } {
   const t = String(text ?? '');
   const limit = Number(n);
@@ -104,7 +150,28 @@ export function mdClip(text: unknown, n: number): { text: string; cut: boolean }
   for (const line of out.split('\n')) {
     openFence = nextFenceState(line, openFence).openFence;
   }
-  if (openFence) out += `\n${openFence.marker}`;
+  if (openFence) {
+    out += `\n${openFence.marker}`;
+  } else {
+    for (let pass = 0; pass < 3; pass++) {
+      const lines = out.split('\n');
+      const last = lines.at(-1) ?? '';
+      const prev = lines.at(-2) ?? '';
+      if (lines.length > 2 && TABLE_HEAD_RE.test(prev) && TABLE_SEP_RE.test(last) && lines.slice(0, -2).some((l) => l.trim())) {
+        out = lines.slice(0, -2).join('\n').trimEnd();
+        continue;
+      }
+      if (lines.length > 1 && TABLE_HEAD_RE.test(last) && lines.slice(0, -1).some((l) => l.trim())) {
+        out = lines.slice(0, -1).join('\n').trimEnd();
+        continue;
+      }
+      if (lines.length > 1 && /^\s*#{1,6}\s+/.test(last) && lines.slice(0, -1).some((l) => l.trim())) {
+        out = lines.slice(0, -1).join('\n').trimEnd();
+        continue;
+      }
+      break;
+    }
+  }
   return { text: out + '\n\n…', cut: true };
 }
 
@@ -146,16 +213,42 @@ export function mdSplit(text: unknown, maxChunkChars: number): string[] {
     let piece = rem.slice(0, at).trimEnd();
     let rest = rem.slice(at).trimStart();
 
-    let openFence: OpenFenceState | null = null;
-    for (const line of piece.split('\n')) {
-      openFence = nextFenceState(line, openFence).openFence;
-    }
+    const { openFence, openTable, endsWithTableHeaderOnly } = analyzeTrailingMarkdown(piece);
 
     if (openFence && rest) {
       piece = `${piece}\n${openFence.marker}`;
       const reopened = `${openFence.line}\n${rest}`;
       // 确保每轮严格缩短剩余文本，避免围栏行过长导致死循环
       if (reopened.length < rem.length) rest = reopened;
+    } else if (!openFence && rest) {
+      const restFirstLine = rest.split('\n', 1)[0] ?? '';
+      if (endsWithTableHeaderOnly && TABLE_SEP_RE.test(restFirstLine)) {
+        const pieceLines = piece.split('\n');
+        const headLine = pieceLines.pop();
+        const trimmedPiece = pieceLines.join('\n').trimEnd();
+        if (headLine && trimmedPiece.trim()) {
+          const reopened = `${headLine}\n${rest}`;
+          if (reopened.length < rem.length) {
+            piece = trimmedPiece;
+            rest = reopened;
+          }
+        }
+      } else if (openTable && /^\s*\|/.test(restFirstLine)) {
+        if (openTable.bodyRows === 0) {
+          const pieceLines = piece.split('\n');
+          const withoutEmptyTable = pieceLines.slice(0, -2).join('\n').trimEnd();
+          if (withoutEmptyTable.trim()) {
+            const reopened = `${openTable.headerLine}\n${openTable.sepLine}\n${rest}`;
+            if (reopened.length < rem.length) {
+              piece = withoutEmptyTable;
+              rest = reopened;
+            }
+          }
+        } else {
+          const reopened = `${openTable.headerLine}\n${openTable.sepLine}\n${rest}`;
+          if (reopened.length < rem.length) rest = reopened;
+        }
+      }
     }
 
     if (piece.trim()) chunks.push(piece.trim());

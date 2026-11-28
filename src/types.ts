@@ -8,6 +8,7 @@ export type CollaboratorPolicy = 'confirm_in_self' | 'auto_readonly';
 export type ChatsMode = 'owner_everywhere' | 'self_only';
 export type ExternalReplyMode = 'inline' | 'draft_first';
 export type SanitizeMentionsMode = 'all' | 'dangerous' | 'none';
+export type LongReplyFormat = 'auto' | 'html' | 'md' | 'both';
 
 export interface LoggerLike {
   log?: (...args: unknown[]) => void;
@@ -49,6 +50,7 @@ export interface SelfChatConfig {
   markdown: boolean;
   resultChars: number;
   softSplitChars: number;
+  longReplyFormat: LongReplyFormat;
   followUpWindowMs: number;
   hideChiefPrefix: boolean;
   imageBatchMs: number;

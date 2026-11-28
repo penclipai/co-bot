@@ -368,6 +368,33 @@ export async function handleInboundEvent(bridge: OpenMausBotBridge, ev: InboundE
     bridge.lastExpiredSendBackAt = 0;
     return bridge.say(`⌛ 待发回草稿已超时，请引用私密草稿重新发送 \`${bridge.trigger} sendback\`。`);
   }
+  if (
+    isSelfChat
+    && !rawText.startsWith('@')
+    && !quotedRoute
+    && !bridge.pendingSendBacks.size
+    && /^(?:确认发送|直接发送|直接发|发回|sendback)$/i.test(rawText)
+  ) {
+    const cutoff = bridge.now() - (Number(bridge.draftTtlMs) || 30 * 60_000);
+    const seen = new Set<string>();
+    const uniqueDrafts = [];
+    for (const d of bridge.privateDrafts.values()) {
+      if (!d?.id || seen.has(d.id) || (d.createdAt || 0) < cutoff) continue;
+      seen.add(d.id);
+      uniqueDrafts.push(d);
+    }
+    if (uniqueDrafts.length > 0) {
+      if (bridge.pendingCards.size >= 1) {
+        return replyDisambiguationHint(bridge, 'sendback_card_collision');
+      }
+      if (uniqueDrafts.length > 1) {
+        return replyDisambiguationHint(bridge, 'multi_draft');
+      }
+      return /^(?:确认发送|直接发送|直接发)$/i.test(rawText)
+        ? confirmDraftDirect(bridge, uniqueDrafts[0])
+        : bridge.requestSendBack(uniqueDrafts[0]);
+    }
+  }
 
   // 1c. @bot task 列表待选择序号（仅自聊，支持 0/取消 及与 pendingCards 的碰撞保护）
   const taskPick = bridge.pendingTaskPick;

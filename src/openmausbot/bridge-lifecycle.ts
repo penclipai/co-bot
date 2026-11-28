@@ -57,6 +57,13 @@ export function buildBridgeStatus(bridge: OpenMausBotBridge) {
     chatId: t.chatCtx?.originChatId || bridge.selfChat || '',
     startedAt: bridge.inFlightTurns.get(key)?.startedAt ?? null,
   }));
+  const activeBurstsList = [...bridge.activeBursts.values()].map((b) => ({
+    burstId: b.burstId,
+    botId: b.botId,
+    botName: bridge.displayBotName(b.botId, b.botName, { isGroup: Boolean(b.isGroup) }),
+    threadId: b.threadId,
+    startedAt: b.startedAt,
+  }));
   const inbox = bridge.getCoordinatorInbox();
   const uniqueDrafts = new Set<string>();
   for (const d of bridge.privateDrafts.values()) if (d?.id) uniqueDrafts.add(d.id);
@@ -75,6 +82,8 @@ export function buildBridgeStatus(bridge: OpenMausBotBridge) {
     collaboratorBot: String(bridge.chats.collaboratorBot || ''),
     activeTurns: bridge.activeTurns.size,
     activeTurnsList,
+    activeBursts: bridge.activeBursts.size,
+    activeBurstsList,
     inFlightTurns: bridge.inFlightTurns.size,
     queuedCount,
     queuedItems,

@@ -96,6 +96,7 @@ export async function handleStatusCommand(
   if (doc?.problems?.length) headerParts.push(`⚠️ Doctor ${doc.problems.length} 项异常`);
   if (h.box && h.box !== 'off') headerParts.push(`隔离:${h.box}`);
   if (bridge.activeTurns.size > 0) headerParts.push(`${bridge.activeTurns.size} 任务中`);
+  if (bridge.activeBursts?.size > 0) headerParts.push(`并发 ${bridge.activeBursts.size}`);
   let queuedTotal = 0;
   for (const arr of bridge.queuedByThread.values()) queuedTotal += arr.length;
   if (queuedTotal > 0) headerParts.push(`排队 ${queuedTotal}`);
@@ -432,6 +433,10 @@ export async function handleGovernanceCommand(
         const d = bridge.privateDrafts.get(targetRef);
         if (d) {
           await discardPrivateDraft(bridge, d);
+          return true;
+        }
+        if (rawRef && !mapped && /^(?:#\d+|draft_[A-Za-z0-9_-]+)$/i.test(rawRef)) {
+          await sensSink.say(`⚠️ 未找到或已过期的草稿或发回确认 \`${rawRef}\`。`);
           return true;
         }
       }

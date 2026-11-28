@@ -8,6 +8,7 @@ import type { OpenMausBotBridge } from './bridge.ts';
 import { ensureInboxRefs, pruneExpiredInboxItems } from './inbox.ts';
 import { rememberBounded } from './mentions.ts';
 import type {
+  ActiveBurstWatch,
   BridgeFocus,
   ChatThreadEntry,
   InFlightTurnMeta,
@@ -37,6 +38,7 @@ interface BridgeStateFile {
   selfThreads?: Array<[string, BridgeFocus]>;
   chatPolicy?: { mode?: string | null; muted?: string[]; allowed?: string[] };
   inFlightTurns?: Array<[string, InFlightTurnMeta]>;
+  activeBursts?: Array<[string, ActiveBurstWatch]>;
   privateDrafts?: PrivateDraft[];
   lastPrivateDraftId?: string | null;
   pendingFollowUps?: PendingFollowUp[];
@@ -156,6 +158,17 @@ export function loadBridgeState(bridge: OpenMausBotBridge): void {
         }
       }
     }
+    const burstCutoff = bridge.now() - 2 * 60 * 60_000;
+    if (Array.isArray(raw?.activeBursts)) {
+      for (const [k, v] of raw.activeBursts.slice(-10)) {
+        if (k && v?.burstId && v?.botId && v?.threadId && (!v.startedAt || v.startedAt >= burstCutoff)) {
+          bridge.activeBursts.set(String(k), {
+            ...v,
+            botName: bridge.displayBotName(v.botId, v.botName, { isGroup: Boolean(v.isGroup) }),
+          });
+        }
+      }
+    }
     const draftTtl = Number(bridge.draftTtlMs) || 30 * 60_000;
     bridge.draftStore.hydrateSnapshot(raw?.privateDrafts, raw?.pendingSendBacks, bridge.now(), draftTtl);
     if (raw?.lastPrivateDraftId && bridge.privateDrafts.has(String(raw.lastPrivateDraftId))) {
@@ -229,6 +242,7 @@ function writeBridgeStateNow(bridge: OpenMausBotBridge): void {
         allowed: [...bridge.chatPolicyOverrides.allowed],
       },
       inFlightTurns: [...bridge.inFlightTurns.entries()].slice(-20),
+      activeBursts: [...bridge.activeBursts.entries()].slice(-10),
       privateDrafts: bridge.draftStore.exportSnapshot(now, draftTtl),
       lastPrivateDraftId: bridge.lastPrivateDraftId || null,
       pendingFollowUps: [...bridge.pendingFollowUps.values()]

@@ -100,7 +100,14 @@ export class WebServer {
       params = url.pathname.match(x.pattern);
       return !!params;
     });
-    if (!r) return send(res, 404, { error: 'not found' });
+    if (!r) {
+      if (reqMethod === 'GET' && url.pathname === '/favicon.ico') {
+        res.writeHead(204, { 'cache-control': 'public, max-age=86400' });
+        res.end();
+        return;
+      }
+      return send(res, 404, { error: 'not found' });
+    }
 
     let body: Record<string, unknown> = {};
     if (req.method !== 'GET' && req.method !== 'HEAD') {

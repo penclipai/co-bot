@@ -37,6 +37,7 @@ export const defaults: AppConfig = {
     markdown: true,
     resultChars: 1500,
     softSplitChars: 2800,
+    longReplyFormat: 'auto',
     followUpWindowMs: 120_000,
     hideChiefPrefix: false,
     imageBatchMs: 1500,
@@ -192,6 +193,11 @@ export function validateConfig(rawConfig: unknown = {}): { ok: boolean; errors: 
   if (selfChat?.botName !== undefined) {
     if (typeof selfChat.botName !== 'string' || !selfChat.botName.trim()) {
       errors.push('selfChat.botName 必须为非空字符串');
+    }
+  }
+  if (selfChat?.longReplyFormat !== undefined) {
+    if (!['auto', 'html', 'md', 'both'].includes(String(selfChat.longReplyFormat))) {
+      errors.push(`selfChat.longReplyFormat 必须为 auto / html / md / both，当前为「${String(selfChat.longReplyFormat)}」`);
     }
   }
 

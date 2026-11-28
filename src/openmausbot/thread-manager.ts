@@ -136,10 +136,16 @@ export async function refreshMultiBot(
         if (item.threadId) byThread.set(item.threadId, entry);
         if (item.mainThreadId) byThread.set(item.mainThreadId, entry);
         for (const t of item.tasks ?? []) {
-          if (t?.threadId) byThread.set(t.threadId, { ...entry, threadId: t.threadId });
+          if (t?.threadId) {
+            byThread.set(t.threadId, { ...entry, threadId: t.threadId });
+            if (t.openedBy?.burstId) {
+              bridge.burstChildThreads.set(t.threadId, String(t.openedBy.burstId));
+            }
+          }
         }
       }
       trimMapCap(byThread, 500);
+      trimMapCap(bridge.burstChildThreads, 500);
     };
     indexEntities(bots, bridge.botById, bridge.botByThread, false);
     indexEntities(groups, bridge.groupById, bridge.groupByThread, true);
@@ -176,6 +182,12 @@ export function setSelfThread(bridge: OpenMausBotBridge, targetBot: OmbTargetBot
   });
   trimMapCap(bridge.selfThreads, 100);
   bridge.saveState();
+}
+
+/** 判断 threadId 是否为 `/burst` 拆分子任务工作线程。 */
+export function isBurstChildThread(bridge: OpenMausBotBridge, threadId?: string | null): boolean {
+  if (!threadId) return false;
+  return bridge.burstChildThreads.has(String(threadId));
 }
 
 export function isExternalThread(bridge: OpenMausBotBridge, threadId?: string | null): boolean {

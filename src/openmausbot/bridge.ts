@@ -8,7 +8,7 @@ import { SharedContextManager } from '../core/shared-context.ts';
 import { clip } from '../format.ts';
 import type {
   ChannelAction, ChannelCapabilities, ChatType, ChatsConfig, ChatsMode,
-  InboundAttachment, InboundEvent, ProjectConfig, ProjectRef, QuietHoursConfig, TelemetryEvent,
+  InboundAttachment, InboundEvent, LongReplyFormat, ProjectConfig, ProjectRef, QuietHoursConfig, TelemetryEvent,
 } from '../types.ts';
 import { buildBridgeStatus, startBridgeLifecycle, stopBridgeLifecycle, syncBridgeQuietTimer } from './bridge-lifecycle.ts';
 import { extractCardInfo } from './cards.ts';
@@ -90,6 +90,7 @@ export class OpenMausBotBridge {
   outboundBufferTtlMs: number;
   resultChars: number;
   softSplitChars: number;
+  longReplyFormat: LongReplyFormat;
   followUpWindowMs: number;
   hideChiefPrefix: boolean;
   imageBatchMs: number;
@@ -121,7 +122,9 @@ export class OpenMausBotBridge {
   pendingCards = new Map<string, PendingCard>();
   activeTurns = new Map<string, TurnTrackerHandle>();
   activeBursts = new Map<string, ActiveBurstWatch>();
+  burstChildThreads = new Map<string, string>();
   pendingThreads = new Set<string>();
+  pendingThreadCounts = new Map<string, number>();
   queuedByThread = new Map<string, QueuedTurnEntry[]>();
   steeredQueue = new Map<string, QueuedTurnEntry>();
   pendingTaskPick: PendingTaskPick | null = null;
@@ -209,6 +212,7 @@ export class OpenMausBotBridge {
     outboundBufferTtlMs = 5 * 60_000,
     resultChars = 1500,
     softSplitChars,
+    longReplyFormat = 'auto',
     followUpWindowMs = 120_000,
     hideChiefPrefix = false,
     imageBatchMs = 1500,
@@ -260,6 +264,7 @@ export class OpenMausBotBridge {
     this.softSplitChars = softSplitChars !== undefined
       ? Number(softSplitChars)
       : (this.resultChars >= 1000 ? 2800 : this.resultChars);
+    this.longReplyFormat = (['auto', 'html', 'md', 'both'].includes(String(longReplyFormat)) ? longReplyFormat : 'auto') as LongReplyFormat;
     this.followUpWindowMs = followUpWindowMs;
     this.hideChiefPrefix = hideChiefPrefix;
     this.imageBatchMs = imageBatchMs;
@@ -388,6 +393,25 @@ export class OpenMausBotBridge {
     }
     const id = val.id || val.draft?.id || 'default';
     this.draftStore.setConfirmingFromEntry(id, { ...val, id });
+  }
+
+  acquirePendingThread(threadId: string): void {
+    const tid = String(threadId || '');
+    if (!tid) return;
+    this.pendingThreadCounts.set(tid, (this.pendingThreadCounts.get(tid) || 0) + 1);
+    this.pendingThreads.add(tid);
+  }
+
+  releasePendingThread(threadId: string): void {
+    const tid = String(threadId || '');
+    if (!tid) return;
+    const next = (this.pendingThreadCounts.get(tid) || 0) - 1;
+    if (next > 0) {
+      this.pendingThreadCounts.set(tid, next);
+      return;
+    }
+    this.pendingThreadCounts.delete(tid);
+    this.pendingThreads.delete(tid);
   }
 
   clearPickers(): void {

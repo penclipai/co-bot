@@ -163,7 +163,7 @@ export async function collectBotTasks(
   const { bots = [], groups = [] } = await getCachedBotRoster(bridge, { force: true });
   const isGroup = Boolean(target.isGroup);
   const fresh = (isGroup ? groups.find((g) => g.id === target.id) : bots.find((b) => b.id === target.id)) ?? target;
-  const list = Array.isArray(fresh.tasks) ? [...fresh.tasks] : [];
+  const list = (Array.isArray(fresh.tasks) ? [...fresh.tasks] : []).filter((t) => !t?.openedBy?.burstId);
   list.sort((a, b) => (b.updatedAt ?? b.lastThreadOrderAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.lastThreadOrderAt ?? a.createdAt ?? 0));
   const top = list.slice(0, 5);
   return { fresh, top };
@@ -384,20 +384,22 @@ export async function dispatchToBot(
   };
 
   let receipt: { queued?: boolean; queueId?: string; blockedBy?: string; steered?: boolean; message?: OmbMessage };
-  bridge.pendingThreads.add(threadId);
+  let acquiredThreadId = threadId;
+  bridge.acquirePendingThread(acquiredThreadId);
   try {
     try {
       receipt = await sendReq(threadId, prepared);
     } catch (e) {
       const err = e as OmbHttpError;
       if (isExternal && err?.status === 404 && ctxInfo.originChatId) {
-        bridge.pendingThreads.delete(threadId);
+        bridge.releasePendingThread(acquiredThreadId);
         bridge.threadInjectedScope.delete(threadId);
         bridge.chatThreads.delete(`${ctxInfo.originChatId}:${bot.id}`);
         const refreshed = await bridge.ensureChatThread(ctxInfo.originChatId, ctxInfo.chatType, ctxInfo.chatName || '', bot);
         threadId = refreshed.threadId;
         if (!skipScope && !includeScope) prepared = buildOutbound(true);
-        bridge.pendingThreads.add(threadId);
+        acquiredThreadId = threadId;
+        bridge.acquirePendingThread(acquiredThreadId);
         receipt = await sendReq(threadId, prepared);
       } else {
         throw e;
@@ -410,7 +412,7 @@ export async function dispatchToBot(
       : '';
     return bridge.say(`${errBanner}❌ 发送给 **${shownName}** 失败：${formatOmbError(e)}`, errTarget ? { targetChatId: errTarget } : null);
   } finally {
-    bridge.pendingThreads.delete(threadId);
+    bridge.releasePendingThread(acquiredThreadId);
   }
 
   if (!skipScope) {
@@ -470,6 +472,11 @@ export async function dispatchToBot(
   if (reqMsgId) rememberBounded(bridge.ownReqIds, reqMsgId);
 
   if (receipt?.steered === true && alreadyTracking) {
+    for (const activeTurn of bridge.activeTurns.values()) {
+      if (activeTurn.threadId === threadId) {
+        activeTurn.addSteeredRequest?.(reqMsgId, sendId);
+      }
+    }
     if (!isExternal || ctxInfo.controlChatId === bridge.selfChat) {
       const ctrlChat = bridge.resolveControlChatId(ctxInfo);
       const ctrlBanner = ctxInfo.steerBanner || formatOriginBanner(ctxInfo, ctrlChat, bridge.selfChat);

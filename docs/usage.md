@@ -136,7 +136,7 @@
 | `sharedContextDir` | `""` | 团队共享 Git 仓库目录（后台防抖 `git pull --ff-only`） |
 | `plugins` / `dataDir` | `{}` / `"./data"` | 插件启停与运行状态持久化目录 |
 
-> 高级调优参数（通常保持默认即可）：`selfChat.turnTimeoutMs`（默认 `600000`，硬超时自动中止）、`selfChat.cardTtlMs`（`1800000`）、`selfChat.draftTtlMs`（`1800000`）、`selfChat.queueTtlMs`（`1800000`，排队超时自动清理）、`selfChat.followUpRemindMs`（`900000`）、`selfChat.delegationRemindMs`（`1800000`）、`selfChat.resultChars`/`softSplitChars`（`1500`/`2800`）、`chats.injectRecentContext`（`false`）、`chats.autoCompactThreshold`（`0.75`）、`chats.externalBotPrefix`（`"🤖 "`）、`chats.externalSanitizeMentions`（`"all"`）。完整字段校验以 [src/config.ts](../src/config.ts) 为准。
+> 高级调优参数（通常保持默认即可）：`selfChat.turnTimeoutMs`（默认 `600000`，硬超时自动中止）、`selfChat.cardTtlMs`（`1800000`）、`selfChat.draftTtlMs`（`1800000`）、`selfChat.queueTtlMs`（`1800000`，排队超时自动清理）、`selfChat.followUpRemindMs`（`900000`）、`selfChat.delegationRemindMs`（`1800000`）、`selfChat.resultChars`/`softSplitChars`（`1500`/`2800`）、`selfChat.longReplyFormat`（`"auto"` | `"html"` | `"md"` | `"both"`，默认 `"auto"`：结构化长报告/含表格自动转零脚本 `.html` 附件并内嵌 Markdown 原文折叠区）、`chats.injectRecentContext`（`false`）、`chats.autoCompactThreshold`（`0.75`）、`chats.externalBotPrefix`（`"🤖 "`）、`chats.externalSanitizeMentions`（`"all"`）。完整字段校验以 [src/config.ts](../src/config.ts) 为准。
 
 ---
 

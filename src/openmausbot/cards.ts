@@ -4,7 +4,7 @@ import type { NormalizedCardQuestion, OmbCardQuestion, OmbHttpError, OmbMessage 
 
 const SIMPLE_ALLOW_RE = /^(ok|okay|yes|y|allow|allow once|always|always allow|apply|approve|save|confirm|create|deny|no|cancel|reject|允许|仅此一次|总是允许|应用|保存|确认|拒绝|取消)$/i;
 const GENERIC_SPOKEN_RE = /^(?:running(?: a)? command|reading(?: a)? file|reading files?|searching(?: code| files?)?|editing(?: a)? file|writing(?: a)? file|checking|inspecting|analyzing|fetching|running tests?|executing|updating(?: a)? file|modifying(?: a)? file|thinking|working|正在执行命令|正在读取文件|正在搜索代码|正在修改文件|正在写入文件|正在处理)\.?$/i;
-const NOISY_COMMAND_SPOKEN_RE = /[\\/`]|(?:^|\s)--?[a-z0-9][a-z0-9-]*\b|&&|\|\||\b(?:npm|pnpm|yarn|node|npx|git|rg|grep|awk|sed|cat|ls|dir|cd|pwd|curl|wget|tsc|eslint|pytest|python|pwsh|powershell|bash|sh)\b/i;
+const NOISY_COMMAND_SPOKEN_RE = /[\\/`]|(?:^|\s)--?[a-z0-9][a-z0-9-]*\b|&&|\|\||\b(?:npm|pnpm|yarn|node|npx|git|rg|grep|awk|sed|cat|ls|dir|cd|pwd|curl|wget|tsc|eslint|pytest|python|pwsh|powershell|bash|sh)\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|^(?:running|calling|invoking|using|executing)\s+[a-z0-9_.:-]+$/i;
 
 const CHOICE_DIGIT_MAP: Record<string, number> = {
   '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,

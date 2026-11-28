@@ -12,6 +12,7 @@ import { formatDelegationResponse } from './delegation.ts';
 import { createAskDraftAndConfirm, parseAskProposal } from './follow-up.ts';
 import { allocateInboxRef } from './inbox.ts';
 import { compactChatCtx, rememberBounded, trimMapCap, unscopeMsgKey } from './mentions.ts';
+import { buildLongReplyFilename, buildReplyHtml, extractMarkdownTitle, pickLongReplyFormat } from './reply-html.ts';
 import type { BridgeChatContext, CompactChatContext, MsgRoute, OmbMessage, PrivateDraft } from './types.ts';
 
 const IMAGE_MIME: Record<string, string> = {
@@ -587,18 +588,40 @@ export async function deliverBotReply(
     }
   } else {
     const canAttach = bridge.supportsFiles();
-    const note = canAttach ? '\n\n📎 完整回复见下一条附件' : '';
+    const attachFormats: Array<'html' | 'md'> = canAttach ? pickLongReplyFormat(bodyCore, bridge.longReplyFormat) : [];
+    const docTitle = extractMarkdownTitle(bodyCore);
+    let note = '';
+    if (canAttach) {
+      if (effResult >= 800) {
+        const compactChars = bodyCore.replace(/\s+/g, '').length;
+        const sizeHint = compactChars >= 10_000
+          ? `约 ${(compactChars / 10_000).toFixed(1)} 万字`
+          : `约 ${compactChars} 字`;
+        const fmtLabel = attachFormats.length === 2
+          ? 'HTML + Markdown'
+          : (attachFormats[0] === 'html' ? 'HTML 排版版' : 'Markdown 版');
+        const titlePart = docTitle ? `《${clip(docTitle, 24)}》 · ` : '';
+        note = `\n\n📎 完整回复见下一条附件（${titlePart}${sizeHint} · ${fmtLabel}）`;
+      } else {
+        note = '\n\n📎 完整回复见下一条附件';
+      }
+    }
+    const previewBudget = (rawCap: number): number => (
+      canAttach && effResult >= 800
+        ? Math.min(Math.max(16, rawCap - note.length), Math.max(420, Math.floor(effResult * 0.55)))
+        : rawCap
+    );
     let out: string;
     let wasCut: boolean;
     if (badge) {
       const clipOverhead = fixedPrefix.length + badgeEffLen + 5 + tailSuffix.length;
-      const clipCap = Math.max(16, effResult - clipOverhead);
+      const clipCap = previewBudget(Math.max(16, effResult - clipOverhead));
       const clipped = mdClip(bodyCore, clipCap);
       wasCut = clipped.cut;
       const badgedClip = attachBotBadge(badge, clipped.text);
       out = `${fixedPrefix}${badgedClip}${clipped.cut ? note : ''}${tailSuffix}`;
     } else {
-      const clipCap = Math.max(20, effResult - tailSuffix.length);
+      const clipCap = previewBudget(Math.max(20, effResult - tailSuffix.length));
       const clipped = mdClip(`${fixedPrefix}${bodyCore}`, clipCap);
       wasCut = clipped.cut;
       out = `${clipped.text}${clipped.cut ? note : ''}${tailSuffix}`;
@@ -607,25 +630,67 @@ export async function deliverBotReply(
     if (sid) sentIds.push(sid);
 
     if (wasCut && canAttach) {
-      try {
-        fs.mkdirSync(bridge.inDir, { recursive: true });
-        const mdName = `${fileSafe(shownName) || 'reply'}.md`;
-        const mdPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}.md`);
-        const mdScan = scanAndRedactOutbound(`${privHead}${proHead}${bodyCore}${delegationTagSuffix}`);
-        if (mdScan.redacted) {
-          bridge.securityRedactions += mdScan.totalHits;
-          bridge.emitTelemetry('security_redacted', {
-            chatId: targetChatId || bridge.selfChat,
-            kind: 'file',
-            summary: `${mdName} count=${mdScan.totalHits} types=${mdScan.hits.map((h) => h.type).join(',')}`,
-          });
-        }
-        fs.writeFileSync(mdPath, `${mdScan.text}\n`);
-        await sendOutboundFile(bridge, mdPath, mdName, {
-          chatId: targetChatId,
-          ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
+      const rawDoc = `${privHead}${proHead}${bodyCore}${delegationTagSuffix}`;
+      const mdScan = scanAndRedactOutbound(rawDoc);
+      const htmlBodyScan = scanAndRedactOutbound(`${proHead}${bodyCore}${delegationTagSuffix}`);
+      if (mdScan.redacted || htmlBodyScan.redacted) {
+        const hitsCount = mdScan.totalHits || htmlBodyScan.totalHits;
+        const hitTypes = (mdScan.redacted ? mdScan.hits : htmlBodyScan.hits).map((h) => h.type).join(',');
+        bridge.securityRedactions += hitsCount;
+        bridge.emitTelemetry('security_redacted', {
+          chatId: targetChatId || bridge.selfChat,
+          kind: 'file',
+          summary: `${docTitle || shownName} count=${hitsCount} types=${hitTypes}`,
         });
-      } catch { /* 附件失败不影响正文 */ }
+      }
+      let sentFilesCount = 0;
+      let lastFileErr = '';
+      for (const fmt of attachFormats) {
+        const attachName = buildLongReplyFilename(bodyCore, shownName, fmt);
+        const tmpPath = path.join(bridge.inDir, `${fileSafe(shownName) || 'bot'}-${Date.now()}-${fmt}.${fmt}`);
+        try {
+          fs.mkdirSync(bridge.inDir, { recursive: true });
+          const fileBody = fmt === 'html'
+            ? buildReplyHtml({
+                markdown: htmlBodyScan.text,
+                botName: shownName,
+                title: docTitle || undefined,
+                originName: (isPrivDraft || isPolishDraft || isExternal) ? originName : '',
+                generatedAt: bridge.now(),
+              })
+            : `${mdScan.text}\n`;
+          fs.writeFileSync(tmpPath, fileBody, 'utf8');
+          const fileSentId = await sendOutboundFile(bridge, tmpPath, attachName, {
+            chatId: targetChatId,
+            ...(quoteReplyId ? { replyTo: quoteReplyId } : {}),
+          });
+          if (fileSentId) {
+            sentFilesCount += 1;
+          } else {
+            lastFileErr = 'sendFile returned null';
+            bridge.emitTelemetry('media_failed', {
+              chatId: targetChatId || bridge.selfChat || null,
+              summary: `long_reply ${attachName}: sendFile returned null`,
+            });
+          }
+        } catch (e) {
+          lastFileErr = formatOmbError(e);
+          console.warn('[omb-long-reply] 附件发送失败:', attachName, lastFileErr);
+          bridge.emitTelemetry('media_failed', {
+            chatId: targetChatId || bridge.selfChat || null,
+            summary: `long_reply ${attachName}: ${lastFileErr}`,
+          });
+        } finally {
+          try { fs.rmSync(tmpPath, { force: true }); } catch { /* ignore */ }
+        }
+      }
+      if (sentFilesCount === 0) {
+        await bridge.say(
+          `⚠️ 完整回复附件发送失败（${clip(lastFileErr || '未知原因', 80)}），已保留上方摘要。`,
+          { ...route, ombMsgId: null },
+          quoteReplyId,
+        );
+      }
     }
   }
   const firstSentId = sentIds[0] ?? null;

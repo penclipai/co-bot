@@ -1,3 +1,4 @@
+import { attachBotBadge } from '../core/security.ts';
 import { clip } from '../format.ts';
 import type { OpenMausBotBridge } from './bridge.ts';
 import { extractWidgetFallbackText, formatOmbError } from './cards.ts';
@@ -8,7 +9,7 @@ import { buildExternalChatCtx } from './collaborator-router.ts';
 import { dispatchToBot } from './dispatch.ts';
 import { reconcilePendingCards } from './inbox.ts';
 import { inQuietHours, rememberBounded, trimMapCap } from './mentions.ts';
-import { invalidateBotListCache } from './thread-manager.ts';
+import { invalidateBotListCache, isBurstChildThread } from './thread-manager.ts';
 import type {
   BridgeChatContext,
   MsgRoute,
@@ -33,6 +34,7 @@ async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: str
     if (msg.turnTerminal !== false || watch.doneSeen) watch.deliveredText = true;
     if (watch.doneSeen && watch.deliveredText) {
       bridge.activeBursts.delete(watch.burstId);
+      bridge.saveState();
     }
     await deliverBotReply(bridge, {
       botId: watch.botId,
@@ -53,6 +55,7 @@ async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: str
     const phase = String(msg.burst.phase || '');
     if (phase === 'failed' || phase === 'cancelled') {
       bridge.activeBursts.delete(watch.burstId);
+      bridge.saveState();
       if (!watch.deliveredText) {
         const failLines = Array.isArray(msg.burst.failed)
           ? msg.burst.failed.slice(0, 5).map((f) => `- ${f.title || '子任务'}：${f.reason || '失败'}`)
@@ -71,16 +74,46 @@ async function handleActiveBurstMessage(bridge: OpenMausBotBridge, threadId: str
           chatCtx: watch.chatCtx ?? null,
         });
       }
+    } else if (phase === 'running' || phase === 'merging') {
+      const now = bridge.now();
+      const maxUpdates = Math.max(1, Number(bridge.maxProgressUpdates) || 2);
+      const sentCount = Number(watch.progressSent) || 0;
+      const delayOk = (now - (watch.startedAt || now)) >= (Number(bridge.progressDelayMs) || 12_000);
+      const intervalOk = !watch.lastProgressAt || (now - watch.lastProgressAt) >= (Number(bridge.progressIntervalMs) || 25_000);
+      if (!watch.chatCtx?.silentProgress && sentCount < maxUpdates && delayOk && intervalOk) {
+        watch.progressSent = sentCount + 1;
+        watch.lastProgressAt = now;
+        const doneCount = Number(msg.burst.counts?.done ?? 0);
+        const totalCount = Number(msg.burst.total ?? msg.burst.requested ?? 0);
+        const progressBody = phase === 'merging'
+          ? '⏳ 并发子任务已完成，正在汇总结果…'
+          : (totalCount > 0
+            ? `⏳ 并发任务进度：已完成 ${doneCount}/${totalCount} 项…`
+            : '⏳ 并发任务执行中…');
+        const who = bridge.botPrefix(watch.botId, watch.botName, { isGroup: Boolean(watch.isGroup) });
+        const targetChatId = watch.chatCtx?.replyChatId || bridge.selfChat;
+        await bridge.say(who ? attachBotBadge(who, progressBody) : progressBody, {
+          botId: watch.botId,
+          botName: watch.botName,
+          threadId,
+          ...(watch.isGroup ? { isGroup: true } : {}),
+          ...(targetChatId ? { targetChatId } : {}),
+        });
+      }
     } else if (phase === 'done') {
       watch.doneSeen = true;
       if (watch.deliveredText) {
         bridge.activeBursts.delete(watch.burstId);
+        bridge.saveState();
       } else {
         // 等待紧随其后的合并文本到达，超时后自动清理防止悬挂
         const timer = setTimeout(() => {
           const cur = bridge.activeBursts.get(watch.burstId);
-          if (cur === watch) bridge.activeBursts.delete(watch.burstId);
-        }, 10_000);
+          if (cur === watch) {
+            bridge.activeBursts.delete(watch.burstId);
+            bridge.saveState();
+          }
+        }, 120_000);
         timer.unref?.();
       }
     }
@@ -148,6 +181,17 @@ async function handleProactiveMessage(bridge: OpenMausBotBridge, threadId: strin
   if (bridge.pendingThreads.has(threadId)) return;
 
   const owner = await bridge.resolveOwnerByThread(threadId);
+  if (isBurstChildThread(bridge, threadId)) {
+    if (messageNeedsInput(msg)) {
+      const cardBotId = owner?.id ?? threadId;
+      const cardIsGroup = Boolean(owner?.isGroup);
+      const cardBotName = bridge.displayBotName(cardBotId, owner?.name, { isGroup: cardIsGroup });
+      await emitCard(bridge, cardBotId, cardBotName, threadId, msg, { isGroup: cardIsGroup, chatCtx: null });
+      return;
+    }
+    if (msg.id) rememberBounded(bridge.deliveredOmbIds, msg.id);
+    return;
+  }
   const botId = owner?.id ?? threadId;
   const isGroup = Boolean(owner?.isGroup);
   const botName = bridge.displayBotName(botId, owner?.name, { isGroup });
@@ -320,7 +364,7 @@ export async function trySteerQueueItem(
     if (res?.queued) {
       const cmdTarget = botCommandTarget(bridge, botId, botName, { isGroup });
       const queueHint = typeof onQueuedText === 'function'
-        ? `\n回复 \`${cmdTarget} steer\` 立即插队，或 \`${cmdTarget} cancel\` 取消排队。`
+        ? `\n回复 \`${cmdTarget} cancel\` 可取消排队。`
         : '';
       const msg = (typeof onQueuedText === 'function'
         ? onQueuedText(res)

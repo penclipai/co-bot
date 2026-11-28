@@ -20,6 +20,7 @@ import type {
   CollaboratorPolicy,
   InboundAttachment,
   InboundEvent,
+  LongReplyFormat,
   OutboundMention,
   ProjectConfig,
   ProjectRef,
@@ -45,6 +46,13 @@ export interface OmbTaskSummary {
   busy?: boolean;
   botId?: string;
   botName?: string;
+  openedBy?: {
+    botId?: string;
+    name?: string;
+    threadId?: string;
+    burstId?: string;
+    at?: number;
+  };
   updatedAt?: number;
   lastThreadOrderAt?: number;
   createdAt?: number;
@@ -461,6 +469,8 @@ export interface ActiveBurstWatch {
   isGroup?: boolean;
   chatCtx?: CompactChatContext | null;
   startedAt: number;
+  lastProgressAt?: number;
+  progressSent?: number;
   deliveredText?: boolean;
   doneSeen?: boolean;
 }
@@ -523,6 +533,7 @@ export interface TurnTrackerHandle {
   isGroup: boolean;
   chatCtx: CompactChatContext | null;
   sawBusy: boolean;
+  addSteeredRequest?: (reqMsgId: string | null, sendId?: string | null) => void;
   onMessage: (msg: OmbMessage) => void;
   complete: (jobState?: string | null) => Promise<void>;
   dispose: () => void;
@@ -667,6 +678,7 @@ export interface BridgeOptions {
   outboundBufferTtlMs?: number;
   resultChars?: number;
   softSplitChars?: number;
+  longReplyFormat?: LongReplyFormat;
   followUpWindowMs?: number;
   hideChiefPrefix?: boolean;
   imageBatchMs?: number;

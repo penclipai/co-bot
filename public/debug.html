@@ -219,7 +219,8 @@
         if (omb?.error) addLine(ombBox, '错误', omb.error);
       }
       if (st.bridge) {
-        addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}（排队 ${st.bridge.queuedCount ?? 0}）`);
+        const burstRunText = st.bridge.activeBursts > 0 ? ` / 并发 ${st.bridge.activeBursts}` : '';
+        addLine(ombBox, 'SSE / 活跃轮次', `${st.bridge.connected ? '已连接' : '重连中'} / ${st.bridge.activeTurns}（排队 ${st.bridge.queuedCount ?? 0}）${burstRunText}`);
         addLine(ombBox, '连续对话粘性', st.bridge.stickyActive ? '激活中' : '未激活');
         const qh = st.bridge.quietHours;
         if (qh) {
@@ -403,6 +404,7 @@
       for (const p of (st.plugins || [])) {
         const tr = document.createElement('tr');
         const td1 = document.createElement('td');
+        td1.className = 'nowrap';
         td1.textContent = p.name;
         const td2 = document.createElement('td');
         td2.className = 'nowrap';
